@@ -495,31 +495,41 @@ class CoCreationLLMService:
         return _proposal_planning._guidance_confusion_request(message)
 
     async def review_proposal_clarification(self, *args, **kwargs):
-        return await _proposal_planning._review_proposal_clarification(*args, **kwargs)
+        with self.activated():
+            return await _proposal_planning._review_proposal_clarification(*args, **kwargs)
 
     def review_proposal_requirements(self, *args, **kwargs):
-        return _proposal_planning._review_proposal_requirements(*args, **kwargs)
+        with self.activated():
+            return _proposal_planning._review_proposal_requirements(*args, **kwargs)
 
     def generate_verified_proposal_failure_analysis(self, *args, **kwargs):
-        return _proposal_planning._generate_verified_proposal_failure_analysis(*args, **kwargs)
+        with self.activated():
+            return _proposal_planning._generate_verified_proposal_failure_analysis(*args, **kwargs)
 
     def generate_plain_chat(self, *args, **kwargs):
-        return _chat_generation._generate_plain_chat_sync(*args, **kwargs)
+        with self.activated():
+            return _chat_generation._generate_plain_chat_sync(*args, **kwargs)
 
     async def translate_with_model_fallback(self, *args, **kwargs):
-        return await _translations._translate_with_model_fallback(*args, **kwargs)
+        with self.activated():
+            return await _translations._translate_with_model_fallback(*args, **kwargs)
 
     async def review_ordinary_intent_with_recovery(self, *args, **kwargs):
-        return await _intent_and_review._review_ordinary_intent_with_recovery(*args, **kwargs)
+        with self.activated():
+            return await _intent_and_review._review_ordinary_intent_with_recovery(*args, **kwargs)
 
     def validate_manual_edit_pair(self, *args, **kwargs):
-        return _chat_generation._validate_manual_edit_pair_payload(*args, **kwargs)
+        with self.activated():
+            return _chat_generation._validate_manual_edit_pair_payload(*args, **kwargs)
 
     def safe_grounding_chat_reply(self, *args, **kwargs):
-        return _chat_generation._safe_grounding_chat_reply(*args, **kwargs)
+        with self.activated():
+            return _chat_generation._safe_grounding_chat_reply(*args, **kwargs)
 
     def server_snapshot_fallback_message(self, *args, **kwargs):
-        return _chat_generation._server_snapshot_fallback_message(*args, **kwargs)
+        with self.activated():
+            return _chat_generation._server_snapshot_fallback_message(*args, **kwargs)
 
     def apply_deterministic_guidance_fallback(self, *args, **kwargs):
-        return _proposal_planning._apply_deterministic_guidance_fallback(*args, **kwargs)
+        with self.activated():
+            return _proposal_planning._apply_deterministic_guidance_fallback(*args, **kwargs)

@@ -273,7 +273,7 @@ def _validate_named_entity_relations(text, facts):
     label = '(?<![A-Za-z0-9])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9])'
     relation = '(?:is\\s+|are\\s+)?(?:near|close\\s+to|adjacent\\s+to|beside|next\\s+to)|靠近|相邻|在.{0,4}旁边|旁边|紧挨'
     pair_pattern = re.compile(f'(?P<first>{label})\\s*(?:与|和|跟)?\\s*(?:{relation})\\s*(?P<second>{label})', flags=re.IGNORECASE)
-    box_water_patterns = (re.compile(f'(?P<box>\\bB\\d+\\b)\\s*(?:is\\s+|在)?(?:adjacent\\s+to|beside|next\\s+to|相邻|紧挨|紧贴|贴着|靠着|在.{{0,4}}旁边)\\s*(?:the\\s+)?(?:water|水域|水边|水)', flags=re.IGNORECASE), re.compile(f'(?:the\\s+)?(?:water|水域|水边|水)\\s*(?:is\\s+|在)?(?:adjacent\\s+to|beside|next\\s+to|相邻|紧挨|紧贴|贴着|靠着|在.{{0,4}}旁边)\\s*(?P<box>\\bB\\d+\\b)', flags=re.IGNORECASE))
+    box_water_patterns = (re.compile('(?P<box>(?<![A-Za-z0-9_])B\\d+(?![A-Za-z0-9_]))\\s*(?:is\\s+|在)?(?:adjacent\\s+to|beside|next\\s+to|相邻|紧挨|紧贴|贴着|靠着|在.{0,4}旁边)\\s*(?:the\\s+)?(?:water|水域|水边|水)', flags=re.IGNORECASE), re.compile('(?:the\\s+)?(?:water|水域|水边|水)\\s*(?:is\\s+|在)?(?:adjacent\\s+to|beside|next\\s+to|相邻|紧挨|紧贴|贴着|靠着|在.{0,4}旁边)\\s*(?P<box>(?<![A-Za-z0-9_])B\\d+(?![A-Za-z0-9_]))', flags=re.IGNORECASE))
     clauses = re.split('[,，;；.!?。！？\\r\\n]+', str(text or ''))
     for clause in clauses:
         if not clause.strip() or _entity_claim_is_non_current(clause):
@@ -339,21 +339,21 @@ def _check_map_grounding_texts(texts, rows, *, historical_reference=False, entit
                 escaped = re.escape(label)
                 before = f'{escaped}(?:的)?(?:那(?:个)?|这(?:个)?|一(?:个)?)?\\s*{pattern}'
                 after = f'{pattern}(?:在|位于|处在|挪到(?:了)?|移到(?:了)?|到了|in|at|is in)?\\s*{escaped}'
-                if re.search(before, text) or re.search(after, text):
+                if any((not _adjacency_claim_is_negated_or_non_current(text, match.start(), match.end()) for regex in (before, after) for match in re.finditer(regex, text))):
                     raise ValueError(f'The reply assigns a {entity_name} to {label}, which conflicts with deterministic map facts.')
     if not any((box['orthogonallyAdjacentToWater'] for box in facts['boxes'])):
         current_box_water_patterns = ('(?:现在|当前).{0,18}(?:箱子|箱|它).{0,12}(?:贴着|紧贴|紧邻|挨着|靠着)(?:水|水边|水域)', '(?:箱子|箱).{0,16}(?:贴着|紧贴|紧邻|挨着|靠着)(?:水|水边|水域)', '(?:box(?:es)?|crate).{0,28}(?:next to|adjacent to|beside|against).{0,18}water')
-        if any((re.search(pattern, text) for pattern in current_box_water_patterns)):
+        if any((not _adjacency_claim_is_negated_or_non_current(text, match.start(), match.end()) for pattern in current_box_water_patterns for match in re.finditer(pattern, text))):
             raise ValueError('The reply claims that a current box touches water, which conflicts with deterministic map facts.')
     target_positions = facts['targets']
     close_box_target = any((abs(box['row'] - target['row']) + abs(box['column'] - target['column']) <= 2 for box in facts['boxes'] for target in target_positions))
     close_player_target = any((abs(facts['player']['row'] - target['row']) + abs(facts['player']['column'] - target['column']) <= 2 for target in target_positions))
     closeness = '(?:很近|靠近|紧挨|相邻|close\\s+to|near|adjacent\\s+to)'
-    box_target_claim = re.search(f'(?:箱子|箱|boxes?|crates?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:目标点|目标|终点|targets?|goals?)|(?:目标点|目标|终点|targets?|goals?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:箱子|箱|boxes?|crates?)', text)
-    if not close_box_target and box_target_claim:
+    box_target_pattern = f'(?:箱子|箱|boxes?|crates?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:目标点|目标|终点|targets?|goals?)|(?:目标点|目标|终点|targets?|goals?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:箱子|箱|boxes?|crates?)'
+    if not close_box_target and any((not _adjacency_claim_is_negated_or_non_current(text, match.start(), match.end()) for match in re.finditer(box_target_pattern, text))):
         raise ValueError('The reply claims that a current box is close to a target, which conflicts with deterministic map facts.')
-    player_target_claim = re.search(f'(?:玩家|起点|players?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:目标点|目标|终点|targets?|goals?)|(?:目标点|目标|终点|targets?|goals?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:玩家|起点|players?)', text)
-    if not close_player_target and player_target_claim:
+    player_target_pattern = f'(?:玩家|起点|players?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:目标点|目标|终点|targets?|goals?)|(?:目标点|目标|终点|targets?|goals?)\\s*(?:与|和|跟|is\\s+|are\\s+)?{closeness}\\s*(?:玩家|起点|players?)'
+    if not close_player_target and any((not _adjacency_claim_is_negated_or_non_current(text, match.start(), match.end()) for match in re.finditer(player_target_pattern, text))):
         raise ValueError('The reply claims that the current player is close to a target, which conflicts with deterministic map facts.')
 
 def _strip_invalid_stage_grounding_sentences(text, rows, *, historical_reference=False, entity_bindings=None):
@@ -457,19 +457,57 @@ def _chat_validation_mode(conversation, stage_context=None, *, stage_opening=Fal
     return 'ordinary_chat'
 
 def _tile_from_claim(value):
-    value = str(value or '').casefold()
+    value = re.sub('^(?:a|an|the)\\s+', '', str(value or '').strip().casefold())
     return {'#': '#', '墙': '#', '墙体': '#', 'wall': '#', '.': '.', '地板': '.', '空地': '.', 'floor': '.', 'ground': '.', '@': '@', '水': '@', '水域': '@', 'water': '@', 'p': 'p', '玩家': 'p', '起点': 'p', 'player': 'p', 'start': 'p', 's': 's', '箱': 's', '箱子': 's', 'box': 's', 'crate': 's', 't': 't', '目标': 't', '目标点': 't', 'target': 't', 'goal': 't'}.get(value)
+
+def _clause_bounds(text, start, end=None):
+    """Return the [clause_start, clause_end) slice around a matched grounding span."""
+    value = str(text or '')
+    match_end = start if end is None else end
+    delimiters = '[,，;；.!?。！？\\r\\n]'
+    clause_start = 0
+    for delimiter in re.finditer(delimiters, value[:start]):
+        clause_start = delimiter.end()
+    after_match = re.search(delimiters, value[match_end:])
+    clause_end = match_end + after_match.start() if after_match is not None else len(value)
+    return (clause_start, clause_end)
+
+def _sentence_start_before(text, start):
+    value = str(text or '')
+    sentence_start = 0
+    for delimiter in re.finditer('[;；.!?。！？\\r\\n]', value[:start]):
+        sentence_start = delimiter.end()
+    return sentence_start
+
+def _text_has_historical_marker(value):
+    return bool(re.search('(?:\\b(?:was|were|changed|turned|became|had\\s+been|used\\s+to|previously|formerly|earlier|originally|last\\s+version|previous\\s+(?:version|draft|stage|map)|prior\\s+(?:version|draft|stage|map))\\b|\\u4e4b\\u524d|\\u539f\\u672c|\\u539f\\u5148|\\u66fe\\u7ecf|\\u8fc7\\u53bb|\\u65e7\\u7248|\\u4e0a\\u4e00\\u7248|\\u4e0a\\u4e2a\\u7248\\u672c|\\u6700\\u521d|\\u53d8\\u6210\\u4e86|\\u6539\\u6210\\u4e86)', str(value or ''), flags=re.IGNORECASE))
+
+def _text_has_negation_marker(value):
+    return bool(re.search("(?<![A-Za-z0-9_])(?:not|no|never|isn't|aren't)(?![A-Za-z0-9_])|(?:并没有|不在|没有|不是|并非|未)", str(value or ''), flags=re.IGNORECASE))
+
+def _adjacency_claim_is_negated_or_non_current(text, start, end):
+    clause_start, clause_end = _clause_bounds(text, start, end)
+    clause = str(text or '')[clause_start:clause_end]
+    if _text_has_negation_marker(clause):
+        return True
+    if _text_has_historical_marker(str(text or '')[_sentence_start_before(text, start):clause_end]):
+        return True
+    cleaned_clause = re.sub('\\b(?:next|adjacent|close)\\s+to\\b', ' ', clause, flags=re.IGNORECASE)
+    return _entity_claim_is_non_current(cleaned_clause, len(cleaned_clause), len(cleaned_clause))
 
 def _validate_coordinate_claims(text, rows, *, entity_bindings=None):
     """Check explicit coordinate/tile statements before they reach a proposal card."""
     if not rows:
         return
-    claim_pattern = re.compile('\\(\\s*(\\d+)\\s*[,，]\\s*(\\d+)\\s*\\)\\s*(?:是|为|属于|is|was|contains|contains the|has)\\s*(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|wall|floor|ground|water|box|crate|target|goal|player|start|#|\\.|@|p|s|t)', flags=re.IGNORECASE)
-    transition_pattern = re.compile('\\(\\s*(\\d+)\\s*[,，]\\s*(\\d+)\\s*\\)\\s*.{0,18}?(?:从|由|from)\\s*(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|wall|floor|ground|water|box|crate|target|goal|player|start|#|\\.|@|p|s|t)\\s*(?:变成|改成|换成|变为|to|into|becomes?)\\s*(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|wall|floor|ground|water|box|crate|target|goal|player|start|#|\\.|@|p|s|t)', flags=re.IGNORECASE)
+    tile_token = '(?:墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|(?:(?:a|an|the)\\s+)?(?:wall|floor|ground|water|box|crate|target|goal|player|start)(?![A-Za-z0-9_])|#|\\.|@|(?<![A-Za-z0-9_])(?:p|s|t)(?![A-Za-z0-9_]))'
+    claim_pattern = re.compile(f'[（(]\\s*(\\d+)\\s*[,，]\\s*(\\d+)\\s*[)）]\\s*(?:是|为|属于|is|contains(?:\\s+the)?|has)\\s*({tile_token})', flags=re.IGNORECASE)
+    transition_pattern = re.compile(f'[（(]\\s*(\\d+)\\s*[,，]\\s*(\\d+)\\s*[)）]\\s*.{{0,18}}?(?:从|由|from)\\s*({tile_token})\\s*(?:变成|改成|换成|变为|to|into|becomes?)\\s*({tile_token})', flags=re.IGNORECASE)
     height = len(rows)
     neighbor_prefix = re.compile(r'(?:\badjacent\s+to|\bnext\s+to|\bclose\s+to|\bbeside|\bnear|靠近|相邻|紧挨|旁边)\s*$', flags=re.IGNORECASE)
     for match in claim_pattern.finditer(text):
-        if _entity_claim_is_non_current(text, match.start(), match.end()):
+        clause_start, clause_end = _clause_bounds(text, match.start(), match.end())
+        sentence_window = text[_sentence_start_before(text, match.start()):clause_end]
+        if _entity_claim_is_non_current(text, match.start(), match.end()) or _text_has_historical_marker(sentence_window):
             continue
         if neighbor_prefix.search(text[max(0, match.start() - 24):match.start()]):
             continue
@@ -481,6 +519,10 @@ def _validate_coordinate_claims(text, rows, *, entity_bindings=None):
         if expected is not None and actual != expected:
             raise ValueError(f'The reply claims row {row}, column {column} is {expected!r}, but deterministic map facts say it is {actual!r}.')
     for match in transition_pattern.finditer(text):
+        clause_start, clause_end = _clause_bounds(text, match.start(), match.end())
+        sentence_window = text[_sentence_start_before(text, match.start()):clause_end]
+        if _entity_claim_is_non_current(text, match.start(), match.start()) or _text_has_historical_marker(sentence_window):
+            continue
         row, column = (int(match.group(1)), int(match.group(2)))
         before = _tile_from_claim(match.group(3))
         after = _tile_from_claim(match.group(4))
@@ -508,7 +550,7 @@ def _entity_claim_is_non_current(text, start=0, end=None):
     if delimiter is not None:
         lookbehind_start += delimiter.end()
     window = value[lookbehind_start:end]
-    return bool(re.search('(?:\\bif\\b|\\bwhen\\b|\\bwould\\b|\\bwill\\b|\\bmove(?:s|d|ing)?\\b|\\bpush(?:es|ed|ing)?\\b|\\bto\\b|\\btoward(?:s)?\\b|\\bfrom\\b|\\u5982\\u679c|\\u82e5|\\u5047\\u8bbe|\\u5c06|\\u4f1a|\\u79fb\\u52a8|\\u63a8\\u5230|\\u63a8\\u5411|\\u6539\\u5230|\\u53d8\\u6210)', window, flags=re.IGNORECASE))
+    return _text_has_historical_marker(window) or bool(re.search('(?:\\bif\\b|\\bwhen\\b|\\bwould\\b|\\bwill\\b|\\bmove(?:s|d|ing)?\\b|\\bpush(?:es|ed|ing)?\\b|\\bto\\b|\\btoward(?:s)?\\b|\\bfrom\\b|\\u5982\\u679c|\\u82e5|\\u5047\\u8bbe|\\u5c06|\\u4f1a|\\u79fb\\u52a8|\\u63a8\\u5230|\\u63a8\\u5411|\\u6539\\u5230|\\u53d8\\u6210)', window, flags=re.IGNORECASE))
 
 def _entity_coordinate_claims(text, rows):
     """Yield only explicit entity-to-coordinate claims inside one clause.
@@ -1325,21 +1367,43 @@ def _route_relation_candidates_without_grounding(text, rows, entity_bindings=Non
             candidates.append({'text': clause.strip() if len(anchors) == 2 else clause[source['start']:destination['end']].strip(' ,，;；'), 'from': dict(source['point']), 'to': dict(destination['point'])})
     return candidates
 
+def _find_unoccupied_span(visible_body, needle, occupied_ranges):
+    if not needle:
+        return None
+    offset = 0
+    while True:
+        start = visible_body.find(needle, offset)
+        if start < 0:
+            return None
+        end = start + len(needle)
+        if not any((start < occupied_end and end > occupied_start for occupied_start, occupied_end in occupied_ranges)):
+            return (start, end)
+        offset = start + 1
+
 def _recover_coordinate_links(body, rows, existing=None, entity_bindings=None):
     """Recover up to twelve local route links from grounded visible prose."""
     if not rows:
         return list(existing or [])
+    visible_body = str(body or '')
     links = list(existing or [])
+    occupied_ranges = []
+    for item in links:
+        span = _find_unoccupied_span(visible_body, item.get('text', ''), occupied_ranges)
+        if span is not None:
+            occupied_ranges.append(span)
     seen = {(item['text'], item['from']['row'], item['from']['column'], item['to']['row'], item['to']['column']) for item in links}
     for candidate in _route_relation_candidates_without_grounding(body, rows, entity_bindings):
+        if not _coordinate_link_text_is_complete_clause(candidate.get('text')):
+            continue
         if not _coordinate_link_is_grounded(candidate, rows, entity_bindings):
             continue
         key = (candidate['text'], candidate['from']['row'], candidate['from']['column'], candidate['to']['row'], candidate['to']['column'])
         if key in seen:
             continue
-        overlaps_existing = any((item['text'] in candidate['text'] or candidate['text'] in item['text'] for item in links))
-        if overlaps_existing:
+        span = _find_unoccupied_span(visible_body, candidate['text'], occupied_ranges)
+        if span is None:
             continue
+        occupied_ranges.append(span)
         seen.add(key)
         links.append(candidate)
         if len(links) >= COORDINATE_LINK_LIMIT:
@@ -1356,13 +1420,10 @@ def _filter_coordinate_links(value, body, rows=None, entity_bindings=None):
             continue
         if not _coordinate_link_is_grounded(link, rows, entity_bindings):
             continue
-        start = visible_body.find(link['text'])
-        if start < 0:
+        span = _find_unoccupied_span(visible_body, link['text'], occupied_ranges)
+        if span is None:
             continue
-        end = start + len(link['text'])
-        if any((start < occupied_end and end > occupied_start for occupied_start, occupied_end in occupied_ranges)):
-            continue
-        occupied_ranges.append((start, end))
+        occupied_ranges.append(span)
         filtered.append(link)
     return filtered
 

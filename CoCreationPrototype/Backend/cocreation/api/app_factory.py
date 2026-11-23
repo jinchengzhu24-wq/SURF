@@ -32,6 +32,7 @@ def create_app(services: CoCreationServices | None = None) -> FastAPI:
     @asynccontextmanager
     async def app_lifespan(target_app: FastAPI):
         app_services: CoCreationServices = target_app.state.services
+        app_services.repository.initialize()
         if not app_services.settings.sweeper_enabled:
             yield
             return

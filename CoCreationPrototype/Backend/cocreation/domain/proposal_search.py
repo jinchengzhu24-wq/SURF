@@ -199,6 +199,8 @@ class SearchState:
                 # seal a water tile as a wall does not have to expose an
                 # invalid intermediate floor map to the search.
                 operators.update({"remove_water", "add_wall"})
+            elif primitive.operator == "wall_to_water":
+                operators.update({"remove_wall", "add_water"})
             elif primitive.operator.startswith("compensate_"):
                 component = primitive.operator.removeprefix("compensate_")
                 operators.update({"remove_" + component, "add_" + component})
@@ -531,18 +533,19 @@ def validate_revision_plan_against_map(base_rows, plan, entity_bindings=None):
                 raise RevisionPlanError(
                     f"strategy {index} requires an invalid shell or void transition."
                 )
-            operator = _transition_operator(before, after)
-            if operator is None or operator not in strategy.operators:
+            required_operators = _required_operators(before, after)
+            if not required_operators or not set(required_operators).issubset(strategy.operators):
                 raise RevisionPlanError(
                     f"strategy {index} cannot realize required transition {before!r}->{after!r}."
                 )
-            if operator in {"add_wall", "remove_wall"} and "walls" in strategy.preserve:
+            if any(op in {"add_wall", "remove_wall"} for op in required_operators) and "walls" in strategy.preserve:
                 raise RevisionPlanError(f"strategy {index} preserves walls but edits a wall.")
-            component = OPERATOR_COMPONENT.get(operator)
-            if component and component in strategy.preserve:
-                raise RevisionPlanError(
-                    f"strategy {index} preserves {component} but edits it."
-                )
+            for op in required_operators:
+                component = OPERATOR_COMPONENT.get(op)
+                if component and component in strategy.preserve:
+                    raise RevisionPlanError(
+                        f"strategy {index} preserves {component} but edits it."
+                    )
             if strategy.focus and not _inside_focus(strategy.focus, x, y):
                 raise RevisionPlanError(
                     f"strategy {index} required transition is outside its focus."
@@ -554,8 +557,9 @@ def _minimum_changed_cells(strategy):
     entity_operators = {"move_player", "move_box", "move_target"}
     if strategy.required_transitions:
         required_operators = {
-            _transition_operator(before, after)
+            op
             for _, _, before, after in strategy.required_transitions
+            for op in _required_operators(before, after)
         }
         if required_operators.intersection(entity_operators):
             return max(2, len(strategy.required_transitions))
@@ -565,6 +569,15 @@ def _minimum_changed_cells(strategy):
     if set(strategy.operators).intersection(entity_operators):
         return 2
     return 1
+
+
+def _required_operators(before, after):
+    operator = _transition_operator(before, after)
+    if operator == "water_to_wall":
+        return ("remove_water", "add_wall")
+    if operator == "wall_to_water":
+        return ("remove_wall", "add_water")
+    return (operator,) if operator is not None else ()
 
 
 def _transition_operator(before, after):
@@ -579,6 +592,8 @@ def _transition_operator(before, after):
         (".", "t"): "move_target",
         (".", "@"): "add_water",
         ("@", "."): "remove_water",
+        ("@", "#"): "water_to_wall",
+        ("#", "@"): "wall_to_water",
     }.get((before, after))
 
 
@@ -683,7 +698,7 @@ def search_revision_plan(
                         deadline=deadline,
                         clock=clock,
                     )
-                    if len(verified) >= maximum_valid_candidates:
+                    if diagnostics["deadlineReached"] or len(verified) >= maximum_valid_candidates:
                         break
                 if depth < BEAM_DEPTH:
                     used_positions = frozenset().union(*(
@@ -768,10 +783,11 @@ def _generate_primitives(
     entity_anchors = [*positions["p"], *positions["s"], *positions["t"]]
     primitives = []
     allowed_operators = set(strategy.operators)
+    effective_preserved = set(preserved_components or ()) | set(strategy.preserve)
     if (
         {"remove_water", "add_wall"}.issubset(allowed_operators)
-        and "water" not in set(preserved_components or ())
-        and "walls" not in set(preserved_components or ())
+        and "water" not in effective_preserved
+        and "walls" not in effective_preserved
     ):
         # A water-to-wall request is a real one-cell replacement, not two
         # unrelated edits.  Generate it atomically from the base Stage so the
@@ -783,7 +799,19 @@ def _generate_primitives(
                 True,
                 _focus_distance(strategy.focus, x, y),
             ))
-    effective_preserved = set(preserved_components or ()) | set(strategy.preserve)
+    if (
+        {"remove_wall", "add_water"}.issubset(allowed_operators)
+        and "water" not in effective_preserved
+        and "walls" not in effective_preserved
+    ):
+        for x, y in _candidate_cells(rows, strategy.focus, {"#"}):
+            if (x, y) not in shell:
+                primitives.append(Primitive(
+                    "wall_to_water",
+                    ((x, y, "#", "@"),),
+                    True,
+                    _focus_distance(strategy.focus, x, y),
+                ))
     for operator in strategy.operators:
         if movement_requirement and operator != movement_requirement["operator"]:
             continue
@@ -1029,12 +1057,22 @@ def _evaluate_state(
     try:
         validation = proposal_validator(list(state.rows))
         diagnostics["solvedCandidates"] += 1
+    except TimeoutError:
+        diagnostics["solverRejectedCandidates"] += 1
+        _count_failure(diagnostics, "TimeoutError")
+        diagnostics["deadlineReached"] = True
+        return
     except Exception as exception:
         diagnostics["solverRejectedCandidates"] += 1
         _count_failure(diagnostics, _safe_failure_code(exception))
         return
     operators = tuple(sorted(state.operators))
-    metric_matches = _metric_matches(strategy.metric_goals, baseline_metrics, validation, deadline=deadline, clock=clock)
+    try:
+        metric_matches = _metric_matches(strategy.metric_goals, baseline_metrics, validation, deadline=deadline, clock=clock)
+    except TimeoutError:
+        _count_failure(diagnostics, "TimeoutError")
+        diagnostics["deadlineReached"] = True
+        return
     if metric_matches != len(strategy.metric_goals):
         _count_failure(diagnostics, "metric_goal_not_met")
         return
@@ -1157,11 +1195,38 @@ def _player_reachable(rows, start):
 
 
 def _connected_outer_shell(rows):
+    height = len(rows)
+    if height == 0:
+        return set()
+    void_pending = []
+    exterior_void = set()
+    for y, row in enumerate(rows):
+        row_width = len(row)
+        for x, tile in enumerate(row):
+            if tile == " " and (x in {0, row_width - 1} or y in {0, height - 1}):
+                void_pending.append((x, y))
+    while void_pending:
+        position = void_pending.pop()
+        if position in exterior_void:
+            continue
+        exterior_void.add(position)
+        x, y = position
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= ny < height and 0 <= nx < len(rows[ny]) and rows[ny][nx] == " " and (nx, ny) not in exterior_void:
+                void_pending.append((nx, ny))
     pending = []
     visited = set()
     for y, row in enumerate(rows):
+        row_width = len(row)
         for x, tile in enumerate(row):
-            if tile == "#" and (x in {0, WIDTH - 1} or y in {0, HEIGHT - 1}):
+            if tile != "#":
+                continue
+            on_edge = x in {0, row_width - 1} or y in {0, height - 1}
+            touches_void = any(
+                (nx, ny) in exterior_void
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
+            )
+            if on_edge or touches_void:
                 pending.append((x, y))
     while pending:
         position = pending.pop()
@@ -1170,7 +1235,7 @@ def _connected_outer_shell(rows):
         visited.add(position)
         x, y = position
         for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-            if 0 <= nx < WIDTH and 0 <= ny < HEIGHT and rows[ny][nx] == "#":
+            if 0 <= ny < height and 0 <= nx < len(rows[ny]) and rows[ny][nx] == "#":
                 pending.append((nx, ny))
     return visited
 

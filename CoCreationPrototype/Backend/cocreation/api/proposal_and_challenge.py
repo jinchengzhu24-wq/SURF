@@ -14,6 +14,7 @@ from cocreation.domain.revision_workflow import SemanticConstraintError
 from cocreation.llm.facade import (
     KIMI_MODEL,
     LLMExecutionResult,
+    LLMServiceError,
     _sanitize_visible_model_text,
     _validate_map_grounding_texts,
     _visible_chinese_language_issue,
@@ -1048,6 +1049,7 @@ def _verified_recovery_suggestion_execution(
         proposal_diagnostics={
             'source': 'verified_recovery_replay',
             'recoverySuggestionId': suggestion_id,
+            'selectedStrategyIndex': strategy_index,
             'validation': validation.as_dict() if hasattr(validation, 'as_dict') else {},
             'mechanismEvidence': hidden.get('mechanismEvidence') or {},
         },
@@ -1129,9 +1131,17 @@ def _validate_message_action_payload(payload):
         raise ApiError(400, 'INVALID_MESSAGE_ACTION', 'A proposal request cannot also be a revision-card action.')
     if payload.exitChallenge:
         raise ApiError(409, 'CHALLENGE_EXIT_UNSUPPORTED', 'An active proposal challenge must be resolved through the conversation.')
-    if payload.challengeChoice is not None:
-        expected = {'是', 'yes'} if payload.challengeChoice == 'ai' else {'否', 'no'}
-        if action != 'continue_challenge' or payload.content.strip().lower() not in expected:
+    challenge_choice = getattr(payload, 'challengeChoice', None)
+    if challenge_choice is not None:
+        if challenge_choice == 'ai':
+            choice_matches = payload.content.strip().lower() in {'是', 'yes'}
+        elif challenge_choice == 'user':
+            choice_matches = payload.content.strip().lower() in {'否', 'no'}
+        elif challenge_choice == 'retain_current':
+            choice_matches = _challenge_choice(payload.content, 'zh-CN') == 'retain_current'
+        else:
+            choice_matches = False
+        if action != 'continue_challenge' or not choice_matches:
             raise ApiError(400, 'INVALID_MESSAGE_ACTION', 'The challenge choice does not match its button.')
     if action in {'none', 'continue_challenge'} and source_turn_id:
         raise ApiError(400, 'INVALID_MESSAGE_ACTION', 'A source turn is only valid for a card action.')
@@ -1403,6 +1413,29 @@ def _proposal_request_for_message_key(database, session_id, message_key):
 def _challenge_choice(value, language):
     raw = str(value or '').strip().casefold()
     normalized = re.sub('[\\s,.!?。！？]+', '', raw)
+    retain = {
+        '保留现状',
+        '保持现状',
+        '维持现状',
+        '先不改',
+        '暂不改',
+        '暂不修改',
+        '不修改现状',
+        '保留当前现状',
+        '保留当前设计',
+        'retaincurrent',
+        'keepcurrent',
+        'keepcurrentdesign',
+        'keepcurrentstage',
+        'keepasitis',
+        'dontchange',
+        'do_not_change',
+    }
+    if normalized in retain or re.search(
+        r'(?:保留现状|保持现状|维持现状|先不改|暂不改|暂不修改|不改了|keep\s+current|retain\s+current|keep\s+as\s+is)',
+        raw,
+    ):
+        return 'retain_current'
     yes = {'是', '是的', '可以', '沿用', '继续沿用', 'yes', 'yesplease', 'useyourapproach'}
     no = {'否', '不是', '不要', '不沿用', '用我的', 'no', 'noplease', 'usemyreason'}
     if normalized in no:
@@ -1447,16 +1480,23 @@ def _enforce_challenge_reason_execution(execution, classification, user_reason, 
     if relation == 'unclear' or merit == 'unclear':
         guidance = dict(execution.guidance or {})
         guidance['proposalOffer'] = None
-        if (
+        challenge_id = (active_disagreement or {}).get('challengeId') or (challenge_context or {}).get('challengeId')
+        has_active_disagreement = (
             isinstance(active_disagreement, dict)
             and active_disagreement.get('subject') == 'ai_revision_challenge'
             and active_disagreement.get('status') == 'active'
-        ):
+        )
+        if has_active_disagreement:
             preserved = dict(active_disagreement)
             preserved['displayCard'] = False
             guidance['disagreement'] = preserved
         else:
             guidance['disagreement'] = None
+        guidance['challengeState'] = {
+            'challengeId': challenge_id,
+            'status': 'reason_review' if active_disagreement else 'awaiting_reason',
+            'interactionMode': 'reason',
+        }
         return replace(
             execution,
             guidance=guidance,
@@ -1518,7 +1558,15 @@ def _enforce_challenge_reason_execution(execution, classification, user_reason, 
 
 def _enforce_challenge_choice_execution(execution, active_disagreement, resolution, language):
     guidance = dict(execution.guidance or {})
-    if resolution not in {'ai', 'user'}:
+    model_disagreement = guidance.get('disagreement') if isinstance(guidance.get('disagreement'), dict) else {}
+    if (
+        resolution is None
+        and model_disagreement.get('status') == 'resolved'
+        and model_disagreement.get('resolution') == 'retain_current'
+    ):
+        resolution = 'retain_current'
+    challenge_id = (active_disagreement or {}).get('challengeId') or model_disagreement.get('challengeId')
+    if resolution not in {'ai', 'user', 'retain_current'}:
         pending = dict(active_disagreement or {})
         pending.update({
             'status': 'active',
@@ -1534,7 +1582,7 @@ def _enforce_challenge_choice_execution(execution, active_disagreement, resoluti
             'proposalOffer': None,
             'disagreement': pending,
             'challengeState': {
-                'challengeId': active_disagreement.get('challengeId'),
+                'challengeId': challenge_id,
                 'status': 'choice_pending',
                 'interactionMode': 'choice',
             },
@@ -1551,13 +1599,40 @@ def _enforce_challenge_choice_execution(execution, active_disagreement, resoluti
             guidance=guidance,
         )
     resolved = dict(active_disagreement or {})
-    resolved.update({'status': 'resolved', 'phase': 'choice_pending', 'displayCard': False, 'resolution': resolution, 'nextQuestion': None})
+    if challenge_id and not resolved.get('challengeId'):
+        resolved['challengeId'] = challenge_id
+    resolved.update({
+        'subject': resolved.get('subject') or 'ai_revision_challenge',
+        'status': 'resolved',
+        'phase': resolved.get('phase') or 'choice_pending',
+        'displayCard': False,
+        'resolution': resolution,
+        'nextQuestion': None,
+    })
     guidance['disagreement'] = resolved
     guidance['challengeState'] = {
-        'challengeId': active_disagreement.get('challengeId'),
+        'challengeId': challenge_id,
         'status': 'resolved',
         'interactionMode': 'resolved',
     }
+    if resolution == 'retain_current':
+        guidance.update({
+            'move': 'offer_perspective',
+            'proposalOffer': None,
+            'followUpQuestion': None,
+            'uiCues': [],
+            'intentHypothesis': None,
+            'intentConfidence': None,
+        })
+        return replace(
+            execution,
+            proposed_rows=None,
+            revision_plan={},
+            revision_contract={},
+            revision_operations=[],
+            proposal_binding={},
+            guidance=guidance,
+        )
     return replace(execution, guidance=guidance)
 
 
@@ -1644,17 +1719,28 @@ def _ensure_alternative_revision_execution(execution, original_offer, language, 
     original_text = ' '.join((str(original_offer.get(field) or '').strip() for field in ('summary', 'rationale')))
     original_summary = str(original_offer.get('summary') or '').strip().casefold()
     original_rationale = str(original_offer.get('rationale') or '').strip().casefold()
+    safe_clarification = (
+        '为了给出与原方案不同的可执行备选改法，请先说明你希望优先保留或调整哪一段路径关系。'
+        if language == 'zh-CN'
+        else 'To produce a distinct verified alternative proposal, please clarify which local route relationship you want to change instead.'
+    )
     if not isinstance(offer, dict) or not str(offer.get('summary') or '').strip():
-        if language == 'zh-CN':
-            offer = {
-                'summary': '改用另一段局部绕行路线',
-                'rationale': '我避开原方案的处理方式，把变化放在相邻的路线关系上；重点观察箱子第一次进入绕行区域时，玩家是否获得新的判断，而不是只增加移动距离。',
-            }
-        else:
-            offer = {
-                'summary': 'Use a different local detour around the route',
-                'rationale': "I am avoiding the original treatment and changing the neighboring route relationship instead; the test is whether the box's first entry creates a new judgment rather than only more steps.",
-            }
+        guidance['move'] = 'clarify_intent'
+        guidance['intentHypothesis'] = None
+        guidance['intentConfidence'] = None
+        guidance['followUpQuestion'] = safe_clarification
+        guidance['disagreement'] = None
+        guidance['proposalOffer'] = None
+        return replace(
+            execution,
+            assistant_message=safe_clarification,
+            proposed_rows=None,
+            revision_plan={},
+            revision_contract={},
+            revision_operations=[],
+            proposal_diagnostics={},
+            guidance=guidance,
+        )
     candidate_summary = str(offer.get('summary') or '').strip().casefold()
     candidate_rationale = str(offer.get('rationale') or '').strip().casefold()
     original_transitions = {
@@ -1683,16 +1769,31 @@ def _ensure_alternative_revision_execution(execution, original_offer, language, 
         or candidate_rationale == original_rationale
         or (original_transitions and candidate_transitions and original_transitions == candidate_transitions)
     ):
-        if language == 'zh-CN':
-            offer = {
-                'summary': '把关键推动顺序改成另一种局部取舍',
-                'rationale': '这次不重复原来的布局方向，而是改变箱子接近目标时的先后关系；试玩时确认新的顺序是否仍然可读且可解。',
-            }
-        else:
-            offer = {
-                'summary': 'Use a different local trade-off in the push order',
-                'rationale': 'This avoids the original layout direction and changes the order in which the box approaches the target; play should confirm that the new order remains readable and solvable.',
-            }
+        raise LLMServiceError(
+            'PROPOSAL_SEARCH_EXHAUSTED',
+            'The alternative revision repeated the original proposal; no duplicate card was created.',
+            execution.request_id,
+            True,
+            execution.attempts_used,
+            502,
+        )
+    if not candidate_transitions:
+        guidance['move'] = 'clarify_intent'
+        guidance['intentHypothesis'] = None
+        guidance['intentConfidence'] = None
+        guidance['followUpQuestion'] = safe_clarification
+        guidance['disagreement'] = None
+        guidance['proposalOffer'] = None
+        return replace(
+            execution,
+            assistant_message=safe_clarification,
+            proposed_rows=None,
+            revision_plan={},
+            revision_contract={},
+            revision_operations=[],
+            proposal_diagnostics={},
+            guidance=guidance,
+        )
     guidance['move'] = 'offer_revision'
     guidance['intentHypothesis'] = None
     guidance['intentConfidence'] = None
@@ -1759,24 +1860,27 @@ def _enforce_human_edit_disagreement_followup(execution, stage_context):
     if not (active.get('status') == 'active' and active.get('subject') == 'human_edit'):
         return execution
     guidance = dict(execution.guidance or {})
-    disagreement = guidance.get('disagreement')
-    if not isinstance(disagreement, dict) or disagreement.get('subject') != 'human_edit':
-        return execution
-    if disagreement.get('status') not in {'active', 'acknowledged'}:
-        return execution
-    disagreement = dict(disagreement)
-    disagreement['displayCard'] = False
-    guidance['disagreement'] = disagreement
     guidance['proposalOffer'] = None
-    if disagreement.get('status') == 'acknowledged':
+    disagreement = guidance.get('disagreement')
+    if (
+        isinstance(disagreement, dict)
+        and disagreement.get('subject') == 'human_edit'
+        and disagreement.get('status') in {'active', 'acknowledged'}
+    ):
+        disagreement = dict(disagreement)
+        disagreement['displayCard'] = False
+        guidance['disagreement'] = disagreement
+        if disagreement.get('status') == 'acknowledged':
+            guidance['move'] = 'offer_perspective'
+            guidance['intentHypothesis'] = None
+            guidance['intentConfidence'] = None
+            guidance.pop('designContextPatch', None)
+            guidance.pop('designContextPatchError', None)
+            guidance.pop('_intentSemanticClaims', None)
+            guidance.pop('_intentDecision', None)
+            guidance['uiCues'] = []
+    elif guidance.get('move') in {'offer_revision', 'deliver_revision'}:
         guidance['move'] = 'offer_perspective'
-        guidance['intentHypothesis'] = None
-        guidance['intentConfidence'] = None
-        guidance.pop('designContextPatch', None)
-        guidance.pop('designContextPatchError', None)
-        guidance.pop('_intentSemanticClaims', None)
-        guidance.pop('_intentDecision', None)
-        guidance['uiCues'] = []
     return replace(
         execution,
         guidance=guidance,

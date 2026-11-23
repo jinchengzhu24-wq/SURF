@@ -152,10 +152,28 @@ def enqueue(database, session_id, version_id, user_turn_id, assistant_turn_id, m
     previous = tasks(database, session_id)
     if recovery_id in previous:
         return previous[recovery_id]
+    user = database.execute("SELECT content,sequence_number FROM conversation_turns WHERE id=?", (user_turn_id,)).fetchone()
+    if user is None:
+        return None
+    newer_turn = database.execute(
+        "SELECT 1 FROM conversation_turns WHERE session_id=? AND version_id=? AND role='user' AND sequence_number>? LIMIT 1",
+        (session_id, version_id, user["sequence_number"]),
+    ).fetchone()
+    if newer_turn is not None:
+        return None
+    user_seq_cache = {}
     for old in previous.values():
         if old["status"] not in TERMINAL and old["disagreementId"] == identity:
-            record(database, session_id, old, "expired", clock=clock, record_event_fn=record_event_fn, failureCode="SUPERSEDED_SOURCE")
-    user = database.execute("SELECT content,sequence_number FROM conversation_turns WHERE id=?", (user_turn_id,)).fetchone()
+            old_row = database.execute("SELECT sequence_number FROM conversation_turns WHERE id=?", (old["sourceUserTurnId"],)).fetchone()
+            old_seq = old_row["sequence_number"] if old_row is not None else None
+            user_seq_cache[old["recoveryId"]] = old_seq
+            if old_seq is not None and old_seq >= user["sequence_number"]:
+                return None
+    for old in previous.values():
+        if old["status"] not in TERMINAL and old["disagreementId"] == identity:
+            old_seq = user_seq_cache.get(old["recoveryId"])
+            if old_seq is None or old_seq < user["sequence_number"]:
+                record(database, session_id, old, "expired", clock=clock, record_event_fn=record_event_fn, failureCode="SUPERSEDED_SOURCE")
     prior = database.execute(
         "SELECT id FROM conversation_turns WHERE session_id=? AND version_id=? AND role='assistant' "
         "AND sequence_number<? ORDER BY sequence_number DESC LIMIT 1",

@@ -24,6 +24,10 @@ from .config_and_runtime import (
 from .snapshot_grounding import _assert_visible_output_language, _validate_map_grounding_texts
 
 
+class _UpstreamBinaryTimeout(Exception):
+    """Distinguishes upstream model completion timeouts from preflight budget timeouts."""
+
+
 def generate(topic, context, validator, strategy_validator, request_id, deadline, preflight_budget=20.0, *, service=None):
     svc = _current_service(service)
     with svc.activated():
@@ -162,17 +166,22 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
             timeout = min(70.0, deadline - svc.clock.monotonic() - 20.0)
             if timeout <= 0:
                 raise TimeoutError()
-            if patch is not None:
-                candidate = asyncio.run(_request_component_patch(api_key, base_url, patch, messages,
-                    request_id, deadline, "proposal_clarification", max_tokens=PLAIN_CHAT_MAX_TOKENS,
-                    timeout_limit=timeout))
-            else:
-                response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url,
-                    model, messages, PLAIN_CHAT_MAX_TOKENS, timeout,
-                    task="proposal_clarification", response_format_override=binary.response_format()), timeout=timeout))
-                if response.choices[0].finish_reason == "length":
-                    raise binary.BinaryError("BINARY_RESPONSE_TRUNCATED", "envelope")
-                candidate = parse_json_object(response.choices[0].message.content)
+            try:
+                if patch is not None:
+                    candidate = asyncio.run(_request_component_patch(api_key, base_url, patch, messages,
+                        request_id, deadline, "proposal_clarification", max_tokens=PLAIN_CHAT_MAX_TOKENS,
+                        timeout_limit=timeout))
+                else:
+                    response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url,
+                        model, messages, PLAIN_CHAT_MAX_TOKENS, timeout,
+                        task="proposal_clarification", response_format_override=binary.response_format()), timeout=timeout))
+                    if not getattr(response, "choices", None):
+                        raise binary.BinaryError("BINARY_RESPONSE_EMPTY", "envelope")
+                    if response.choices[0].finish_reason == "length":
+                        raise binary.BinaryError("BINARY_RESPONSE_TRUNCATED", "envelope")
+                    candidate = parse_json_object(response.choices[0].message.content)
+            except asyncio.TimeoutError as error:
+                raise _UpstreamBinaryTimeout() from error
             step = binary.parse_step(copy.deepcopy(candidate), topic["questionCount"])
             previous_promises = {binary.signature(choice["promise"]) for choice in topic.get("choices", [])}
             if any(binary.signature(b["promise"]) in previous_promises for b in step["branches"]):
@@ -188,9 +197,15 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
                 initial_record = topic["requirements"]
             # Request-local candidate only; persisted as verified solely after independent review succeeds.
             stage["requirementRecord"] = initial_record
-            for text in (step["question"], step["note"], *[b["label"] for b in step["branches"]]):
-                _assert_visible_output_language(context["language"], text)
-                _validate_map_grounding_texts([text], context["rows"], entity_bindings=stage.get("entityBindings"))
+            text_checks = [("question", step["question"]), ("note", step["note"])] + [
+                (f"branch-{index}", branch["label"]) for index, branch in enumerate(step["branches"], start=1)
+            ]
+            for field, text in text_checks:
+                try:
+                    _assert_visible_output_language(context["language"], text)
+                    _validate_map_grounding_texts([text], context["rows"], entity_bindings=stage.get("entityBindings"))
+                except ValueError as error:
+                    raise binary.BinaryError("BINARY_TEXT_INVALID", field, detail=str(error)) from error
             preflight_started = svc.clock.monotonic()
             try:
                 caches = binary.preflight(step, topic, context["rows"], stage["stageSnapshot"], validator,
@@ -255,7 +270,7 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
                 if retry_remaining <= 0:
                     raise binary.BinaryError("BINARY_REVIEW_INVALID", "review")
                 try:
-                    if valid:
+                    if valid and not (valid.get("accepted") is False and "issues" not in valid):
                         repair = PatchRequest("clarification_review", valid,
                             [Target(key, (key,), (bool,) if key == "accepted" else (list,))
                                 for key in ("accepted", "issues") if key not in valid], {"review_source": review_input})
@@ -295,11 +310,19 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
             return step, caches
         except LLMServiceError:
             raise
-        except (APIConnectionError, APIStatusError) as error:
-            failure = classify_exception(error, request_id, attempt)
+        except (APIConnectionError, APIStatusError, _UpstreamBinaryTimeout) as error:
+            if isinstance(error, _UpstreamBinaryTimeout):
+                failure = LLMServiceError("UPSTREAM_TIMEOUT", "Kimi did not respond before the timeout.", request_id, True, attempt, 504)
+                cause = error.__cause__ or error
+                failure_kind = "timeout"
+            else:
+                failure = classify_exception(error, request_id, attempt)
+                cause = error
+                failure_kind = "timeout" if failure.code == "UPSTREAM_TIMEOUT" else "upstream"
             if not failure.retryable or attempt == 2:
-                failure.details = {"task": "proposal_clarification", "failureStage": "upstream", "failureKind": "upstream"}
-                raise failure from error
+                failure.details = {"task": "proposal_clarification", "failureStage": "upstream", "failureKind": failure_kind}
+                raise failure from cause
+            patch = None
             last_error = error
             continue
         except Exception as error:
@@ -329,6 +352,8 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
                         [Target(field, (field,), (list,) if field == "branches" else (dict, type(None)) if field == "initialRequirements" else (str,))],
                         {"snapshot": stage["stageSnapshot"], "topic": evidence["topic"]})
             detail_parts = [str(part).strip() for part in (getattr(error, "detail", None), error.__cause__) if part]
+            if not detail_parts and str(error).strip():
+                detail_parts = [str(error).strip()]
             detail_text = "; ".join(detail_parts)[:300]
             messages.append({"role": "system", "content": "Correct only this technical component: "
                 + str(getattr(error, "code", "BINARY_CANDIDATE_INVALID")) + ". Keep the original permissions and choices. "

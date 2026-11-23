@@ -60,7 +60,10 @@ def failure_category(code, details=None):
 def _task(event):
     task = event["payload"].get("task")
     # Challenge review is part of the same message, not an extra user request.
-    if event["eventType"] in {"message_generation_failed", "challenge_reason_review_pending"} or task == "challenge_review":
+    if (
+        event["eventType"] in {"message_generation_failed", "challenge_reason_review_pending"}
+        or task in {"challenge_review", "proposal_clarification"}
+    ):
         return "message"
     return task or "message"
 

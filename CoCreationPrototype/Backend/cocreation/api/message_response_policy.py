@@ -66,16 +66,19 @@ def apply_conversation_only_policy(
 ) -> LLMExecutionResult:
     """Keep prose and permitted metadata without exposing an action or another card."""
     guidance = execution.guidance or {}
+    next_guidance = {
+        'move': 'offer_perspective',
+        'intentHypothesis': None,
+        'intentConfidence': None,
+        'proposalOffer': None,
+        'uiCues': [],
+        'coordinateLinks': guidance.get('coordinateLinks') or [],
+        'proposalDiscovery': guidance.get('proposalDiscovery'),
+        'disagreement': {**active_disagreement, 'displayCard': False} if active_disagreement else None,
+    }
+    if guidance.get('_stateTransitionDeferred'):
+        next_guidance['_stateTransitionDeferred'] = True
     return _without_revision_execution(
         execution,
-        guidance={
-            'move': 'offer_perspective',
-            'intentHypothesis': None,
-            'intentConfidence': None,
-            'proposalOffer': None,
-            'uiCues': [],
-            'coordinateLinks': guidance.get('coordinateLinks') or [],
-            'proposalDiscovery': guidance.get('proposalDiscovery'),
-            'disagreement': {**active_disagreement, 'displayCard': False} if active_disagreement else None,
-        },
+        guidance=next_guidance,
     )

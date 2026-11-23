@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import copy
 import json
-import time
 import uuid
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from cocreation.domain import binary_discovery as binary
@@ -19,7 +19,12 @@ from cocreation.domain.proposal_search import parse_revision_plan
 from cocreation.domain.proposal_understanding import bind_latest
 from cocreation.domain.revision_workflow import SemanticConstraintError
 from cocreation.llm.facade import KIMI_MODEL, LLMExecutionResult, LLMServiceError
-from cocreation.persistence.repository import get_current_version, get_version, load_design_context
+from cocreation.persistence.repository import (
+    get_current_version,
+    get_version,
+    load_design_context,
+    load_entity_bindings,
+)
 
 from .config_models import (
     ApiError,
@@ -28,9 +33,14 @@ from .config_models import (
     require_browser_session,
     require_current_base,
 )
-from .context_and_discovery import build_llm_context
+from .context_and_discovery import _public_guidance, active_intent_conflict_choice, build_llm_context
 from .online_sync_and_dashboard import synchronize_turn_with_online_match
-from .proposal_and_challenge import _materialize_verified_automatic_offer, _record_reply_outcome
+from .proposal_and_challenge import (
+    _bind_execution_to_stage,
+    _materialize_verified_automatic_offer,
+    _persist_verified_requirements,
+    _record_reply_outcome,
+)
 
 if TYPE_CHECKING:
     from .services import CoCreationServices
@@ -58,9 +68,25 @@ def _guard(services: CoCreationServices, database, session_id, access_cookie, ve
     design = load_design_context(database, session_id, version_id) or {}
     if (design.get("activeDisagreement") or {}).get("status") == "active":
         raise ApiError(409, "DISAGREEMENT_ACTIVE", "Resolve the current disagreement first.")
+    if active_intent_conflict_choice(database, session_id, version_id) is not None:
+        raise ApiError(409, "INTENT_CONFLICT_PENDING", "Retain one of the conflicting inclinations before starting or choosing a proposal.")
     if database.execute("SELECT 1 FROM change_proposals WHERE session_id=? AND status='pending' LIMIT 1", (session_id,)).fetchone():
         raise ApiError(409, "PROPOSAL_PENDING", "Review the pending map before starting another proposal.")
     return session
+
+
+def _check_non_binary_idempotency_conflict(database, session_id, key):
+    existing_turn = database.execute(
+        "SELECT 1 FROM conversation_turns WHERE session_id=? AND request_id=? LIMIT 1",
+        (session_id, key),
+    ).fetchone()
+    existing_failure = database.execute(
+        "SELECT 1 FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
+        "AND json_extract(payload_json, '$.messageKey')=? LIMIT 1",
+        (session_id, key),
+    ).fetchone()
+    if existing_turn is not None or existing_failure is not None:
+        raise ApiError(409, "IDEMPOTENCY_CONFLICT", "This key belongs to another message.")
 
 
 def _save(services: CoCreationServices, database, session_id, topic):
@@ -132,6 +158,8 @@ def start(services: CoCreationServices, session_id, payload, content, understand
         "content": content,
         "requestProposal": payload.requestProposal,
     }
+    done_payload = None
+    prior_status = None
     with services.connect(immediate=True) as database:
         require_browser_session(database, session_id, access_cookie, services=services)
         receipt = _receipt(database, session_id, payload.idempotencyKey)
@@ -139,68 +167,80 @@ def start(services: CoCreationServices, session_id, payload, content, understand
             if receipt["request"] != data:
                 raise ApiError(409, "IDEMPOTENCY_CONFLICT", "This key belongs to another action.")
             if receipt["status"] == "done":
-                return services.serialize_session(database, session_id)
-        session = _guard(services, database, session_id, access_cookie, payload.baseVersionId)
-        topic = binary.current_topic(database, session_id, payload.baseVersionId)
-        if receipt and (not topic or topic["initialMessageKey"] != payload.idempotencyKey or topic["status"] not in binary.ACTIVE):
-            raise ApiError(409, "PROPOSAL_STALE", "This proposal has ended; start with a new message key.")
-        if topic and topic["status"] in binary.ACTIVE:
-            if topic["initialMessageKey"] != payload.idempotencyKey:
-                raise ApiError(409, "PROPOSAL_CHOICE_REQUIRED", "Use the current choice buttons or cancel.")
-            if topic["status"] == "planning":
-                raise ApiError(409, "BINARY_BUSY", "This request is still being processed.")
-        else:
-            prior = database.execute(
-                "SELECT id FROM conversation_turns WHERE session_id=? AND request_id=? AND role='user'",
-                (session_id, payload.idempotencyKey),
-            ).fetchone()
-            user_id = prior["id"] if prior else services.insert_turn(
-                database, session, "user", content, payload.baseVersionId, payload.idempotencyKey, None
+                done_payload = services.serialize_session(database, session_id)
+        if done_payload is None:
+            session = _guard(services, database, session_id, access_cookie, payload.baseVersionId)
+            topic = binary.current_topic(database, session_id, payload.baseVersionId, clock=services.clock)
+            if receipt and (not topic or topic["initialMessageKey"] != payload.idempotencyKey or topic["status"] not in binary.ACTIVE):
+                raise ApiError(409, "PROPOSAL_STALE", "This proposal has ended; start with a new message key.")
+            if topic and topic["status"] in binary.ACTIVE:
+                if topic["initialMessageKey"] != payload.idempotencyKey:
+                    raise ApiError(409, "PROPOSAL_CHOICE_REQUIRED", "Use the current choice buttons or cancel.")
+                if topic["status"] == "planning":
+                    raise ApiError(409, "BINARY_BUSY", "This request is still being processed.")
+                if topic["status"] == "revision_needed":
+                    raise ApiError(409, "PROPOSAL_STALE", "This proposal cannot continue; cancel it and start a new request.")
+                _check_binding(_context(services, database, session_id, topic), topic)
+                prior_status = topic["status"]
+            else:
+                prior = database.execute(
+                    "SELECT id FROM conversation_turns WHERE session_id=? AND request_id=? AND role='user'",
+                    (session_id, payload.idempotencyKey),
+                ).fetchone()
+                user_id = prior["id"] if prior else services.insert_turn(
+                    database, session, "user", content, payload.baseVersionId, payload.idempotencyKey, None
+                )
+                bound_understanding = bind_latest(understanding or {}, user_id, payload.baseVersionId)
+                context = build_llm_context(database, session_id, get_current_version(database, session), services=services)
+                topic = {
+                    "discoveryPolicyVersion": 2,
+                    "topicId": "binary-" + uuid.uuid4().hex,
+                    "versionId": payload.baseVersionId,
+                    "initialMessageKey": payload.idempotencyKey,
+                    "initialRequest": content,
+                    "understanding": bound_understanding.get("proposalUnderstanding") or {},
+                    "userTurns": [{"id": user_id, "content": content}],
+                    "choices": [],
+                    "questionCount": 0,
+                    "language": session["language"],
+                    "pendingQuestion": None,
+                    "status": "planning",
+                }
+                topic["binding"] = binary.binding(
+                    context["stageContext"]["stageSnapshot"],
+                    content,
+                    context["stageContext"].get("revisionDesignContext") or {},
+                )
+                services.record_event(
+                    database,
+                    session_id,
+                    "turn_understanding",
+                    {"messageKey": payload.idempotencyKey, "baseVersionId": payload.baseVersionId, "result": bound_understanding},
+                    services.utc_now(),
+                )
+            topic["status"] = "planning"
+            topic["leaseUntil"] = (
+                services.clock.utc_datetime().timestamp() + max(1, request.state.llm_deadline - services.monotonic()) + 5
             )
-            bound_understanding = bind_latest(understanding or {}, user_id, payload.baseVersionId)
-            context = build_llm_context(database, session_id, get_current_version(database, session), services=services)
-            topic = {
-                "discoveryPolicyVersion": 2,
-                "topicId": "binary-" + uuid.uuid4().hex,
-                "versionId": payload.baseVersionId,
-                "initialMessageKey": payload.idempotencyKey,
-                "initialRequest": content,
-                "understanding": bound_understanding.get("proposalUnderstanding") or {},
-                "userTurns": [{"id": user_id, "content": content}],
-                "choices": [],
-                "questionCount": 0,
-                "language": session["language"],
-                "pendingQuestion": None,
-                "status": "planning",
+            topic["retryAction"] = {
+                "kind": "start",
+                "idempotencyKey": payload.idempotencyKey,
+                "baseVersionId": payload.baseVersionId,
+                "content": content,
+                "requestProposal": payload.requestProposal,
             }
-            topic["binding"] = binary.binding(
-                context["stageContext"]["stageSnapshot"],
-                content,
-                context["stageContext"].get("revisionDesignContext") or {},
-            )
-            services.record_event(
-                database,
-                session_id,
-                "turn_understanding",
-                {"messageKey": payload.idempotencyKey, "baseVersionId": payload.baseVersionId, "result": bound_understanding},
-                services.utc_now(),
-            )
-        topic["status"] = "planning"
-        topic["leaseUntil"] = time.time() + max(1, request.state.llm_deadline - services.monotonic()) + 5
-        topic["retryAction"] = {
-            "kind": "start",
-            "idempotencyKey": payload.idempotencyKey,
-            "baseVersionId": payload.baseVersionId,
-            "content": content,
-            "requestProposal": payload.requestProposal,
-        }
-        _put_receipt(services, database, session_id, payload.idempotencyKey, data, "pending")
-        _save(services, database, session_id, topic)
-    return _advance(services, session_id, topic, payload.idempotencyKey, data, request, access_cookie)
+            _put_receipt(services, database, session_id, payload.idempotencyKey, data, "pending")
+            _save(services, database, session_id, topic)
+    if done_payload is not None:
+        synchronize_turn_with_online_match(session_id, payload.idempotencyKey, services=services)
+        return done_payload
+    return _advance(services, session_id, topic, payload.idempotencyKey, data, request, access_cookie, prior_status=prior_status)
 
 
 def choose(services: CoCreationServices, session_id, payload, request, access_cookie):
     data = {"kind": "choice", **payload.model_dump()}
+    done_payload = None
+    prior_status = None
     with services.connect(immediate=True) as database:
         require_browser_session(database, session_id, access_cookie, services=services)
         receipt = _receipt(database, session_id, payload.idempotencyKey)
@@ -208,73 +248,85 @@ def choose(services: CoCreationServices, session_id, payload, request, access_co
             if receipt["request"] != data:
                 raise ApiError(409, "IDEMPOTENCY_CONFLICT", "This key belongs to another choice.")
             if receipt["status"] == "done":
-                return services.serialize_session(database, session_id)
-        session = _guard(services, database, session_id, access_cookie, payload.baseVersionId)
-        topic = binary.current_topic(database, session_id, payload.baseVersionId)
-        if not topic or topic["topicId"] != payload.topicId or topic["status"] not in binary.ACTIVE:
-            raise ApiError(409, "PROPOSAL_STALE", "This topic is no longer active.")
-        context = _context(services, database, session_id, topic)
-        _check_binding(context, topic)
-        question = topic.get("pendingQuestion") or {}
-        if question.get("questionId") != payload.questionId:
-            raise ApiError(409, "PROPOSAL_STALE", "Answer the current question.")
-        if receipt is None:
-            if topic["status"] != "clarifying" or any(c["questionId"] == payload.questionId for c in topic["choices"]):
-                raise ApiError(409, "PROPOSAL_STALE", "This question was already answered.")
-            branch = next((item for item in question["choices"] if item["choiceId"] == payload.choiceId), None)
-            if branch is None:
-                raise ApiError(409, "PROPOSAL_STALE", "This option does not belong to the question.")
-            try:
-                presentation = displayed_question(database, session_id, question, payload.displayLanguage, topic["language"])
-            except ValueError as error:
-                raise ApiError(409, "PROPOSAL_TRANSLATION_STALE", "Refresh to use the verified source-language buttons.") from error
-            label = next(item["label"] for item in presentation["choices"] if item["choiceId"] == payload.choiceId)
-            text = ("选择 " if payload.displayLanguage == "zh-CN" else "Selected ") + branch["letter"] + ": " + label
-            user_id = services.insert_turn(database, session, "user", text, payload.baseVersionId, payload.idempotencyKey, None)
-            cache = copy.deepcopy(branch["candidate"])
-            if (
-                cache["topicBinding"] != topic["binding"]
-                or cache["prefix"] != binary.path_signature(topic["choices"])
-                or cache.get("proofSignature") != binary.signature({k: v for k, v in cache.items() if k != "proofSignature"})
-            ):
-                raise ApiError(409, "PROPOSAL_STALE", "The feasibility proof changed.")
-            choice = {
-                "questionId": payload.questionId,
-                "choiceId": payload.choiceId,
-                "question": presentation["question"],
-                "note": presentation["note"],
-                "label": label,
-                "letter": branch["letter"],
-                "promise": branch["promise"],
-                "sourceTurnId": user_id,
-                "displayLanguage": payload.displayLanguage,
-            }
-            topic["choices"].append(choice)
-            topic["userTurns"].append({"id": user_id, "content": text})
-            topic["selectedCandidate"] = cache
-            topic["selectedCandidate"]["selectedPrefix"] = binary.path_signature(topic["choices"])
-            services.record_event(
-                database,
-                session_id,
-                "binary_choice_selected",
-                {
-                    "topicId": topic["topicId"],
+                done_payload = services.serialize_session(database, session_id)
+        else:
+            _check_non_binary_idempotency_conflict(database, session_id, payload.idempotencyKey)
+        if done_payload is None:
+            session = _guard(services, database, session_id, access_cookie, payload.baseVersionId)
+            topic = binary.current_topic(database, session_id, payload.baseVersionId, clock=services.clock)
+            if not topic or topic["topicId"] != payload.topicId or topic["status"] not in binary.ACTIVE:
+                raise ApiError(409, "PROPOSAL_STALE", "This topic is no longer active.")
+            if topic["status"] == "revision_needed":
+                raise ApiError(409, "PROPOSAL_STALE", "This proposal cannot continue; cancel it and start a new request.")
+            context = _context(services, database, session_id, topic)
+            _check_binding(context, topic)
+            question = topic.get("pendingQuestion") or {}
+            if question.get("questionId") != payload.questionId:
+                raise ApiError(409, "PROPOSAL_STALE", "Answer the current question.")
+            prior_status = topic["status"]
+            if receipt is None:
+                if topic["status"] != "clarifying" or any(c["questionId"] == payload.questionId for c in topic["choices"]):
+                    raise ApiError(409, "PROPOSAL_STALE", "This question was already answered.")
+                branch = next((item for item in question["choices"] if item["choiceId"] == payload.choiceId), None)
+                if branch is None:
+                    raise ApiError(409, "PROPOSAL_STALE", "This option does not belong to the question.")
+                try:
+                    presentation = displayed_question(database, session_id, question, payload.displayLanguage, topic["language"])
+                except ValueError as error:
+                    raise ApiError(409, "PROPOSAL_TRANSLATION_STALE", "Refresh to use the verified source-language buttons.") from error
+                label = next(item["label"] for item in presentation["choices"] if item["choiceId"] == payload.choiceId)
+                text = ("选择 " if payload.displayLanguage == "zh-CN" else "Selected ") + branch["letter"] + ": " + label
+                user_id = services.insert_turn(database, session, "user", text, payload.baseVersionId, payload.idempotencyKey, None)
+                cache = copy.deepcopy(branch["candidate"])
+                if (
+                    cache["topicBinding"] != topic["binding"]
+                    or cache["prefix"] != binary.path_signature(topic["choices"])
+                    or cache.get("proofSignature") != binary.signature({k: v for k, v in cache.items() if k != "proofSignature"})
+                ):
+                    raise ApiError(409, "PROPOSAL_STALE", "The feasibility proof changed.")
+                choice = {
                     "questionId": payload.questionId,
                     "choiceId": payload.choiceId,
+                    "question": presentation["question"],
+                    "note": presentation["note"],
+                    "label": label,
+                    "letter": branch["letter"],
+                    "promise": branch["promise"],
                     "sourceTurnId": user_id,
-                    "evidenceKind": "interface_choice",
                     "displayLanguage": payload.displayLanguage,
-                },
-                services.utc_now(),
+                }
+                topic["choices"].append(choice)
+                topic["userTurns"].append({"id": user_id, "content": text})
+                topic["selectedCandidate"] = cache
+                topic["selectedCandidate"]["selectedPrefix"] = binary.path_signature(topic["choices"])
+                prior_status = "retry_pending"
+                services.record_event(
+                    database,
+                    session_id,
+                    "binary_choice_selected",
+                    {
+                        "topicId": topic["topicId"],
+                        "questionId": payload.questionId,
+                        "choiceId": payload.choiceId,
+                        "sourceTurnId": user_id,
+                        "evidenceKind": "interface_choice",
+                        "displayLanguage": payload.displayLanguage,
+                    },
+                    services.utc_now(),
+                )
+            elif topic["status"] == "planning":
+                raise ApiError(409, "BINARY_BUSY", "This choice is still being processed.")
+            topic["status"] = "planning"
+            topic["leaseUntil"] = (
+                services.clock.utc_datetime().timestamp() + max(1, request.state.llm_deadline - services.monotonic()) + 5
             )
-        elif topic["status"] == "planning":
-            raise ApiError(409, "BINARY_BUSY", "This choice is still being processed.")
-        topic["status"] = "planning"
-        topic["leaseUntil"] = time.time() + max(1, request.state.llm_deadline - services.monotonic()) + 5
-        topic["retryAction"] = {"kind": "choice", **payload.model_dump()}
-        _put_receipt(services, database, session_id, payload.idempotencyKey, data, "pending")
-        _save(services, database, session_id, topic)
-    return _advance(services, session_id, topic, payload.idempotencyKey, data, request, access_cookie)
+            topic["retryAction"] = {"kind": "choice", **payload.model_dump()}
+            _put_receipt(services, database, session_id, payload.idempotencyKey, data, "pending")
+            _save(services, database, session_id, topic)
+    if done_payload is not None:
+        synchronize_turn_with_online_match(session_id, payload.idempotencyKey, services=services)
+        return done_payload
+    return _advance(services, session_id, topic, payload.idempotencyKey, data, request, access_cookie, prior_status=prior_status)
 
 
 def cancel(services: CoCreationServices, session_id, payload, access_cookie):
@@ -286,8 +338,9 @@ def cancel(services: CoCreationServices, session_id, payload, access_cookie):
             if receipt["request"] != data:
                 raise ApiError(409, "IDEMPOTENCY_CONFLICT", "This key belongs to another action.")
             return services.serialize_session(database, session_id)
+        _check_non_binary_idempotency_conflict(database, session_id, payload.idempotencyKey)
         _guard(services, database, session_id, access_cookie, payload.baseVersionId)
-        topic = binary.current_topic(database, session_id, payload.baseVersionId)
+        topic = binary.current_topic(database, session_id, payload.baseVersionId, clock=services.clock)
         if not topic or topic["topicId"] != payload.topicId:
             raise ApiError(409, "PROPOSAL_STALE", "This topic is no longer active.")
         if topic["status"] == "planning":
@@ -318,7 +371,7 @@ def displayed_question(database, session_id, question, language, source_language
     return translated
 
 
-def _advance(services: CoCreationServices, session_id, topic, key, receipt_data, request, access_cookie):
+def _advance(services: CoCreationServices, session_id, topic, key, receipt_data, request, access_cookie, *, prior_status=None):
     deadline = request.state.llm_deadline
     phase = "binary_preflight"
     try:
@@ -421,17 +474,22 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
                 1,
                 request.state.request_id,
                 model=KIMI_MODEL,
-                guidance={"proposalQuestion": public, "move": "clarify_intent"},
+                guidance={
+                    "proposalQuestion": public,
+                    "move": "clarify_intent",
+                    "dashboardNode": {"proposalTopicId": topic["topicId"]},
+                },
             )
         elif step["action"] == "blocked":
             raise binary.BinaryError("BINARY_DIRECTIONS_UNAVAILABLE")
         else:
             phase = "binary_finalization"
             execution = _finalize(services, topic, context, validator, request, deadline)
+            _persist_verified_requirements(session_id, topic["versionId"], context["stageContext"], services=services)
             topic.update(status="proposal_ready", retryAction=None, failureCode=None)
         with services.connect(immediate=True) as database:
             session = _guard(services, database, session_id, access_cookie, topic["versionId"])
-            current = binary.current_topic(database, session_id, topic["versionId"])
+            current = binary.current_topic(database, session_id, topic["versionId"], clock=services.clock)
             if (
                 not current
                 or current["topicId"] != topic["topicId"]
@@ -440,6 +498,16 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
             ):
                 raise ApiError(409, "PROPOSAL_STALE", "The active question changed while preparing the reply.")
             _check_binding(_context(services, database, session_id, topic), topic)
+            if step["action"] not in {"ask", "blocked"}:
+                execution = _bind_execution_to_stage(
+                    execution,
+                    topic["versionId"],
+                    context["rows"],
+                    topic["initialRequest"],
+                    context["language"],
+                    load_entity_bindings(database, session_id, topic["versionId"]),
+                )
+            execution = replace(execution, guidance=_public_guidance(execution.guidance))
             turn_id = services.insert_turn(
                 database,
                 session,
@@ -487,6 +555,23 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
         return result
     except Exception as error:
         if isinstance(error, ApiError) and error.status_code == 409:
+            with services.connect(immediate=True) as database:
+                require_browser_session(database, session_id, access_cookie, services=services)
+                current = binary.current_topic(database, session_id, topic["versionId"], clock=services.clock)
+                if (
+                    current
+                    and current["topicId"] == topic["topicId"]
+                    and current["status"] == "planning"
+                    and current.get("retryAction", {}).get("idempotencyKey") == key
+                ):
+                    if error.code != "PROPOSAL_STALE" and prior_status in {"clarifying", "retry_pending"}:
+                        restored = {"status": prior_status, "failureCode": error.code}
+                        if prior_status == "clarifying":
+                            restored["retryAction"] = None
+                        current.update(**restored)
+                    else:
+                        current.update(status="cancelled", retryAction=None, failureCode=error.code)
+                    _save(services, database, session_id, current)
             raise
         if isinstance(error, (ApiError, LLMServiceError)):
             failure = error
@@ -511,7 +596,7 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
             }
         with services.connect(immediate=True) as database:
             session = require_browser_session(database, session_id, access_cookie, services=services)
-            current = binary.current_topic(database, session_id, topic["versionId"])
+            current = binary.current_topic(database, session_id, topic["versionId"], clock=services.clock)
             if session["current_version_id"] == topic["versionId"] and current and current["topicId"] == topic["topicId"] and current["status"] == "planning":
                 retryable = bool(getattr(failure, "retryable", False))
                 current.update(
@@ -645,4 +730,6 @@ def _finalize(services: CoCreationServices, topic, context, validator, request, 
         ),
     )
     offer["proposalPresentation"] = presentation
-    return frozen
+    frozen_guidance = dict(frozen.guidance or {})
+    frozen_guidance["dashboardNode"] = {"proposalTopicId": topic["topicId"]}
+    return replace(frozen, guidance=frozen_guidance)

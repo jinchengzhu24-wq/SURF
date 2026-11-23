@@ -107,7 +107,7 @@ from cocreation.domain.revision_workflow import (
 from .chat_generation import _messages_with_validation_feedback
 from .config_and_runtime import CHAT_MAX_ATTEMPTS, CHAT_TIMEOUT_SECONDS, EmptyModelResponse, LLMServiceError, PRIMARY_ATTEMPT_TIMEOUT_SECONDS, TRANSLATION_MAX_TOKENS, TranslationExecutionResult, _current_service, _empty_response_diagnostics, _log_llm_event, _provider_error_fields, _request_completion, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _unified_model_attempts, classify_exception
 from .proposal_planning import _llm_failure_class
-from .snapshot_grounding import _assert_visible_output_language, _normalize_single_level_language, _sanitize_visible_model_text, _strip_invalid_stage_grounding_sentences, _validate_map_grounding_texts
+from .snapshot_grounding import _assert_visible_output_language, _coordinate_link_is_grounded, _normalize_single_level_language, _sanitize_visible_model_text, _strip_invalid_stage_grounding_sentences, _validate_map_grounding_texts
 
 
 def translate_turns(items, target_language, request_id, *, _deadline=None):
@@ -129,35 +129,79 @@ def translate_turns(items, target_language, request_id, *, _deadline=None):
         _log_llm_event('llm_request_completed', requestId=request_id, task='translation', outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=min(len(models), svc.config.chat_max_attempts), latencyMs=elapsed_ms, responseMode='json_object')
         raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the translation before the 120 second limit.', request_id, True, min(len(models), svc.config.chat_max_attempts), 504) from exception
 
+def _validate_translated_proposal_question(group, original, target_language, stage_rows=None, entity_bindings=None):
+    if not isinstance(group, dict) or set(group) != set(original):
+        raise ValueError('Binary translation must retain the whole question group.')
+    if any((group[k] != original[k] for k in original if k not in {'question', 'note', 'choices'})):
+        raise ValueError('Binary translation changed question identity or state.')
+    group = copy.deepcopy(group)
+    for field in ('question', 'note'):
+        group[field] = _sanitize_visible_model_text(
+            _validate_translated_text(group[field], original[field], 'proposalQuestion.' + field, allow_empty=field == 'note'),
+            target_language,
+        )
+    if not isinstance(group['choices'], list) or len(group['choices']) != 2:
+        raise ValueError('Binary translation lost a choice.')
+    for before, after in zip(original['choices'], group['choices']):
+        if not isinstance(after, dict) or set(before) != set(after) or any((before[k] != after[k] for k in before if k != 'label')):
+            raise ValueError('Binary translation changed choice identity.')
+        after['label'] = _sanitize_visible_model_text(
+            _validate_translated_text(after['label'], before['label'], 'proposalQuestion.label'),
+            target_language,
+        )
+    texts = [group['question'], group['note'], *[c['label'] for c in group['choices']]]
+    _assert_visible_output_language(target_language, *texts)
+    _validate_map_grounding_texts(texts, stage_rows, entity_bindings=entity_bindings)
+    return group
+
 def _translation_patch_request(payload, items, target_language, locked):
     raw = payload.get('translations') if isinstance(payload, dict) else []
     raw_by_id = {item.get('turnId'): item for item in raw or [] if isinstance(item, dict)} if isinstance(raw, list) else {}
     candidate = {'translations': []}
     targets = []
     scalar_fields = ('body', 'followUpQuestion', 'intentHypothesis', 'proposalOfferSummary', 'proposalOfferRationale', 'proposalSummary', 'proposalPresentationReason')
-
-    def restore_text(source_text, value, path, field):
-        if source_text is None:
-            return None
-        try:
-            checked = _validate_translated_text(value, source_text, field, allow_empty=field.endswith('.body'))
-            if source_text and (not checked):
-                raise ValueError('Empty translated body')
-            _assert_visible_output_language(target_language, checked)
-            _validate_map_grounding_texts([checked], source.get('stageRows'), entity_bindings=source.get('entityBindings'))
-            return checked
-        except (ValueError, TypeError):
-            targets.append(Target(field, path, (str,)))
-            return value
     for index, source in enumerate(items):
         raw_item = raw_by_id.get(source['turnId'], {})
         prefix = f"turn-{source['turnId']}"
         translated = {'turnId': source['turnId']}
         verified = locked.get(source['turnId'], {})
+
+        def restore_text(source_text, value, path, field):
+            if source_text is None:
+                return None
+            try:
+                checked = _validate_translated_text(value, source_text, field, allow_empty=field.endswith('.body'))
+                if checked is not None:
+                    checked = _sanitize_visible_model_text(checked, target_language)
+                if source_text and (not checked):
+                    raise ValueError('Empty translated body')
+                _assert_visible_output_language(target_language, checked or '')
+                _validate_map_grounding_texts([checked], source.get('stageRows'), entity_bindings=source.get('entityBindings'))
+                return checked
+            except (ValueError, TypeError):
+                targets.append(Target(field, path, (str,)))
+                return value
+        if source.get('proposalQuestion'):
+            if 'proposalQuestion' in verified:
+                translated['proposalQuestion'] = copy.deepcopy(verified['proposalQuestion'])
+            else:
+                raw_question = raw_item.get('proposalQuestion')
+                try:
+                    translated['proposalQuestion'] = _validate_translated_proposal_question(
+                        raw_question,
+                        source['proposalQuestion'],
+                        target_language,
+                        source.get('stageRows'),
+                        source.get('entityBindings'),
+                    )
+                except (ValueError, TypeError):
+                    targets.append(Target(f'{prefix}.proposalQuestion', ('translations', index, 'proposalQuestion'), (dict,)))
+                    translated['proposalQuestion'] = raw_question
         for field in scalar_fields:
             if field not in source:
                 continue
             translated[field] = verified[field] if field in verified else restore_text(source[field], raw_item.get(field), ('translations', index, field), prefix + '.' + field)
+        body_text = translated.get('body') if isinstance(translated.get('body'), str) else ''
         for field, source_texts in (('uiCueTexts', source.get('uiCueTexts') or []), ('coordinateLinkTexts', [link['text'] for link in source.get('coordinateLinks') or []]), *((('proposalVerifiedActions', source['proposalVerifiedActions']),) if 'proposalVerifiedActions' in source else ())):
             if field == 'coordinateLinkTexts' and (not source_texts):
                 continue
@@ -165,8 +209,25 @@ def _translation_patch_request(payload, items, target_language, locked):
             translated[field] = []
             for text_index, source_text in enumerate(source_texts):
                 value = raw_texts[text_index] if isinstance(raw_texts, list) and text_index < len(raw_texts) else None
-                if field == 'coordinateLinkTexts' and (not isinstance(value, str) or value not in (translated.get('body') or '')):
-                    value = None
+                if field == 'coordinateLinkTexts':
+                    cleaned_link = _sanitize_visible_model_text(value, target_language) if isinstance(value, str) else None
+                    source_link = (source.get('coordinateLinks') or [])[text_index]
+                    if (
+                        not isinstance(cleaned_link, str)
+                        or cleaned_link not in body_text
+                        or (
+                            source.get('stageRows')
+                            and isinstance(source_link, dict)
+                            and 'from' in source_link
+                            and 'to' in source_link
+                            and not _coordinate_link_is_grounded(
+                                {'text': cleaned_link, 'from': source_link['from'], 'to': source_link['to']},
+                                source.get('stageRows'),
+                                entity_bindings=source.get('entityBindings'),
+                            )
+                        )
+                    ):
+                        value = None
                 translated[field].append(restore_text(source_text, value, ('translations', index, field, text_index), f'{prefix}.{field}.{text_index}'))
         if 'disagreement' in source:
             source_disagreement = source.get('disagreement')
@@ -185,7 +246,7 @@ def _translation_patch_request(payload, items, target_language, locked):
     return (PatchRequest('translation', candidate, targets, evidence), candidate)
 
 def prompt_translation_sources(items):
-    return [{key: item[key] for key in ('turnId', 'body', 'followUpQuestion', 'intentHypothesis', 'proposalOfferSummary', 'proposalOfferRationale', 'proposalSummary', 'uiCueTexts', 'disagreement', 'proposalQuestion', 'proposalVerifiedActions') if key in item} for item in items]
+    return [{key: item[key] for key in ('turnId', 'body', 'followUpQuestion', 'intentHypothesis', 'proposalOfferSummary', 'proposalOfferRationale', 'proposalSummary', 'proposalPresentationReason', 'uiCueTexts', 'disagreement', 'proposalQuestion', 'proposalVerifiedActions') if key in item} for item in items]
 
 async def _translate_with_model_fallback(*, api_key, base_url, models, messages, items, target_language, request_id, started_at, deadline=None):
     svc = _current_service()
@@ -195,10 +256,11 @@ async def _translate_with_model_fallback(*, api_key, base_url, models, messages,
     option_translation = any((item.get('proposalQuestion') or 'proposalVerifiedActions' in item or ((item.get('guidance') or {}).get('proposalDiscovery') or {}).get('optionSet') for item in items))
     pending_option_translation = None
     repair_request = None
-    payload = {}
+    payload = None
     deadline = deadline or _request_deadline(started_at)
     max_attempts = len(models)
     for attempt, model in enumerate(models[:max_attempts], start=1):
+        payload = None
         remaining = svc.remaining_until(deadline)
         response_fields = _empty_response_diagnostics()
         if remaining <= 0:
@@ -212,14 +274,20 @@ async def _translate_with_model_fallback(*, api_key, base_url, models, messages,
                 if timeout <= 0:
                     raise asyncio.TimeoutError()
                 reviewed = await asyncio.wait_for(_request_completion(api_key, base_url, model, review_messages, 120, timeout, task='translation_permission_review'), timeout=timeout)
+                if not getattr(reviewed, 'choices', None):
+                    raise EmptyModelResponse('The model returned an empty response.')
                 verdict = parse_json_object(reviewed.choices[0].message.content)
                 if str(getattr(reviewed.choices[0], 'finish_reason', '')) == 'length' or set(verdict) != {'accepted'} or verdict['accepted'] is not True:
                     raise ValueError('The proposal translation could not be independently verified.')
                 return TranslationExecutionResult(translations=pending_option_translation, attempts_used=attempt, request_id=request_id, model=model, latency_ms=int((svc.clock.monotonic() - started_at) * 1000))
+            if option_translation and attempt >= max_attempts:
+                raise ValueError('The proposal translation has no remaining verification slot.')
             if repair_request is not None:
                 payload = await _request_component_patch(api_key, base_url, repair_request, messages, request_id, deadline, 'translation', TRANSLATION_MAX_TOKENS, attempt_timeout)
             else:
                 response = await asyncio.wait_for(_request_completion(api_key, base_url, model, _messages_with_validation_feedback(messages, validation_feedback, 'translation'), TRANSLATION_MAX_TOKENS, attempt_timeout, task='translation'), timeout=attempt_timeout)
+                if not getattr(response, 'choices', None):
+                    raise EmptyModelResponse('The model returned an empty response.')
                 choice = response.choices[0]
                 response_fields = _response_diagnostics(response, choice)
                 if str(getattr(choice, 'finish_reason', '') or '') == 'length':
@@ -249,11 +317,17 @@ async def _translate_with_model_fallback(*, api_key, base_url, models, messages,
             last_error = classify_exception(exception, request_id, attempt)
             if last_error.code == 'MODEL_RESPONSE_INVALID' and failure_reason:
                 validation_feedback = failure_reason
-                messages = list(messages) + [{'role': 'user', 'content': json.dumps({'lockedTranslationFields': locked_translations, 'instruction': 'Preserve verified fields exactly; return only patches for listed failed translation fields.'}, ensure_ascii=False)}]
-                repair_request, recovered = _translation_patch_request(payload, items, target_language, locked_translations)
-                if repair_request is None and (not option_translation):
-                    translations = validate_translation_response(recovered, items, target_language)
-                    return TranslationExecutionResult(translations=translations, attempts_used=attempt, request_id=request_id, model=model, latency_ms=int((svc.clock.monotonic() - started_at) * 1000))
+                if isinstance(payload, dict) and isinstance(payload.get('translations'), list) and payload['translations']:
+                    messages = list(messages) + [{'role': 'user', 'content': json.dumps({'lockedTranslationFields': locked_translations, 'instruction': 'Preserve verified fields exactly; return only patches for listed failed translation fields.'}, ensure_ascii=False)}]
+                    repair_request, recovered = _translation_patch_request(payload, items, target_language, locked_translations)
+                    if repair_request is None and (not option_translation):
+                        try:
+                            translations = validate_translation_response(recovered, items, target_language)
+                            return TranslationExecutionResult(translations=translations, attempts_used=attempt, request_id=request_id, model=model, latency_ms=int((svc.clock.monotonic() - started_at) * 1000))
+                        except ValueError:
+                            pass
+                else:
+                    repair_request = None
         failure_fields = {'requestId': request_id, 'task': 'translation', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'json_object', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
         if failure_reason:
             failure_fields['validationReason'] = failure_reason
@@ -290,6 +364,17 @@ def _lock_valid_translation_fields(payload, source_items, target_language):
                 fields[name] = value
             except (ValueError, TypeError):
                 continue
+        if source.get('proposalQuestion') and 'proposalQuestion' in translated:
+            try:
+                fields['proposalQuestion'] = _validate_translated_proposal_question(
+                    translated['proposalQuestion'],
+                    source['proposalQuestion'],
+                    target_language,
+                    source.get('stageRows'),
+                    source.get('entityBindings'),
+                )
+            except (ValueError, TypeError):
+                pass
         locked[translated['turnId']] = fields
     return locked
 
@@ -322,24 +407,13 @@ def validate_translation_response(payload, source_items, target_language='en'):
             _assert_visible_output_language(target_language, *normalized['proposalVerifiedActions'])
             _validate_map_grounding_texts(normalized['proposalVerifiedActions'], source.get('stageRows'), entity_bindings=source.get('entityBindings'))
         if source.get('proposalQuestion'):
-            original, group = (source['proposalQuestion'], translation.get('proposalQuestion'))
-            if not isinstance(group, dict) or set(group) != set(original):
-                raise ValueError('Binary translation must retain the whole question group.')
-            if any((group[k] != original[k] for k in original if k not in {'question', 'note', 'choices'})):
-                raise ValueError('Binary translation changed question identity or state.')
-            group = copy.deepcopy(group)
-            for field in ('question', 'note'):
-                group[field] = _validate_translated_text(group[field], original[field], 'proposalQuestion.' + field, allow_empty=field == 'note')
-            if not isinstance(group['choices'], list) or len(group['choices']) != 2:
-                raise ValueError('Binary translation lost a choice.')
-            for before, after in zip(original['choices'], group['choices']):
-                if set(before) != set(after) or any((before[k] != after[k] for k in before if k != 'label')):
-                    raise ValueError('Binary translation changed choice identity.')
-                after['label'] = _validate_translated_text(after['label'], before['label'], 'proposalQuestion.label')
-            texts = [group['question'], group['note'], *[c['label'] for c in group['choices']]]
-            _assert_visible_output_language(target_language, *texts)
-            _validate_map_grounding_texts(texts, source.get('stageRows'), entity_bindings=source.get('entityBindings'))
-            normalized['proposalQuestion'] = group
+            normalized['proposalQuestion'] = _validate_translated_proposal_question(
+                translation.get('proposalQuestion'),
+                source['proposalQuestion'],
+                target_language,
+                source.get('stageRows'),
+                source.get('entityBindings'),
+            )
         normalized['body'] = _validate_translated_text(translation['body'], source['body'], f'translations[{index}].body', allow_empty=True)
         normalized['body'] = _sanitize_visible_model_text(normalized['body'], target_language)
         normalized['body'], _dropped_grounding = _strip_invalid_stage_grounding_sentences(normalized['body'], source.get('stageRows'), entity_bindings=source.get('entityBindings'))
@@ -365,6 +439,13 @@ def validate_translation_response(payload, source_items, target_language='en'):
             normalized['coordinateLinkTexts'] = [_sanitize_visible_model_text(text, target_language) for text in normalized['coordinateLinkTexts']]
             if any((link_text not in (normalized['body'] or '') for link_text in normalized['coordinateLinkTexts'])):
                 raise ValueError(f'translations[{index}].coordinateLinkTexts must remain exact body substrings.')
+            if source.get('stageRows'):
+                for link_index, (link_text, source_link) in enumerate(zip(normalized['coordinateLinkTexts'], source_links)):
+                    if not isinstance(source_link, dict) or 'from' not in source_link or 'to' not in source_link:
+                        continue
+                    candidate_link = {'text': link_text, 'from': source_link['from'], 'to': source_link['to']}
+                    if not _coordinate_link_is_grounded(candidate_link, source.get('stageRows'), entity_bindings=source.get('entityBindings')):
+                        raise ValueError(f'translations[{index}].coordinateLinkTexts[{link_index}] is not grounded in the original link coordinates.')
         if 'disagreement' in item_expected_fields:
             source_disagreement = source.get('disagreement')
             translated_disagreement = translation.get('disagreement')

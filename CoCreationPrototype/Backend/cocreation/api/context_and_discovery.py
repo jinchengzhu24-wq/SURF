@@ -1,6 +1,7 @@
 """LLM context construction, proposal discovery state, and DesignContext updates."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -108,11 +109,11 @@ def _deterministic_intent_conflict(new_claims, existing_claims):
                 continue
             new_subject = new_claim.get('subjectType') or new_claim.get('subject')
             old_subject = old_claim.get('subjectType') or old_claim.get('subject')
-            if new_subject != old_subject:
+            if not new_subject or new_subject == 'other' or new_subject != old_subject:
                 continue
             new_attribute = new_claim.get('attributeType') or new_claim.get('attribute')
             old_attribute = old_claim.get('attributeType') or old_claim.get('attribute')
-            if new_attribute != old_attribute:
+            if not new_attribute or new_attribute == 'other' or new_attribute != old_attribute:
                 continue
             if (new_claim.get('scopeType') or 'stage') != (old_claim.get('scopeType') or 'stage'):
                 continue
@@ -159,8 +160,8 @@ def _deterministic_conflict_explanation(conflict_pair, language):
             f'两者都在决定{subject}的{attribute}，却要求向相反方向调整，因此不能同时指导这项设计决定。'
             '我不会替你选择，请在下面两张卡中决定保留哪一个。'
         )
-    subject = str(new_claim.get('subject') or 'design subject')
-    attribute = str(new_claim.get('attribute') or 'property')
+    subject = str(new_claim.get('subjectType') or new_claim.get('subject') or new_claim.get('subjectText') or 'design subject')
+    attribute = str(new_claim.get('attributeType') or new_claim.get('attribute') or new_claim.get('attributeText') or 'property')
     new_label = f'increase {subject} {attribute}' if new_direction == 'increase' else f'reduce {subject} {attribute}'
     old_label = f'increase {subject} {attribute}' if old_direction == 'increase' else f'reduce {subject} {attribute}'
     return (
@@ -780,46 +781,83 @@ def build_llm_context(database, session_id, version, *, services: CoCreationServ
         "        ORDER BY id DESC LIMIT 12\n        ",
         (session_id,),
     ).fetchall()
+    active_challenge_row = database.execute(
+        "\n        SELECT * FROM revision_challenges\n"
+        "        WHERE session_id = ? AND base_version_id = ?\n"
+        "          AND status NOT IN ('resolved', 'superseded')\n"
+        "        ORDER BY created_at DESC LIMIT 1\n        ",
+        (session_id, version['id']),
+    ).fetchone()
     challenge_context = None
-    for challenge_row in challenge_rows:
-        candidate = load_json(challenge_row['payload_json']) or {}
-        if candidate.get('baseVersionId') == version['id'] or candidate.get('versionId') == version['id']:
-            challenge_user = next(
-                (turn for turn in turns if turn['role'] == 'user' and turn['request_id'] == candidate.get('messageKey')),
-                None,
-            )
-            if challenge_user is not None:
-                challenge_assistant = next(
-                    (
-                        turn
-                        for turn in turns
-                        if turn['role'] == 'assistant' and turn['request_id'] == candidate.get('messageKey')
-                    ),
+    if active_challenge_row is not None:
+        challenge_id = active_challenge_row['challenge_id']
+        source_turn_id = active_challenge_row['source_proposal_turn_id']
+        hypotheses_row = database.execute(
+            "\n            SELECT payload_json FROM audit_events\n"
+            "            WHERE session_id = ?\n"
+            "              AND event_type = 'proposal_challenge_hypotheses_recorded'\n"
+            "              AND json_extract(payload_json, '$.challengeId') = ?\n"
+            "            ORDER BY id DESC LIMIT 1\n            ",
+            (session_id, challenge_id),
+        ).fetchone()
+        hypotheses = load_json(hypotheses_row['payload_json']) if hypotheses_row is not None else None
+        matched_started = {}
+        hyp_key = (hypotheses or {}).get('messageKey') if isinstance(hypotheses, dict) else None
+        for challenge_row in challenge_rows:
+            candidate = load_json(challenge_row['payload_json']) or {}
+            if (candidate.get('baseVersionId') or candidate.get('versionId')) != version['id']:
+                continue
+            if candidate.get('sourceTurnId') == source_turn_id or (hyp_key and candidate.get('messageKey') == hyp_key):
+                matched_started = candidate
+                break
+        challenge_context = {
+            **matched_started,
+            'challengeId': challenge_id,
+            'sourceTurnId': matched_started.get('sourceTurnId') or source_turn_id,
+            'baseVersionId': version['id'],
+            'status': active_challenge_row['status'],
+            'hypotheses': hypotheses,
+        }
+    else:
+        for challenge_row in challenge_rows:
+            candidate = load_json(challenge_row['payload_json']) or {}
+            if candidate.get('baseVersionId') == version['id'] or candidate.get('versionId') == version['id']:
+                challenge_user = next(
+                    (turn for turn in turns if turn['role'] == 'user' and turn['request_id'] == candidate.get('messageKey')),
                     None,
                 )
-                challenge_boundary = (
-                    challenge_assistant['sequence_number']
-                    if challenge_assistant is not None
-                    else challenge_user['sequence_number']
-                )
-                later_assistant = any(
-                    (turn['role'] == 'assistant' and turn['sequence_number'] > challenge_boundary for turn in turns)
-                )
-                later_user = any(
-                    (turn['role'] == 'user' and turn['sequence_number'] > challenge_boundary for turn in turns)
-                )
-                if not later_assistant and later_user:
-                    hypotheses_row = database.execute(
-                        "\n                        SELECT payload_json FROM audit_events\n"
-                        "                        WHERE session_id = ?\n"
-                        "                          AND event_type = 'proposal_challenge_hypotheses_recorded'\n"
-                        "                          AND json_extract(payload_json, '$.messageKey') = ?\n"
-                        "                        ORDER BY id DESC LIMIT 1\n                        ",
-                        (session_id, candidate.get('messageKey')),
-                    ).fetchone()
-                    hypotheses = load_json(hypotheses_row['payload_json']) if hypotheses_row is not None else None
-                    challenge_context = {**candidate, 'hypotheses': hypotheses}
-            break
+                if challenge_user is not None:
+                    challenge_assistant = next(
+                        (
+                            turn
+                            for turn in turns
+                            if turn['role'] == 'assistant' and turn['request_id'] == candidate.get('messageKey')
+                        ),
+                        None,
+                    )
+                    challenge_boundary = (
+                        challenge_assistant['sequence_number']
+                        if challenge_assistant is not None
+                        else challenge_user['sequence_number']
+                    )
+                    later_assistant = any(
+                        (turn['role'] == 'assistant' and turn['sequence_number'] > challenge_boundary for turn in turns)
+                    )
+                    later_user = any(
+                        (turn['role'] == 'user' and turn['sequence_number'] > challenge_boundary for turn in turns)
+                    )
+                    if not later_assistant and later_user:
+                        hypotheses_row = database.execute(
+                            "\n                            SELECT payload_json FROM audit_events\n"
+                            "                            WHERE session_id = ?\n"
+                            "                              AND event_type = 'proposal_challenge_hypotheses_recorded'\n"
+                            "                              AND json_extract(payload_json, '$.messageKey') = ?\n"
+                            "                            ORDER BY id DESC LIMIT 1\n                            ",
+                            (session_id, candidate.get('messageKey')),
+                        ).fetchone()
+                        hypotheses = load_json(hypotheses_row['payload_json']) if hypotheses_row is not None else None
+                        challenge_context = {**candidate, 'hypotheses': hypotheses}
+                break
     evidence_payload = {
         'versionId': version['id'],
         'play': dict(latest_play) if latest_play is not None else None,
@@ -1828,10 +1866,51 @@ def _record_disagreement_event(
     )
 
 
+def active_intent_conflict_choice(database, session_id, version_id):
+    """Return the latest unresolved conflict choice for the current Stage."""
+    rows = database.execute(
+        "\n        SELECT id, guidance_json FROM conversation_turns\n"
+        "        WHERE session_id = ? AND version_id = ? AND role = 'assistant'\n"
+        "        ORDER BY sequence_number DESC\n        ",
+        (session_id, version_id),
+    ).fetchall()
+    context = None
+    for row in rows:
+        guidance = load_json(row['guidance_json']) or {}
+        if not guidance.get('_intentHypothesisId'):
+            continue
+        review = guidance.get('_intentReviewState') or {}
+        if review.get('interactionMode') != 'conflict_choice':
+            return None
+        new_id = str(guidance.get('_intentHypothesisId') or '').strip()
+        existing_id = str(review.get('existingHypothesisId') or '').strip()
+        if not new_id or not existing_id:
+            continue
+        if context is None:
+            context = load_design_context(database, session_id, version_id)
+        hypotheses = {item.get('id'): item for item in context.get('intentHypotheses', []) if item.get('id')}
+        new_item = hypotheses.get(new_id)
+        existing_item = hypotheses.get(existing_id)
+        if (
+            new_item is not None
+            and existing_item is not None
+            and (new_item.get('status') == 'tentative')
+            and (existing_item.get('status') == 'confirmed')
+        ):
+            return {
+                'sourceTurnId': row['id'],
+                'newHypothesisId': new_id,
+                'existingHypothesisId': existing_id,
+                'explanation': str(review.get('reviewExplanation') or '').strip(),
+            }
+        return None
+    return None
+
+
 def _public_guidance(guidance):
     """Remove backend-only semantic memory patches before storing/rendering a turn."""
     result = dict(guidance or {})
-    dashboard_node = {}
+    dashboard_node = dict(result.get('dashboardNode') or {})
     if result.get('_intentHypothesisId'):
         dashboard_node['intentHypothesisId'] = result['_intentHypothesisId']
         review_state = result.get('_intentReviewState') or {}
@@ -1967,9 +2046,9 @@ def _update_design_context_from_turn(
             services=services,
         )
         patch = None
-    previous = load_design_context(database, session_id, version_id)
+    previous = copy.deepcopy(load_design_context(database, session_id, version_id))
     candidate_review = guidance.get('_intentCandidateReview') or {}
-    lazy_updates = candidate_review.get('reviewedActiveClaims') or [] if guidance.get('intentHypothesis') else []
+    lazy_updates = candidate_review.get('reviewedActiveClaims') or [] if allow_progress and guidance.get('intentHypothesis') else []
     for update in lazy_updates:
         target = next(
             (

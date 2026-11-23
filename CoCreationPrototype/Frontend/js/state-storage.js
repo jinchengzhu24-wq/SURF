@@ -8,7 +8,7 @@ import {
     chineseApiErrors,
     translations,
     validationTileNames,
-} from "./i18n.js?v=binary-discovery-20261123-v2-esm";
+} from "./i18n.js?v=binary-discovery-20261123-v3-esm";
 
 export function createInitialState() {
     return {
@@ -34,6 +34,8 @@ export function createInitialState() {
         deadlinePresentationState: "",
         pendingMessage: null,
         pendingBinary: null,
+        pendingFinalize: null,
+        pendingIntention: null,
         binaryRefreshTimer: null,
         proposalMode: false,
         questionFeedbackBusy: new Set(),
@@ -104,6 +106,12 @@ export function isLevelValidationError(error) {
     return LEVEL_VALIDATION_ERROR_CODES.has(error?.code);
 }
 
+export function isCardActionPending(pending) {
+    if (!pending) return false;
+    return ["execute_revision", "challenge_revision", "alternative_revision"].includes(pending.action)
+        || (pending.action === "continue_challenge" && Boolean(pending.challengeChoice));
+}
+
 export function recoverMessageFailure(error, session, pending) {
     if (!["RETRYABLE_REQUEST_FAILED", "INVALID_RESPONSE", "CLIENT_TIMEOUT"].includes(error?.code)) return error;
     const failure = session?.lastMessageFailure;
@@ -163,6 +171,8 @@ export function createStateStorage(ctx) {
     const renderChatRequestStatus = (...args) => ports.renderChatRequestStatus(...args);
     const api = (...args) => ports.api(...args);
     const withBusy = (...args) => ports.withBusy(...args);
+    const showLanding = (...args) => ports.showLanding(...args);
+    const enterWorkspaceFromSession = (...args) => ports.enterWorkspaceFromSession(...args);
     const scheduleComponentRecovery = (...args) => ports.scheduleComponentRecovery(...args);
     const persistPendingMessage = (...args) => ports.persistPendingMessage(...args);
     const escapeHtml = (...args) => ports.escapeHtml(...args);
@@ -245,13 +255,26 @@ export function createStateStorage(ctx) {
         try { await action(); }
         catch (error) {
             if (onError) onError();
+            let recoveredWorkspaceEntry = false;
             if (error?.retryable && state.sessionId) {
                 try {
+                    const wasWorkspaceHidden = Boolean(elements.workspace.hidden);
                     state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
-                    render();
+                    if (!state.session.languageLocked) {
+                        showLanding(state.session.demoMode ? "demo-preview" : "formal");
+                    } else if (wasWorkspaceHidden) {
+                        await enterWorkspaceFromSession();
+                        ports.restoreComposerDraft();
+                        ports.recoverPendingMessage();
+                        recoveredWorkspaceEntry = true;
+                    } else {
+                        render();
+                    }
                 } catch (_refreshError) { /* Preserve the original operation error. */ }
             }
-            showError(error, () => withBusy(action, onError));
+            if (!recoveredWorkspaceEntry) {
+                showError(error, () => withBusy(action, onError));
+            }
         }
         finally { state.busy = false; updateControls(); }
     }
@@ -263,7 +286,8 @@ export function createStateStorage(ctx) {
     }
 
     function recoveryPageEligible() {
-        return !document.hidden && state.session?.status === "active" && !deadlineExpired()
+        return !document.hidden && !state.unityPlayActive
+            && state.session?.status === "active" && !deadlineExpired()
             && state.selectedVersionId === state.session?.currentVersionId;
     }
 
@@ -273,7 +297,7 @@ export function createStateStorage(ctx) {
             return;
         }
         if (componentRecovery.busy) return;
-        if (state.busy || state.chatBusy) return cancelComponentRecoveryTimer();
+        if (state.busy || state.chatBusy || state.questionFeedbackBusy.size > 0) return cancelComponentRecoveryTimer();
         const task = (state.session?.interactionState?.recoveries || []).find(item =>
             ["pending", "retry_pending", "claimed", "waiting_message"].includes(item.status)
             && !componentRecovery.paused.has(item.recoveryId)
@@ -296,7 +320,8 @@ export function createStateStorage(ctx) {
     }
 
     function mergeRecoverySession(session, captured) {
-        if (!recoveryPageEligible() || state.sessionId !== captured.sessionId
+        if (state.busy || state.chatBusy || state.questionFeedbackBusy.size > 0
+            || !recoveryPageEligible() || state.sessionId !== captured.sessionId
             || state.selectedVersionId !== captured.selectedVersionId
             || state.session.currentVersionId !== captured.versionId
             || session.sessionId !== captured.sessionId || session.currentVersionId !== captured.versionId) return false;
@@ -324,11 +349,17 @@ export function createStateStorage(ctx) {
     }
 
     async function recoverComponent(task) {
-        if (componentRecovery.busy || state.busy || state.chatBusy || !recoveryPageEligible()
-            || task.baseVersionId !== state.session.currentVersionId) return;
+        if (componentRecovery.busy || state.busy || state.chatBusy || state.questionFeedbackBusy.size > 0
+            || !recoveryPageEligible() || task.baseVersionId !== state.session.currentVersionId) return;
         componentRecovery.busy = true;
         const captured = { sessionId: state.sessionId, selectedVersionId: state.selectedVersionId,
             versionId: state.session.currentVersionId };
+        const canReplayKey = () => Boolean(
+            task.nextAttemptKey
+            && state.sessionId === captured.sessionId
+            && state.session?.currentVersionId === captured.versionId
+            && (!recoveryPageEligible() || state.busy || state.chatBusy || state.questionFeedbackBusy.size > 0)
+        );
         try {
             let session;
             if (["claimed", "waiting_message"].includes(task.status)) {
@@ -343,9 +374,8 @@ export function createStateStorage(ctx) {
                 });
             }
             const merged = mergeRecoverySession(session, captured);
-            if (!merged && state.sessionId === captured.sessionId
-                && state.session?.currentVersionId === captured.versionId && !recoveryPageEligible()) {
-                // Hidden/history views defer UI delivery. Replay the same server key
+            if (!merged && canReplayKey()) {
+                // Hidden/history/play/busy views defer UI delivery. Replay the same server key
                 // on return; it cannot spend a second model attempt.
                 componentRecovery.dispatched.delete(task.nextAttemptKey);
             }
@@ -353,7 +383,19 @@ export function createStateStorage(ctx) {
             // Confirm a server commit without turning auxiliary failure into a chat error.
             try {
                 const session = await api(`/api/sessions/${captured.sessionId}`, { timeoutMs: COMPONENT_RECOVERY_TIMEOUT_MS });
-                mergeRecoverySession(session, captured);
+                const latestTask = (session.interactionState?.recoveries || []).find(
+                    item => item.recoveryId === task.recoveryId
+                );
+                const unclaimed = Boolean(
+                    task.nextAttemptKey
+                    && latestTask
+                    && latestTask.nextAttemptKey === task.nextAttemptKey
+                    && ["pending", "retry_pending", "waiting_message"].includes(latestTask.status)
+                );
+                const merged = mergeRecoverySession(session, captured);
+                if (unclaimed || (!merged && canReplayKey())) {
+                    componentRecovery.dispatched.delete(task.nextAttemptKey);
+                }
             } catch (_) { componentRecovery.paused.add(task.recoveryId); }
         } finally {
             componentRecovery.busy = false;
@@ -444,7 +486,7 @@ export function createStateStorage(ctx) {
     }
 
     function showError(error, retryAction) {
-        if (state.session && !elements.workspace.hidden) {
+        if (state.session && !elements.workspace.hidden && canEditSelected()) {
             showReplyNotice("", error, error.retryable ? retryAction : null,
                 retryAction?.assessmentVersionId || state.selectedVersionId);
             return;
@@ -464,7 +506,7 @@ export function createStateStorage(ctx) {
             return t("proposalPreconditionFailed");
         }
         const groups = {
-            replyFailed: ["UPSTREAM_TIMEOUT", "UPSTREAM_CONNECTION_ERROR", "UPSTREAM_SERVER_ERROR", "MODEL_EMPTY_RESPONSE", "MODEL_RESPONSE_INVALID", "MODEL_LOW_QUALITY_RESPONSE", "CLIENT_TIMEOUT", "RETRYABLE_REQUEST_FAILED", "INVALID_RESPONSE", "CHALLENGE_REVIEW_FAILED"],
+            replyFailed: ["UPSTREAM_TIMEOUT", "UPSTREAM_CONNECTION_ERROR", "UPSTREAM_SERVER_ERROR", "UPSTREAM_RATE_LIMIT", "UPSTREAM_ERROR", "MODEL_EMPTY_RESPONSE", "MODEL_RESPONSE_INVALID", "MODEL_LOW_QUALITY_RESPONSE", "CLIENT_TIMEOUT", "RETRYABLE_REQUEST_FAILED", "INVALID_RESPONSE", "CHALLENGE_REVIEW_FAILED"],
             modificationFailed: ["REVISION_EXECUTION_INVALID", "REVISION_EXECUTION_MISMATCH", "SEMANTIC_POSTCONDITION_FAILED", "EXECUTION_REPLAY_MISMATCH", "CANDIDATE_UNSOLVABLE"],
             checkIncomplete: ["SEARCH_BUDGET_EXCEEDED"],
             oldProposal: ["INVALID_CARD_SOURCE", "PROPOSAL_STALE"],
@@ -487,7 +529,8 @@ export function createStateStorage(ctx) {
         };
         if (special[error?.code]) return special[error.code][state.language === "zh-CN" ? 0 : 1];
         const message = state.language === "zh-CN"
-            ? chineseApiErrors[error?.code] : translations.en[`error_${error?.code}`];
+            ? (chineseApiErrors[error?.code] || translations["zh-CN"]?.[`error_${error?.code}`])
+            : translations.en?.[`error_${error?.code}`];
         const details = formatValidationDetails(error);
         return [message || t("errorGeneric"), details].filter(Boolean).join(" ");
     }
@@ -563,8 +606,12 @@ export function createStateStorage(ctx) {
         }
         if (error?.code === "PROPOSAL_STALE") return t("proposalStale");
         const localized = state.language === "zh-CN"
-            ? ORIGINAL_ERROR_COPY["zh-CN"][error?.code]
-            : ORIGINAL_ERROR_COPY.en[`error_${error?.code}`];
+            ? (ORIGINAL_ERROR_COPY["zh-CN"]?.[error?.code]
+                || ORIGINAL_ERROR_COPY["zh-CN"]?.[`error_${error?.code}`]
+                || chineseApiErrors[error?.code]
+                || translations["zh-CN"]?.[`error_${error?.code}`])
+            : (ORIGINAL_ERROR_COPY.en?.[`error_${error?.code}`]
+                || translations.en?.[`error_${error?.code}`]);
         const componentMessage = error?.details?.failureStage === "clarification_review"
             ? (state.language === "zh-CN"
                 ? "方案澄清的复核未完成，可使用原消息安全重试。"
@@ -721,9 +768,10 @@ export function createStateStorage(ctx) {
         const completed = turns.some(
             turn => turn.role === "assistant" && turn.requestId === pending.idempotencyKey
         );
+        const cardAction = isCardActionPending(pending);
 
         if (completed) {
-            if (elements.messageInput.value.trim() === pending.content) {
+            if (!cardAction && elements.messageInput.value.trim() === pending.content) {
                 elements.messageInput.value = "";
                 localStorage.removeItem(composerKey());
             }
@@ -733,17 +781,30 @@ export function createStateStorage(ctx) {
             return;
         }
 
+        const lastFailure = state.session?.lastMessageFailure;
+        if (lastFailure
+            && lastFailure.messageKey === pending.idempotencyKey
+            && lastFailure.baseVersionId === pending.baseVersionId
+            && lastFailure.retryable === false) {
+            clearPendingMessage();
+            return;
+        }
+
         const draft = elements.messageInput.value.trim();
-        if (draft && draft !== pending.content) {
+        if (!cardAction && draft && draft !== pending.content) {
             clearPendingMessage();
             return;
         }
 
         state.pendingMessage = pending;
-        setProposalMode(pending.requestProposal === true);
+        if (!cardAction) {
+            setProposalMode(pending.requestProposal === true);
+        }
         persistPendingMessage();
-        elements.messageInput.value = pending.content;
-        localStorage.setItem(composerKey(), pending.content);
+        if (!cardAction) {
+            elements.messageInput.value = pending.content;
+            localStorage.setItem(composerKey(), pending.content);
+        }
         const pendingError = new Error(t("chatRetryPending"));
         pendingError.code = "PENDING_MESSAGE";
         pendingError.retryable = true;
@@ -788,7 +849,7 @@ export function createStateStorage(ctx) {
                 pending.action === "continue_challenge"
                 && typeof pending.challengeId !== "string"
             ) return null;
-            if (pending.challengeChoice !== undefined && !["ai", "user"].includes(pending.challengeChoice)) return null;
+            if (pending.challengeChoice !== undefined && !["ai", "user", "retain_current"].includes(pending.challengeChoice)) return null;
             if (pending.baseVersionId !== state.session.currentVersionId) return null;
             localStorage.setItem(currentKey, JSON.stringify(pending));
             localStorage.removeItem(legacyKey);
@@ -898,6 +959,7 @@ export function createStateStorage(ctx) {
         renderControlHints,
         technicalErrorMessage,
         isLevelValidationError,
+        isCardActionPending,
         formatValidationDetails,
         showNotice,
         showPlayReturnNotice,

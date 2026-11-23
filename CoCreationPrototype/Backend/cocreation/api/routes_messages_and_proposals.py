@@ -1,20 +1,21 @@
 """Conversation, proposal discovery, challenge, recovery, and decision routes."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import timedelta
+from datetime import timedelta, timezone
 from functools import wraps
 from threading import Lock
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, Request, Response
 
-from cocreation.clock import iso_time
+from cocreation.clock import iso_time, parse_time
 from cocreation.domain import binary_discovery
 from cocreation.domain import proposal_options
 from cocreation.domain.design_context import (
@@ -38,7 +39,7 @@ from cocreation.domain.proposal_diagnostics import (
     proposal_phase,
     trace_proposal,
 )
-from cocreation.domain.proposal_understanding import bind_latest, protected_request_message, reusable_understanding, validate_engagement
+from cocreation.domain.proposal_understanding import bind_latest, protected_request_message, reusable_understanding, topic_signature, validate_engagement
 from cocreation.domain.revision_workflow import SemanticConstraintError, validate_semantic_constraints
 from cocreation.domain.conversation_evidence import with_latest
 from cocreation.llm.facade import KIMI_MODEL, LLMExecutionResult, LLMServiceError, _dialogue_background_prompt, _strip_unverified_state_claims, validate_execution_brief
@@ -97,6 +98,7 @@ from .context_and_discovery import (
     _record_disagreement_event,
     _update_design_context_from_turn,
     _verified_proposal_message,
+    active_intent_conflict_choice as _active_intent_conflict_choice,
     build_llm_context,
     record_intent_evidence,
     record_intent_hypothesis,
@@ -231,10 +233,14 @@ def retry_component_recovery(
         if services.monotonic() >= deadline:
             failure_code = 'RECOVERY_TIMEOUT'
     except (LLMServiceError, ValueError, TypeError, KeyError, IndexError, TimeoutError, httpx.HTTPError) as error:
-        failure_code = getattr(error, 'code', None) or 'STATE_UNVERIFIED'
+        if isinstance(error, TimeoutError):
+            failure_code = 'RECOVERY_TIMEOUT'
+        else:
+            failure_code = getattr(error, 'code', None) or 'STATE_UNVERIFIED'
+    recovery_status = None
     with services.connect(immediate=True) as database:
         session = require_browser_session(database, session_id, access_cookie, services=services)
-        component_recovery.finish(
+        recovery_status = component_recovery.finish(
             database,
             session,
             task,
@@ -243,7 +249,10 @@ def retry_component_recovery(
             clock=services.clock,
             record_event_fn=services.record_event,
         )
-        return services.serialize_session(database, session_id)
+        session_payload = services.serialize_session(database, session_id)
+    if recovery_status == 'applied':
+        synchronize_manual_edit_review_nodes(session_id, payload.baseVersionId, services=services)
+    return session_payload
 
 
 def _intent_feedback_event(database, session_id, idempotency_key):
@@ -280,47 +289,6 @@ def _intent_feedback_signature_matches(stored, current):
     stored = dict(stored or {})
     stored.setdefault('selectedHypothesisId', None)
     return stored == current
-
-
-def _active_intent_conflict_choice(database, session_id, version_id):
-    """Return the latest unresolved conflict choice for the current Stage."""
-    rows = database.execute(
-        "\n        SELECT id, guidance_json FROM conversation_turns\n"
-        "        WHERE session_id = ? AND version_id = ? AND role = 'assistant'\n"
-        "        ORDER BY sequence_number DESC\n        ",
-        (session_id, version_id),
-    ).fetchall()
-    context = None
-    for row in rows:
-        guidance = load_json(row['guidance_json']) or {}
-        if not guidance.get('_intentHypothesisId'):
-            continue
-        review = guidance.get('_intentReviewState') or {}
-        if review.get('interactionMode') != 'conflict_choice':
-            return None
-        new_id = str(guidance.get('_intentHypothesisId') or '').strip()
-        existing_id = str(review.get('existingHypothesisId') or '').strip()
-        if not new_id or not existing_id:
-            continue
-        if context is None:
-            context = load_design_context(database, session_id, version_id)
-        hypotheses = {item.get('id'): item for item in context.get('intentHypotheses', []) if item.get('id')}
-        new_item = hypotheses.get(new_id)
-        existing_item = hypotheses.get(existing_id)
-        if (
-            new_item is not None
-            and existing_item is not None
-            and (new_item.get('status') == 'tentative')
-            and (existing_item.get('status') == 'confirmed')
-        ):
-            return {
-                'sourceTurnId': row['id'],
-                'newHypothesisId': new_id,
-                'existingHypothesisId': existing_id,
-                'explanation': str(review.get('reviewExplanation') or '').strip(),
-            }
-        return None
-    return None
 
 
 def _question_feedback_event(database, session_id, idempotency_key):
@@ -474,12 +442,14 @@ def submit_intent_feedback(
                 if existing is None or existing.get('status') != 'confirmed':
                     raise ApiError(409, 'STALE_INTENT_CARD', 'The confirmed inclination in this conflict is no longer current.')
                 choice = 'new' if selected_hypothesis_id == new_id else 'existing'
+                revised_statement = str(review_state.get('candidateText') or '').strip() if choice == 'new' else ''
+                chosen_new_statement = revised_statement or target.get('statement')
                 evidence_id = record_intent_evidence(
                     database,
                     session_id,
                     payload.baseVersionId,
                     'intent_conflict_choice',
-                    target.get('statement') if choice == 'new' else existing.get('statement'),
+                    chosen_new_statement if choice == 'new' else existing.get('statement'),
                     turn_id=payload.sourceTurnId,
                     details={
                         'action': 'keep',
@@ -494,12 +464,13 @@ def submit_intent_feedback(
                     context, _ = resolve_intent_hypothesis(
                         context,
                         new_id,
-                        'confirm',
+                        'revise' if revised_statement else 'confirm',
+                        candidate_text=revised_statement or None,
                         supersedes_ids=[existing_id],
                         evidence_id=evidence_id,
                         stage_id=payload.baseVersionId,
                         turn_id=payload.sourceTurnId,
-                        display_statement=target.get('statement'),
+                        display_statement=chosen_new_statement,
                         display_language=session['language'],
                     )
                     outcome = 'kept_new'
@@ -722,6 +693,7 @@ def submit_intent_feedback(
                         'reviewExplanation': explanation,
                         'existingHypothesisId': conflict_existing_id,
                         'newHypothesisId': hypothesis_id,
+                        'candidateText': statement,
                     },
                 },
             )
@@ -770,7 +742,7 @@ def _route_message_to_active_challenge(
     if payload.exitChallenge or payload.action not in {'none', 'continue_challenge'}:
         return payload
     with services.connect(immediate=True) as database:
-        session = require_active_session(database, session_id, access_cookie, services=services)
+        require_browser_session(database, session_id, access_cookie, services=services)
         answered = database.execute(
             "SELECT guidance_json FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
             (session_id, payload.idempotencyKey),
@@ -782,6 +754,7 @@ def _route_message_to_active_challenge(
                     raise ApiError(409, 'CHALLENGE_STALE', 'The retry belongs to another challenge.')
                 return payload.model_copy(update={'action': 'continue_challenge', 'challengeId': prior_state['challengeId']})
             return payload
+        session = require_active_session(database, session_id, access_cookie, services=services)
         require_current_base(session, payload.baseVersionId)
         challenge = database.execute(
             "\n            SELECT * FROM revision_challenges\n"
@@ -791,9 +764,48 @@ def _route_message_to_active_challenge(
             (session_id, payload.baseVersionId),
         ).fetchone()
         if challenge is None:
+            if payload.action == 'continue_challenge':
+                active_disagreement = (load_design_context(database, session_id, payload.baseVersionId) or {}).get('activeDisagreement') or {}
+                if (
+                    active_disagreement.get('status') == 'active'
+                    and active_disagreement.get('subject') != 'ai_revision_challenge'
+                    and payload.challengeId
+                    and active_disagreement.get('challengeId') == payload.challengeId
+                ):
+                    return payload
+                raise ApiError(409, 'CHALLENGE_STALE', 'The selected challenge is no longer active.')
             return payload
         if payload.challengeId and payload.challengeId != challenge['challenge_id']:
             raise ApiError(409, 'CHALLENGE_STALE', 'The selected challenge is no longer active.')
+        if payload.action == 'none' and payload.requestProposal:
+            raise ApiError(409, 'DISAGREEMENT_ACTIVE', 'Resolve the active design disagreement before requesting a new proposal.')
+        cutoff = services.utc_datetime() - timedelta(seconds=125)
+        now_str = services.utc_now()
+        stale_reviews = database.execute(
+            "\n            SELECT review_id, updated_at FROM challenge_reason_reviews\n"
+            "            WHERE session_id = ? AND challenge_id = ? AND status = 'reviewing'\n            ",
+            (session_id, challenge['challenge_id']),
+        ).fetchall()
+        expired_review = False
+        for stale_row in stale_reviews:
+            parsed_updated = parse_time(stale_row['updated_at'])
+            if parsed_updated.tzinfo is None:
+                parsed_updated = parsed_updated.replace(tzinfo=timezone.utc)
+            if parsed_updated <= cutoff:
+                database.execute(
+                    "\n                    UPDATE challenge_reason_reviews\n"
+                    "                    SET status = 'review_pending', updated_at = ?\n"
+                    "                    WHERE review_id = ? AND session_id = ? AND status = 'reviewing'\n                    ",
+                    (now_str, stale_row['review_id'], session_id),
+                )
+                expired_review = True
+        if expired_review and challenge['status'] == 'reviewing':
+            database.execute(
+                "\n                UPDATE revision_challenges\n"
+                "                SET status = 'review_pending', updated_at = ?\n"
+                "                WHERE challenge_id = ? AND session_id = ? AND status = 'reviewing'\n                ",
+                (now_str, challenge['challenge_id'], session_id),
+            )
         routed = payload.model_copy(update={'action': 'continue_challenge', 'challengeId': challenge['challenge_id']})
         review = database.execute(
             "\n            SELECT review.message_key, review.status, turn.content\n"
@@ -1081,182 +1093,250 @@ def _send_message_locked_impl(
     message_started_at = getattr(request.state, 'llm_started_at', services.monotonic())
     llm_budget_seconds = services.settings.llm_internal_deadline_seconds
     precomputed_understanding = None
-    if payload.action != 'none':
-        with services.connect() as database:
-            require_active_session(database, session_id, access_cookie, services=services)
-            active_binary = binary_discovery.current_topic(database, session_id, payload.baseVersionId)
-            if active_binary and active_binary['status'] in binary_discovery.ACTIVE:
-                raise ApiError(409, 'PROPOSAL_CHOICE_REQUIRED', 'Finish or cancel the current A/B proposal first.')
-    if payload.action == 'none':
-        with services.connect() as read_database:
-            read_session = require_active_session(read_database, session_id, access_cookie, services=services)
-            request_signature = message_request_signature(
-                content,
-                base_version_id=payload.baseVersionId,
-                request_proposal=payload.requestProposal,
-                action=payload.action,
-                source_turn_id=payload.sourceTurnId,
-            )
-            trace_proposal('request_binding', 'binding', 'passed', bindingSignature=request_signature, sourceTurnId=payload.sourceTurnId)
-            prior_failure = read_database.execute(
-                "SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
-                "AND json_extract(payload_json, '$.messageKey')=? ORDER BY id DESC LIMIT 1",
-                (session_id, payload.idempotencyKey),
-            ).fetchone()
-            previous_signature = (load_json(prior_failure['payload_json']) or {}).get('requestSignature') if prior_failure else None
-            if previous_signature and previous_signature != request_signature:
-                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The failed message key belongs to a different request.')
-            read_user = read_database.execute(
-                "SELECT content, version_id FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'user'",
-                (session_id, payload.idempotencyKey),
-            ).fetchone()
-            if conflicts_with_saved_user_turn(read_user, content, payload.baseVersionId):
-                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The message key was already used for different content or Stage.')
+    expected_understanding_signature = None
+    understanding_context = None
+    understanding_freshly_classified = False
+    pending_binary_start = False
+    request_signature = message_request_signature(
+        content,
+        base_version_id=payload.baseVersionId,
+        request_proposal=payload.requestProposal,
+        action=payload.action,
+        source_turn_id=payload.sourceTurnId,
+    )
+    trace_proposal('request_binding', 'binding', 'passed', bindingSignature=request_signature, sourceTurnId=payload.sourceTurnId)
+    session_payload = None
+    prior_conversation = None
+    snapshot_for_understanding = None
+    proposal_context_for_understanding = None
+    with services.connect() as read_database:
+        read_session = require_browser_session(read_database, session_id, access_cookie, services=services)
+        prior_failure = read_database.execute(
+            "SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
+            "AND json_extract(payload_json, '$.messageKey')=? ORDER BY id DESC LIMIT 1",
+            (session_id, payload.idempotencyKey),
+        ).fetchone()
+        previous_signature = (load_json(prior_failure['payload_json']) or {}).get('requestSignature') if prior_failure else None
+        if previous_signature and previous_signature != request_signature:
+            raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The failed message key belongs to a different request.')
+        read_user = read_database.execute(
+            "SELECT id, content, version_id FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'user'",
+            (session_id, payload.idempotencyKey),
+        ).fetchone()
+        if conflicts_with_saved_user_turn(read_user, content, payload.baseVersionId):
+            raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The message key was already used for different content or Stage.')
+        binary_receipt = binary_routes._receipt(read_database, session_id, payload.idempotencyKey)
+        if binary_receipt:
+            if binary_receipt['request'].get('kind') != 'start':
+                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This key belongs to another action.')
+            expected = {
+                'kind': 'start',
+                'baseVersionId': payload.baseVersionId,
+                'content': content,
+                'requestProposal': payload.requestProposal,
+            }
+            if payload.action != 'none' or binary_receipt['request'] != expected:
+                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This key belongs to another action.')
+            if binary_receipt['status'] == 'done':
+                session_payload = services.serialize_session(read_database, session_id)
+            else:
+                binary_topic = binary_discovery.current_topic(
+                    read_database,
+                    session_id,
+                    payload.baseVersionId,
+                    clock=services.clock,
+                )
+                if (
+                    not binary_topic
+                    or binary_topic['status'] not in binary_discovery.ACTIVE
+                    or binary_topic['initialMessageKey'] != payload.idempotencyKey
+                ):
+                    raise ApiError(409, 'PROPOSAL_STALE', 'This proposal discovery request is no longer active.')
+                pending_binary_start = True
+        else:
+            prior_action = _action_for_message_key(read_database, session_id, payload.idempotencyKey)
+            if prior_action is not None and prior_action != (payload.action, payload.sourceTurnId):
+                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The message key was already used for a different card action.')
+            if read_user is not None and payload.action in REVISION_CARD_ACTIONS and (prior_action is None):
+                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The message key was already used by an ordinary message.')
+            prior_proposal_request = _proposal_request_for_message_key(read_database, session_id, payload.idempotencyKey)
+            if read_user is not None and bool(prior_proposal_request) != payload.requestProposal:
+                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The message key was already used with a different proposal-request mode.')
             already_answered = read_database.execute(
                 "SELECT 1 FROM conversation_turns\n                WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
                 (session_id, payload.idempotencyKey),
             ).fetchone()
-            binary_receipt = binary_routes._receipt(read_database, session_id, payload.idempotencyKey)
-            if binary_receipt and binary_receipt['request'].get('kind') == 'start':
-                expected = {
-                    'kind': 'start',
-                    'baseVersionId': payload.baseVersionId,
-                    'content': content,
-                    'requestProposal': payload.requestProposal,
-                }
-                if binary_receipt['request'] != expected:
-                    raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This key belongs to another action.')
-                if binary_receipt['status'] == 'done':
-                    return services.serialize_session(read_database, session_id)
-            if already_answered is None:
+            if already_answered is not None:
+                session_payload = services.serialize_session(read_database, session_id)
+        if session_payload is None:
+            read_session = require_active_session(read_database, session_id, access_cookie, services=services)
+            if payload.action != 'none':
+                active_binary = binary_discovery.current_topic(
+                    read_database,
+                    session_id,
+                    payload.baseVersionId,
+                    clock=services.clock,
+                )
+                if active_binary and active_binary['status'] in binary_discovery.ACTIVE:
+                    raise ApiError(409, 'PROPOSAL_CHOICE_REQUIRED', 'Finish or cancel the current A/B proposal first.')
+            else:
                 require_current_base(read_session, payload.baseVersionId)
-                binary_topic = binary_discovery.current_topic(read_database, session_id, payload.baseVersionId)
+                binary_topic = binary_discovery.current_topic(
+                    read_database,
+                    session_id,
+                    payload.baseVersionId,
+                    clock=services.clock,
+                )
                 if (
                     binary_topic
                     and binary_topic['status'] in binary_discovery.ACTIVE
                     and (payload.idempotencyKey != binary_topic['initialMessageKey'] or content != binary_topic['initialRequest'])
                 ):
                     raise ApiError(409, 'PROPOSAL_CHOICE_REQUIRED', 'Use the current A/B buttons, retry, or cancel this proposal.')
-            saved_understanding = read_database.execute(
-                "SELECT payload_json FROM audit_events\n"
-                "                WHERE session_id = ? AND event_type = 'turn_understanding'\n"
-                "                  AND json_extract(payload_json, '$.messageKey') = ?\n"
-                "                ORDER BY id DESC LIMIT 1",
-                (session_id, payload.idempotencyKey),
-            ).fetchone()
-            if (
-                saved_understanding is not None
-                and already_answered is None
-                and (not reusable_understanding(load_json(saved_understanding['payload_json'])['result'], payload.baseVersionId))
-            ):
-                saved_understanding = None
-            if saved_understanding is not None:
-                precomputed_understanding = load_json(saved_understanding['payload_json'])['result']
-            elif already_answered is None:
+                if _active_intent_conflict_choice(read_database, session_id, payload.baseVersionId) is not None:
+                    raise ApiError(409, 'INTENT_CONFLICT_PENDING', 'Retain one of the conflicting inclinations before sending another message.')
                 read_version = get_current_version(read_database, read_session)
                 read_context = build_llm_context(read_database, session_id, read_version, services=services)
-                prior_conversation = read_context['conversation']
-                if not prior_conversation or prior_conversation[-1].get('role') != 'user' or prior_conversation[-1].get('content') != content:
-                    prior_conversation = [*prior_conversation, {'role': 'user', 'content': content}]
                 snapshot_for_understanding = read_context['stageContext']['stageSnapshot']
                 proposal_context_for_understanding = read_context['stageContext'].get('proposalDiscovery') or {}
-            else:
-                prior_conversation = None
-        if saved_understanding is None and already_answered is None:
-            interpretation_context = (
-                {
-                    key: proposal_context_for_understanding.get(key)
-                    for key in (
-                        'topicId',
-                        'versionId',
-                        'initialRequest',
-                        'questions',
-                        'answers',
-                        'lastQuestionText',
-                        'userTurns',
-                        'understanding',
-                        'optionSet',
-                        'optionQuestion',
-                        'optionDecision',
-                        'clarificationQuestionCount',
-                    )
-                }
-                if proposal_context_for_understanding
-                else {}
-            )
-            interpretation_context['dialogueEvidence'] = with_latest(read_context['stageContext'].get('dialogueEvidence'), content)
-            interpretation_context['activeDisagreement'] = read_context['stageContext'].get('activeDisagreement')
-            try:
-                precomputed_understanding = services.llm.classify_turn_understanding(
-                    prior_conversation,
-                    snapshot_for_understanding,
-                    request.state.request_id,
-                    forced_proposal=payload.requestProposal,
-                    proposal_context=interpretation_context,
-                    _deadline=message_started_at + llm_budget_seconds,
+                interpretation_context = (
+                    {
+                        key: proposal_context_for_understanding.get(key)
+                        for key in (
+                            'topicId',
+                            'versionId',
+                            'initialRequest',
+                            'questions',
+                            'answers',
+                            'lastQuestionText',
+                            'userTurns',
+                            'understanding',
+                            'optionSet',
+                            'optionQuestion',
+                            'optionDecision',
+                            'clarificationQuestionCount',
+                        )
+                    }
+                    if proposal_context_for_understanding
+                    else {}
                 )
-            except LLMServiceError as error:
-                with services.connect(immediate=True) as database:
-                    active_session = require_active_session(database, session_id, access_cookie, services=services)
-                    require_current_base(active_session, payload.baseVersionId)
+                dialogue_evidence = copy.deepcopy(read_context['stageContext'].get('dialogueEvidence'))
+                if read_user is not None and isinstance(dialogue_evidence, dict):
+                    dialogue_evidence['turns'] = [
+                        item for item in (dialogue_evidence.get('turns') or []) if item.get('id') != read_user['id']
+                    ]
+                    if 'userTurns' in interpretation_context and isinstance(interpretation_context.get('userTurns'), list):
+                        interpretation_context['userTurns'] = [
+                            item for item in interpretation_context['userTurns'] if item.get('id') != read_user['id']
+                        ]
+                interpretation_context['dialogueEvidence'] = with_latest(dialogue_evidence, content)
+                interpretation_context['activeDisagreement'] = read_context['stageContext'].get('activeDisagreement')
+                understanding_context = interpretation_context
+                expected_understanding_signature = topic_signature(snapshot_for_understanding, interpretation_context, content)
+                saved_understanding = read_database.execute(
+                    "SELECT payload_json FROM audit_events\n"
+                    "                WHERE session_id = ? AND event_type = 'turn_understanding'\n"
+                    "                  AND json_extract(payload_json, '$.messageKey') = ?\n"
+                    "                ORDER BY id DESC LIMIT 1",
+                    (session_id, payload.idempotencyKey),
+                ).fetchone()
+                if saved_understanding is not None and not reusable_understanding(
+                    load_json(saved_understanding['payload_json'])['result'],
+                    payload.baseVersionId,
+                    expected_signature=expected_understanding_signature,
+                    context=understanding_context,
+                ):
+                    saved_understanding = None
+                if saved_understanding is not None:
+                    precomputed_understanding = load_json(saved_understanding['payload_json'])['result']
+                else:
+                    prior_conversation = read_context['conversation']
+                    if not prior_conversation or prior_conversation[-1].get('role') != 'user' or prior_conversation[-1].get('content') != content:
+                        prior_conversation = [*prior_conversation, {'role': 'user', 'content': content}]
+    if session_payload is not None:
+        synchronize_turn_with_online_match(session_id, payload.idempotencyKey, services=services)
+        return session_payload
+    if payload.action == 'none' and precomputed_understanding is None:
+        try:
+            precomputed_understanding = services.llm.classify_turn_understanding(
+                prior_conversation,
+                snapshot_for_understanding,
+                request.state.request_id,
+                forced_proposal=payload.requestProposal,
+                proposal_context=understanding_context,
+                _deadline=message_started_at + llm_budget_seconds,
+            )
+            understanding_freshly_classified = True
+        except LLMServiceError as error:
+            with services.connect(immediate=True) as database:
+                active_session = require_active_session(database, session_id, access_cookie, services=services)
+                require_current_base(active_session, payload.baseVersionId)
+                services.record_event(
+                    database,
+                    session_id,
+                    'message_generation_failed',
+                    {
+                        'messageKey': payload.idempotencyKey,
+                        'baseVersionId': payload.baseVersionId,
+                        'requestId': request.state.request_id,
+                        'code': error.code,
+                        'retryable': error.retryable,
+                        'attemptsUsed': error.attempts_used,
+                        'proposalRequested': payload.requestProposal,
+                        'requestSignature': request_signature,
+                        'details': {
+                            **_llm_failure_details(error),
+                            'task': 'turn_understanding',
+                            'failureStage': (getattr(error, 'details', {}) or {}).get('failureStage', 'understanding'),
+                            'maximumAttempts': 2,
+                        },
+                    },
+                    services.utc_now(),
+                )
+                if proposal_context_for_understanding:
                     services.record_event(
                         database,
                         session_id,
-                        'message_generation_failed',
+                        'proposal_discovery_progress',
                         {
+                            'stageId': payload.baseVersionId,
+                            'topicId': proposal_context_for_understanding['topicId'],
                             'messageKey': payload.idempotencyKey,
-                            'baseVersionId': payload.baseVersionId,
-                            'requestId': request.state.request_id,
-                            'code': error.code,
-                            'retryable': error.retryable,
-                            'attemptsUsed': error.attempts_used,
-                            'proposalRequested': payload.requestProposal,
-                            'requestSignature': request_signature,
-                            'details': {
-                                **_llm_failure_details(error),
-                                'task': 'turn_understanding',
-                                'failureStage': (getattr(error, 'details', {}) or {}).get('failureStage', 'understanding'),
-                                'maximumAttempts': 2,
-                            },
+                            'status': 'retry_pending',
+                            'retryable': True,
+                            'failureCode': error.code,
+                            'clarificationQuestionCount': proposal_context_for_understanding.get('clarificationQuestionCount', 0),
                         },
                         services.utc_now(),
                     )
-                    if proposal_context_for_understanding:
-                        services.record_event(
-                            database,
-                            session_id,
-                            'proposal_discovery_progress',
-                            {
-                                'stageId': payload.baseVersionId,
-                                'topicId': proposal_context_for_understanding['topicId'],
-                                'messageKey': payload.idempotencyKey,
-                                'status': 'retry_pending',
-                                'retryable': True,
-                                'failureCode': error.code,
-                                'clarificationQuestionCount': proposal_context_for_understanding.get('clarificationQuestionCount', 0),
-                            },
-                            services.utc_now(),
-                        )
-                if payload.requestProposal or proposal_context_for_understanding or error.code != 'MODEL_RESPONSE_INVALID':
-                    raise
-                precomputed_understanding = {
-                    'acts': ['unclear'],
-                    'elements': [],
-                    'evidenceSpan': content,
-                    'directionSufficient': False,
-                    'mapRelated': True,
-                    'changes': [],
-                    'proposalUnderstanding': None,
-                    'conversationOnly': True,
-                    'semanticPolicyVersion': 1,
-                }
-    if payload.action == 'none' and precomputed_understanding is not None and (already_answered is None):
+            if payload.requestProposal or proposal_context_for_understanding or error.code != 'MODEL_RESPONSE_INVALID':
+                raise
+            precomputed_understanding = {
+                'acts': ['unclear'],
+                'elements': [],
+                'evidenceSpan': content,
+                'directionSufficient': False,
+                'mapRelated': True,
+                'changes': [],
+                'proposalUnderstanding': None,
+                'conversationOnly': True,
+                'semanticPolicyVersion': 1,
+            }
+            understanding_freshly_classified = True
+    if payload.action == 'none' and precomputed_understanding is not None:
         with services.connect() as database:
             session = require_active_session(database, session_id, access_cookie, services=services)
             require_current_base(session, payload.baseVersionId)
+            if _active_intent_conflict_choice(database, session_id, payload.baseVersionId) is not None:
+                raise ApiError(409, 'INTENT_CONFLICT_PENDING', 'Retain one of the conflicting inclinations before sending another message.')
             binary_context = build_llm_context(database, session_id, get_current_version(database, session), services=services)
-            binary_topic = binary_discovery.current_topic(database, session_id, payload.baseVersionId)
-            retry_binary = bool(
+            binary_topic = binary_discovery.current_topic(
+                database,
+                session_id,
+                payload.baseVersionId,
+                clock=services.clock,
+            )
+            retry_binary = pending_binary_start or bool(
                 binary_topic
                 and binary_topic['status'] in binary_discovery.ACTIVE
                 and (binary_topic['initialMessageKey'] == payload.idempotencyKey)
@@ -1271,8 +1351,9 @@ def _send_message_locked_impl(
                 request,
                 access_cookie,
             )
+    replayed_session_payload = None
     with services.connect(immediate=True) as database:
-        session = require_active_session(database, session_id, access_cookie, services=services)
+        session = require_browser_session(database, session_id, access_cookie, services=services)
         prior_user = database.execute(
             "\n            SELECT * FROM conversation_turns\n"
             "            WHERE session_id = ? AND request_id = ? AND role = 'user'\n            ",
@@ -1294,293 +1375,319 @@ def _send_message_locked_impl(
             (session_id, payload.idempotencyKey),
         ).fetchone()
         if prior_assistant is not None:
-            session_payload = services.serialize_session(database, session_id)
-            database.commit()
-            synchronize_turn_with_online_match(session_id, payload.idempotencyKey, services=services)
-            return session_payload
-        if payload.action in {'none', 'continue_challenge'}:
-            require_current_base(session, payload.baseVersionId)
-        elif payload.baseVersionId != session['current_version_id']:
-            raise ApiError(409, 'PROPOSAL_STALE', 'The selected proposal belongs to an older Stage.', details={'reason': 'version_changed'})
-        if payload.action == 'none' and _active_intent_conflict_choice(database, session_id, payload.baseVersionId) is not None:
-            raise ApiError(409, 'INTENT_CONFLICT_PENDING', 'Retain one of the conflicting inclinations before sending another message.')
-        source_turn = None
-        source_offer = None
-        if payload.action in REVISION_CARD_ACTIONS:
-            source_turn, source_offer = _source_revision_offer(database, session_id, payload.baseVersionId, payload.sourceTurnId)
-            _require_offer_action(source_offer, payload.action)
-        current = get_current_version(database, session)
-        if payload.action in REVISION_CARD_ACTIONS:
-            source_binding = _preflight_proposal(
-                database,
-                session_id,
-                session,
-                source_turn,
-                source_offer,
-                load_json(current['rows_json']),
-                services=services,
-            )
+            replayed_session_payload = services.serialize_session(database, session_id)
         else:
-            source_binding = None
-        allow_progress = payload.action == 'none' and _stage_has_prior_assistant_reply(database, session_id, payload.baseVersionId)
-        if prior_user is None:
-            user_turn_id = services.insert_turn(
-                database,
-                session,
-                'user',
-                content,
-                payload.baseVersionId,
-                payload.idempotencyKey,
-                None,
-            )
-            if payload.action == 'none':
-                explicit_goals, explicit_constraints = extract_explicit_user_memory(content)
-                for explicit_text in dict.fromkeys([*explicit_goals, *explicit_constraints]):
-                    record_intent_evidence(
-                        database,
-                        session_id,
-                        payload.baseVersionId,
-                        'expressed_direction',
-                        explicit_text,
-                        turn_id=user_turn_id,
-                        details={'requestProposal': bool(payload.requestProposal)},
-                        services=services,
-                    )
-            if payload.requestProposal:
-                services.record_event(
+            session = require_active_session(database, session_id, access_cookie, services=services)
+            if payload.action in {'none', 'continue_challenge'}:
+                require_current_base(session, payload.baseVersionId)
+            elif payload.baseVersionId != session['current_version_id']:
+                raise ApiError(409, 'PROPOSAL_STALE', 'The selected proposal belongs to an older Stage.', details={'reason': 'version_changed'})
+            if payload.action == 'none' and _active_intent_conflict_choice(database, session_id, payload.baseVersionId) is not None:
+                raise ApiError(409, 'INTENT_CONFLICT_PENDING', 'Retain one of the conflicting inclinations before sending another message.')
+            source_turn = None
+            source_offer = None
+            if payload.action in REVISION_CARD_ACTIONS:
+                source_turn, source_offer = _source_revision_offer(database, session_id, payload.baseVersionId, payload.sourceTurnId)
+                _require_offer_action(source_offer, payload.action)
+            current = get_current_version(database, session)
+            current_rows_for_precheck = load_json(current['rows_json'])
+            if payload.action in REVISION_CARD_ACTIONS:
+                source_binding = _preflight_proposal(
                     database,
                     session_id,
-                    'proposal_request_requested',
-                    {'messageKey': payload.idempotencyKey, 'turnId': user_turn_id, 'baseVersionId': payload.baseVersionId},
-                    services.utc_now(),
+                    session,
+                    source_turn,
+                    source_offer,
+                    current_rows_for_precheck,
+                    services=services,
                 )
-        else:
-            user_turn_id = prior_user['id']
-        if payload.action in REVISION_CARD_ACTIONS and prior_action is None:
-            _record_card_action(database, session_id, payload, source_offer, services=services)
-        elif payload.action == 'continue_challenge' and prior_action is None:
-            services.record_event(
-                database,
-                session_id,
-                'challenge_continued',
-                {
-                    'messageKey': payload.idempotencyKey,
-                    'action': payload.action,
-                    'challengeId': payload.challengeId,
-                    'baseVersionId': payload.baseVersionId,
-                },
-                services.utc_now(),
-            )
-        retrying_failed_message = prior_user is not None
-        context = build_llm_context(database, session_id, current, services=services)
-        language = session['language']
-        turn_understanding = None
-        if payload.action == 'none':
-            saved_understanding = database.execute(
-                "SELECT payload_json FROM audit_events\n"
-                "                WHERE session_id = ? AND event_type = 'turn_understanding'\n"
-                "                  AND json_extract(payload_json, '$.messageKey') = ?\n"
-                "                ORDER BY id DESC LIMIT 1",
-                (session_id, payload.idempotencyKey),
-            ).fetchone()
-            if saved_understanding is not None and reusable_understanding(load_json(saved_understanding['payload_json'])['result'], payload.baseVersionId):
-                turn_understanding = load_json(saved_understanding['payload_json'])['result']
             else:
-                turn_understanding = bind_latest(precomputed_understanding, user_turn_id, payload.baseVersionId)
-                services.record_event(
-                    database,
-                    session_id,
-                    'turn_understanding',
-                    {'messageKey': payload.idempotencyKey, 'baseVersionId': payload.baseVersionId, 'result': turn_understanding},
-                    services.utc_now(),
+                source_binding = None
+            precheck_disagreement = (load_design_context(database, session_id, payload.baseVersionId) or {}).get('activeDisagreement') or {}
+            requested_challenge_choice = getattr(payload, 'challengeChoice', None)
+            if requested_challenge_choice is not None and (
+                not (
+                    precheck_disagreement.get('subject') == 'ai_revision_challenge'
+                    and precheck_disagreement.get('phase') == 'choice_pending'
+                    and (precheck_disagreement.get('challengeId') == payload.challengeId)
                 )
-                if turn_understanding.get('criticalReview'):
+            ):
+                raise ApiError(409, 'CHALLENGE_STALE', 'This choice no longer belongs to the active challenge.')
+            deterministic_challenge_choice = (
+                requested_challenge_choice or _challenge_choice(content, session['language'])
+                if precheck_disagreement.get('subject') == 'ai_revision_challenge' and precheck_disagreement.get('phase') == 'choice_pending'
+                else None
+            )
+            prechecked_challenge_row = None
+            prechecked_challenge_binding = None
+            if deterministic_challenge_choice is not None:
+                prechecked_challenge_row = database.execute(
+                    'SELECT source.id, source.version_id, source.proposal_binding_json,\n'
+                    '                          source.guidance_json, source.request_id, challenge.current_reason_turn_id\n'
+                    '                FROM revision_challenges AS challenge\n'
+                    '                JOIN conversation_turns AS source ON source.id = challenge.source_proposal_turn_id\n'
+                    '                WHERE challenge.session_id = ? AND challenge.challenge_id = ?\n'
+                    '                  AND challenge.base_version_id = ?',
+                    (session_id, precheck_disagreement.get('challengeId'), payload.baseVersionId),
+                ).fetchone()
+                prechecked_challenge_binding = (
+                    load_json(prechecked_challenge_row['proposal_binding_json']) or {}
+                    if prechecked_challenge_row
+                    else {}
+                )
+                if (
+                    prechecked_challenge_row is None
+                    or prechecked_challenge_row['version_id'] != payload.baseVersionId
+                    or prechecked_challenge_binding.get('mapFingerprint') != map_fingerprint(current_rows_for_precheck)
+                    or (not (prechecked_challenge_binding.get('executionBrief') or {}).get('requiredTransitions'))
+                ):
+                    raise ApiError(409, 'CHALLENGE_STALE', 'The challenged proposal is no longer available on this Stage.')
+            allow_progress = payload.action == 'none' and _stage_has_prior_assistant_reply(database, session_id, payload.baseVersionId)
+            if prior_user is None:
+                user_turn_id = services.insert_turn(
+                    database,
+                    session,
+                    'user',
+                    content,
+                    payload.baseVersionId,
+                    payload.idempotencyKey,
+                    None,
+                )
+                if payload.action == 'none':
+                    explicit_goals, explicit_constraints = extract_explicit_user_memory(content)
+                    for explicit_text in dict.fromkeys([*explicit_goals, *explicit_constraints]):
+                        record_intent_evidence(
+                            database,
+                            session_id,
+                            payload.baseVersionId,
+                            'expressed_direction',
+                            explicit_text,
+                            turn_id=user_turn_id,
+                            details={'requestProposal': bool(payload.requestProposal)},
+                            services=services,
+                        )
+                if payload.requestProposal:
                     services.record_event(
                         database,
                         session_id,
-                        'proposal_understanding_reviewed',
-                        {
-                            'messageKey': payload.idempotencyKey,
-                            'baseVersionId': payload.baseVersionId,
-                            **turn_understanding['criticalReview'],
-                        },
+                        'proposal_request_requested',
+                        {'messageKey': payload.idempotencyKey, 'turnId': user_turn_id, 'baseVersionId': payload.baseVersionId},
                         services.utc_now(),
                     )
-            context = build_llm_context(database, session_id, current, services=services)
-        stage_context = context['stageContext']
-        stage_context.setdefault('_reliabilityState', {})
-        stage_context['requirementPolicyVersion'] = 1
-        stage_context['requirementUserTurns'] = [{'id': user_turn_id, 'content': content}]
-        if turn_understanding is not None:
-            stage_context['turnUnderstanding'] = turn_understanding
-            stage_context['conversationOnly'] = bool(turn_understanding.get('conversationOnly'))
-            if stage_context['conversationOnly']:
-                allow_progress = False
-        stage_context['aiEditableTilesOnly'] = True
-        user_map_claims = analyze_user_map_claims(content, stage_context.get('stageSnapshot'))
-        stage_context['userMapClaims'] = user_map_claims
-        proposal_discovery = stage_context.get('proposalDiscovery') or {}
-        revision_routing = _adaptive_revision_routing(
-            content,
-            user_map_claims,
-            stage_context.get('stageSnapshot'),
-            proposal_discovery=proposal_discovery,
-            turn_understanding=turn_understanding,
-            services=services,
-        )
-        stage_context['adaptiveProposalCompletion'] = (
-            revision_routing == 'needs_clarification'
-            and (not proposal_options.current_set(proposal_discovery, stage_context.get('stageSnapshot')))
-            and _allow_adaptive_proposal_completion(
-                content,
-                user_map_claims,
-                stage_context.get('stageSnapshot'),
-                stage_context.get('clarificationQuestionCount', 0),
-            )
-        )
-        if stage_context['adaptiveProposalCompletion']:
-            revision_routing = 'proposal'
-        stage_context['revisionRouting'] = revision_routing
-        stage_context['clarificationBudgetExhausted'] = bool(
-            proposal_discovery and int(proposal_discovery.get('clarificationQuestionCount') or 0) >= 3
-        )
-        stage_context['feasibilityProfile'] = _proposal_feasibility_profile(
-            stage_context.get('stageSnapshot'),
-            context.get('rows') or [],
-            stage_context.get('designContext'),
-            context.get('validation'),
-        )
-        stage_context['vagueAestheticRevision'] = _is_vague_aesthetic_revision(content)
-        proposal_state = {
-            'proposal': 'ready_with_explicit_binding',
-            'proposal_conservative': 'ready_with_conservative_binding',
-            'proposal_blocked': 'revision_needed',
-            'proposal_cancelled': 'cancelled',
-        }.get(revision_routing, 'clarifying')
-        stage_context['proposalState'] = proposal_state
-        stage_context['proposalBindingMode'] = {
-            'ready_with_explicit_binding': 'explicit',
-            'ready_with_conservative_binding': 'conservative',
-        }.get(proposal_state)
-        stage_context['responseLanguage'] = language
-        if proposal_discovery and proposal_discovery.get('sourceTurnId'):
-            started = database.execute(
-                "\n                SELECT 1 FROM audit_events\n"
-                "                WHERE session_id = ? AND event_type = 'proposal_discovery_started'\n"
-                "                  AND json_extract(payload_json, '$.topicId') = ?\n"
-                "                LIMIT 1\n                ",
-                (session_id, proposal_discovery['topicId']),
-            ).fetchone()
-            if started is None:
+            else:
+                user_turn_id = prior_user['id']
+            if payload.action in REVISION_CARD_ACTIONS and prior_action is None:
+                _record_card_action(database, session_id, payload, source_offer, services=services)
+            elif payload.action == 'continue_challenge' and prior_action is None:
                 services.record_event(
                     database,
                     session_id,
-                    'proposal_discovery_started',
+                    'challenge_continued',
                     {
-                        'stageId': payload.baseVersionId,
-                        'topicId': proposal_discovery['topicId'],
-                        'sourceTurnId': proposal_discovery['sourceTurnId'],
                         'messageKey': payload.idempotencyKey,
-                        'trigger': 'proposal_button' if payload.requestProposal else 'direct_modification',
+                        'action': payload.action,
+                        'challengeId': payload.challengeId,
+                        'baseVersionId': payload.baseVersionId,
                     },
                     services.utc_now(),
                 )
-        if (
-            payload.action == 'none'
-            and revision_routing == 'needs_clarification'
-            and proposal_discovery
-            and (not user_map_claims.get('conflicts'))
-        ):
-            stage_context['proposalClarification'] = _proposal_clarification_spec(
-                proposal_discovery,
+            retrying_failed_message = prior_user is not None
+            context = build_llm_context(database, session_id, current, services=services)
+            language = session['language']
+            turn_understanding = None
+            if payload.action == 'none':
+                saved_understanding = database.execute(
+                    "SELECT payload_json FROM audit_events\n"
+                    "                WHERE session_id = ? AND event_type = 'turn_understanding'\n"
+                    "                  AND json_extract(payload_json, '$.messageKey') = ?\n"
+                    "                ORDER BY id DESC LIMIT 1",
+                    (session_id, payload.idempotencyKey),
+                ).fetchone()
+                if (
+                    not understanding_freshly_classified
+                    and saved_understanding is not None
+                    and reusable_understanding(
+                        load_json(saved_understanding['payload_json'])['result'],
+                        payload.baseVersionId,
+                        expected_signature=expected_understanding_signature,
+                        context=understanding_context,
+                    )
+                ):
+                    turn_understanding = load_json(saved_understanding['payload_json'])['result']
+                else:
+                    turn_understanding = bind_latest(precomputed_understanding, user_turn_id, payload.baseVersionId)
+                    services.record_event(
+                        database,
+                        session_id,
+                        'turn_understanding',
+                        {'messageKey': payload.idempotencyKey, 'baseVersionId': payload.baseVersionId, 'result': turn_understanding},
+                        services.utc_now(),
+                    )
+                    if turn_understanding.get('criticalReview'):
+                        services.record_event(
+                            database,
+                            session_id,
+                            'proposal_understanding_reviewed',
+                            {
+                                'messageKey': payload.idempotencyKey,
+                                'baseVersionId': payload.baseVersionId,
+                                **turn_understanding['criticalReview'],
+                            },
+                            services.utc_now(),
+                        )
+                context = build_llm_context(database, session_id, current, services=services)
+            stage_context = context['stageContext']
+            stage_context.setdefault('_reliabilityState', {})
+            stage_context['requirementPolicyVersion'] = 1
+            stage_context['requirementUserTurns'] = [{'id': user_turn_id, 'content': content}]
+            if turn_understanding is not None:
+                stage_context['turnUnderstanding'] = turn_understanding
+                stage_context['conversationOnly'] = bool(turn_understanding.get('conversationOnly'))
+                if stage_context['conversationOnly']:
+                    allow_progress = False
+            stage_context['aiEditableTilesOnly'] = True
+            user_map_claims = analyze_user_map_claims(content, stage_context.get('stageSnapshot'))
+            stage_context['userMapClaims'] = user_map_claims
+            active_disagreement_state = stage_context.get('activeDisagreement') or {}
+            if isinstance(active_disagreement_state, dict) and active_disagreement_state.get('status') == 'active':
+                proposal_discovery = {}
+                stage_context['proposalDiscovery'] = {}
+                revision_routing = 'none'
+                stage_context['adaptiveProposalCompletion'] = False
+            else:
+                proposal_discovery = stage_context.get('proposalDiscovery') or {}
+                revision_routing = _adaptive_revision_routing(
+                    content,
+                    user_map_claims,
+                    stage_context.get('stageSnapshot'),
+                    proposal_discovery=proposal_discovery,
+                    turn_understanding=turn_understanding,
+                    services=services,
+                )
+                stage_context['adaptiveProposalCompletion'] = (
+                    revision_routing == 'needs_clarification'
+                    and (not proposal_options.current_set(proposal_discovery, stage_context.get('stageSnapshot')))
+                    and _allow_adaptive_proposal_completion(
+                        content,
+                        user_map_claims,
+                        stage_context.get('stageSnapshot'),
+                        stage_context.get('clarificationQuestionCount', 0),
+                    )
+                )
+                if stage_context['adaptiveProposalCompletion']:
+                    revision_routing = 'proposal'
+            stage_context['revisionRouting'] = revision_routing
+            stage_context['clarificationBudgetExhausted'] = bool(
+                proposal_discovery and int(proposal_discovery.get('clarificationQuestionCount') or 0) >= 3
+            )
+            stage_context['feasibilityProfile'] = _proposal_feasibility_profile(
                 stage_context.get('stageSnapshot'),
-                language,
+                context.get('rows') or [],
+                stage_context.get('designContext'),
+                context.get('validation'),
             )
-        if proposal_state.startswith('ready_') and proposal_discovery.get('brief'):
-            stage_context['authorizedRevisionBrief'] = proposal_discovery['brief']
-        if user_map_claims.get('conflicts'):
-            allow_progress = False
-            services.record_event(
-                database,
-                session_id,
-                'map_claim_conflict',
-                {
-                    'versionId': payload.baseVersionId,
-                    'messageKey': payload.idempotencyKey,
-                    'claimCount': len(user_map_claims.get('conflicts') or []),
-                    'conflicts': [
-                        {key: value for key, value in conflict.items() if key != 'sourceText'}
-                        for conflict in user_map_claims['conflicts']
-                    ],
-                    'mapFingerprint': stage_context.get('mapFingerprint'),
-                    'entityBindingFingerprint': stage_context.get('entityBindingFingerprint'),
-                },
-                services.utc_now(),
-            )
-        stage_context['discussionCardMode'] = 'disagreement_only'
-        stage_context['revisionSourceTurnIds'] = [user_turn_id]
-        stage_context['explicitProposalRequest'] = payload.requestProposal
-        stage_context['explicitAction'] = payload.action
-        stage_context['actionSourceTurnId'] = payload.sourceTurnId
-        stage_context['sourceProposalOffer'] = source_offer
-        if source_binding is not None and payload.action == 'execute_revision':
-            stage_context['proposalBindingFrozen'] = True
-            stage_context['authorizedExecutionBrief'] = source_binding.get('executionBrief')
-            transitions = source_binding.get('executionBrief', {}).get('requiredTransitions', [])
-            stage_context['deterministicExactExecution'] = bool(transitions)
-        stage_context['deferRevisionExecution'] = payload.action != 'execute_revision' and (not proposal_state.startswith('ready_'))
-        if (payload.action in REVISION_CARD_ACTIONS or payload.requestProposal) and stage_context.get('activeDisagreement'):
-            raise ApiError(409, 'DISAGREEMENT_ACTIVE', 'Resolve the active design disagreement before choosing another revision card.')
-        if payload.action == 'challenge_revision':
-            stage_context['challengeRevision'] = {'sourceTurnId': payload.sourceTurnId, 'proposalOffer': source_offer}
-        elif payload.action == 'alternative_revision':
-            stage_context['alternativeRevision'] = {'sourceTurnId': payload.sourceTurnId, 'proposalOffer': source_offer}
-            excluded_rows = _rows_after_frozen_proposal(context['rows'], (source_binding or {}).get('executionBrief'))
-            if excluded_rows is not None:
-                stage_context['excludedProposalCandidateFingerprint'] = map_fingerprint(excluded_rows)
-    pending_disagreement = stage_context.get('activeDisagreement') or {}
-    if payload.challengeChoice is not None and (
-        not (
-            pending_disagreement.get('subject') == 'ai_revision_challenge'
-            and pending_disagreement.get('phase') == 'choice_pending'
-            and (pending_disagreement.get('challengeId') == payload.challengeId)
-        )
-    ):
-        raise ApiError(409, 'CHALLENGE_STALE', 'This choice no longer belongs to the active challenge.')
-    deterministic_challenge_choice = (
-        payload.challengeChoice or _challenge_choice(content, language)
-        if pending_disagreement.get('subject') == 'ai_revision_challenge' and pending_disagreement.get('phase') == 'choice_pending'
-        else None
-    )
-    if deterministic_challenge_choice is not None:
-        with services.connect() as challenge_database:
-            challenge_row = challenge_database.execute(
-                'SELECT source.id, source.version_id, source.proposal_binding_json,\n'
-                '                          source.guidance_json, source.request_id, challenge.current_reason_turn_id\n'
-                '                FROM revision_challenges AS challenge\n'
-                '                JOIN conversation_turns AS source ON source.id = challenge.source_proposal_turn_id\n'
-                '                WHERE challenge.session_id = ? AND challenge.challenge_id = ?\n'
-                '                  AND challenge.base_version_id = ?',
-                (session_id, pending_disagreement.get('challengeId'), payload.baseVersionId),
-            ).fetchone()
-        binding = load_json(challenge_row['proposal_binding_json']) or {} if challenge_row else {}
-        if (
-            challenge_row is None
-            or challenge_row['version_id'] != payload.baseVersionId
-            or binding.get('mapFingerprint') != map_fingerprint(context['rows'])
-            or (not (binding.get('executionBrief') or {}).get('requiredTransitions'))
-        ):
-            raise ApiError(409, 'CHALLENGE_STALE', 'The challenged proposal is no longer available on this Stage.')
-        stage_context['sourceProposalOffer'] = (load_json(challenge_row['guidance_json']) or {}).get('proposalOffer') or {}
-        stage_context['requirementSourceCardId'] = challenge_row['id']
-        stage_context['requirementReasonTurnId'] = challenge_row['current_reason_turn_id']
+            stage_context['vagueAestheticRevision'] = _is_vague_aesthetic_revision(content)
+            proposal_state = {
+                'proposal': 'ready_with_explicit_binding',
+                'proposal_conservative': 'ready_with_conservative_binding',
+                'proposal_blocked': 'revision_needed',
+                'proposal_cancelled': 'cancelled',
+            }.get(revision_routing, 'clarifying')
+            stage_context['proposalState'] = proposal_state
+            stage_context['proposalBindingMode'] = {
+                'ready_with_explicit_binding': 'explicit',
+                'ready_with_conservative_binding': 'conservative',
+            }.get(proposal_state)
+            stage_context['responseLanguage'] = language
+            if proposal_discovery and proposal_discovery.get('sourceTurnId'):
+                started = database.execute(
+                    "\n                SELECT 1 FROM audit_events\n"
+                    "                WHERE session_id = ? AND event_type = 'proposal_discovery_started'\n"
+                    "                  AND json_extract(payload_json, '$.topicId') = ?\n"
+                    "                LIMIT 1\n                ",
+                    (session_id, proposal_discovery['topicId']),
+                ).fetchone()
+                if started is None:
+                    services.record_event(
+                        database,
+                        session_id,
+                        'proposal_discovery_started',
+                        {
+                            'stageId': payload.baseVersionId,
+                            'topicId': proposal_discovery['topicId'],
+                            'sourceTurnId': proposal_discovery['sourceTurnId'],
+                            'messageKey': payload.idempotencyKey,
+                            'trigger': 'proposal_button' if payload.requestProposal else 'direct_modification',
+                        },
+                        services.utc_now(),
+                    )
+            if (
+                payload.action == 'none'
+                and revision_routing == 'needs_clarification'
+                and proposal_discovery
+                and (not user_map_claims.get('conflicts'))
+            ):
+                stage_context['proposalClarification'] = _proposal_clarification_spec(
+                    proposal_discovery,
+                    stage_context.get('stageSnapshot'),
+                    language,
+                )
+            if proposal_state.startswith('ready_') and proposal_discovery.get('brief'):
+                stage_context['authorizedRevisionBrief'] = proposal_discovery['brief']
+            if user_map_claims.get('conflicts'):
+                allow_progress = False
+                services.record_event(
+                    database,
+                    session_id,
+                    'map_claim_conflict',
+                    {
+                        'versionId': payload.baseVersionId,
+                        'messageKey': payload.idempotencyKey,
+                        'claimCount': len(user_map_claims.get('conflicts') or []),
+                        'conflicts': [
+                            {key: value for key, value in conflict.items() if key != 'sourceText'}
+                            for conflict in user_map_claims['conflicts']
+                        ],
+                        'mapFingerprint': stage_context.get('mapFingerprint'),
+                        'entityBindingFingerprint': stage_context.get('entityBindingFingerprint'),
+                    },
+                    services.utc_now(),
+                )
+            stage_context['discussionCardMode'] = 'disagreement_only'
+            stage_context['revisionSourceTurnIds'] = [user_turn_id]
+            stage_context['explicitProposalRequest'] = payload.requestProposal
+            stage_context['explicitAction'] = payload.action
+            stage_context['actionSourceTurnId'] = payload.sourceTurnId
+            stage_context['sourceProposalOffer'] = source_offer
+            if source_binding is not None and payload.action == 'execute_revision':
+                stage_context['proposalBindingFrozen'] = True
+                stage_context['authorizedExecutionBrief'] = source_binding.get('executionBrief')
+                transitions = source_binding.get('executionBrief', {}).get('requiredTransitions', [])
+                stage_context['deterministicExactExecution'] = bool(transitions)
+            stage_context['deferRevisionExecution'] = payload.action != 'execute_revision' and (not proposal_state.startswith('ready_'))
+            if (payload.action in REVISION_CARD_ACTIONS or payload.requestProposal) and stage_context.get('activeDisagreement'):
+                raise ApiError(409, 'DISAGREEMENT_ACTIVE', 'Resolve the active design disagreement before choosing another revision card.')
+            if payload.action == 'challenge_revision':
+                stage_context['challengeRevision'] = {'sourceTurnId': payload.sourceTurnId, 'proposalOffer': source_offer}
+            elif payload.action == 'alternative_revision':
+                stage_context['alternativeRevision'] = {'sourceTurnId': payload.sourceTurnId, 'proposalOffer': source_offer}
+                excluded_rows = _rows_after_frozen_proposal(context['rows'], (source_binding or {}).get('executionBrief'))
+                if excluded_rows is not None:
+                    stage_context['excludedProposalCandidateFingerprint'] = map_fingerprint(excluded_rows)
+    if replayed_session_payload is not None:
+        synchronize_turn_with_online_match(session_id, payload.idempotencyKey, services=services)
+        return replayed_session_payload
+    if deterministic_challenge_choice is not None and prechecked_challenge_row is not None:
+        stage_context['sourceProposalOffer'] = (load_json(prechecked_challenge_row['guidance_json']) or {}).get('proposalOffer') or {}
+        stage_context['requirementSourceCardId'] = prechecked_challenge_row['id']
+        stage_context['requirementReasonTurnId'] = prechecked_challenge_row['current_reason_turn_id']
         stage_context['requirementDecisionEvidence'] = {
             'sourceTurnId': user_turn_id,
             'choice': deterministic_challenge_choice,
-            'reasonTurnId': challenge_row['current_reason_turn_id'],
+            'reasonTurnId': prechecked_challenge_row['current_reason_turn_id'],
         }
         if deterministic_challenge_choice == 'user':
-            excluded_rows = _rows_after_frozen_proposal(context['rows'], binding.get('executionBrief'))
+            excluded_rows = _rows_after_frozen_proposal(context['rows'], (prechecked_challenge_binding or {}).get('executionBrief'))
             if excluded_rows is not None:
                 stage_context['excludedProposalCandidateFingerprint'] = map_fingerprint(excluded_rows)
     question_answer_review = {'answeredQuestionIds': [], 'results': []}
@@ -1695,168 +1802,188 @@ def _send_message_locked_impl(
                         (user_turn_id, now, challenge_id, session_id),
                     )
                 challenge_deadline = message_started_at + llm_budget_seconds
+                review_settled = False
                 try:
-                    challenge_reason_classification = services.llm.classify_challenge_reason(
-                        content,
-                        hypotheses,
-                        active_disagreement.get('proposalSummary') or hypotheses.get('proposalSummary') or challenge_context.get('proposalSummary'),
-                        request.state.request_id,
-                        _deadline=challenge_deadline,
-                        simple=True,
-                        stage_snapshot=stage_context.get('stageSnapshot'),
-                        comparison_validator=lambda comparison: _salvage_challenge_analysis(
-                            comparison,
-                            context['rows'],
-                            stage_context.get('entityBindings'),
-                            language,
-                        ),
-                    )
-                except LLMServiceError as exception:
-                    with services.connect(immediate=True) as database:
-                        active_session = require_active_session(database, session_id, access_cookie, services=services)
-                        require_current_base(active_session, payload.baseVersionId)
-                        duplicate = database.execute(
-                            "\n                            SELECT 1 FROM audit_events\n"
-                            "                            WHERE session_id = ?\n"
-                            "                              AND event_type = 'challenge_reason_review_pending'\n"
-                            "                              AND json_extract(payload_json, '$.messageKey') = ?\n"
-                            "                            LIMIT 1\n                            ",
-                            (session_id, payload.idempotencyKey),
-                        ).fetchone()
-                        if duplicate is None:
-                            services.record_event(
-                                database,
-                                session_id,
-                                'challenge_reason_review_pending',
-                                {
-                                    'messageKey': payload.idempotencyKey,
-                                    'baseVersionId': payload.baseVersionId,
-                                    'challengeId': hypotheses.get('challengeId') or challenge_context.get('challengeId'),
-                                    'sourceUserTurnId': user_turn_id,
-                                    'state': 'review_pending',
-                                    'task': 'challenge_review',
-                                    'failureStage': 'upstream',
-                                    'failureCode': exception.code,
-                                    'attemptsUsed': exception.attempts_used,
-                                    'maximumAttempts': 2,
-                                    'retryable': True,
-                                    'safeReason': exception.safe_message,
-                                },
-                                services.utc_now(),
-                            )
-                        now = services.utc_now()
-                        database.execute(
-                            "\n                            UPDATE challenge_reason_reviews\n"
-                            "                            SET status = 'review_pending', attempts_used = ?,\n"
-                            "                                failure_code = ?, updated_at = ?\n"
-                            "                            WHERE review_id = ? AND session_id = ?\n                            ",
-                            (exception.attempts_used, exception.code, now, challenge_review_id, session_id),
+                    try:
+                        challenge_reason_classification = services.llm.classify_challenge_reason(
+                            content,
+                            hypotheses,
+                            active_disagreement.get('proposalSummary') or hypotheses.get('proposalSummary') or challenge_context.get('proposalSummary'),
+                            request.state.request_id,
+                            _deadline=challenge_deadline,
+                            simple=True,
+                            stage_snapshot=stage_context.get('stageSnapshot'),
+                            comparison_validator=lambda comparison: _salvage_challenge_analysis(
+                                comparison,
+                                context['rows'],
+                                stage_context.get('entityBindings'),
+                                language,
+                            ),
                         )
-                        database.execute(
-                            "\n                            UPDATE revision_challenges\n"
-                            "                            SET status = 'review_pending', updated_at = ?\n"
-                            "                            WHERE challenge_id = ? AND session_id = ?\n                            ",
-                            (now, challenge_id, session_id),
-                        )
-                    raise ApiError(
-                        exception.status_code,
-                        'CHALLENGE_REVIEW_FAILED',
-                        exception.safe_message,
-                        retryable=True,
-                        details={
-                            'task': 'challenge_review',
-                            'failureStage': 'upstream',
-                            'failureCode': exception.code,
-                            'attemptsUsed': exception.attempts_used,
-                            'maximumAttempts': 2,
-                        },
-                    ) from exception
-                comparison = challenge_reason_classification.get('comparison')
-                if comparison:
-                    safe_comparison = _salvage_challenge_analysis(comparison, context['rows'], stage_context.get('entityBindings'), language)
-                    if not safe_comparison:
-                        exception = ValueError('No grounded comparison remained after removing invalid fragments.')
+                    except LLMServiceError as exception:
                         with services.connect(immediate=True) as database:
                             active_session = require_active_session(database, session_id, access_cookie, services=services)
                             require_current_base(active_session, payload.baseVersionId)
-                            services.record_event(
-                                database,
-                                session_id,
-                                'challenge_reason_review_pending',
-                                {
-                                    'messageKey': payload.idempotencyKey,
-                                    'baseVersionId': payload.baseVersionId,
-                                    'challengeId': hypotheses.get('challengeId'),
-                                    'sourceUserTurnId': user_turn_id,
-                                    'state': 'review_pending',
+                            duplicate = database.execute(
+                                "\n                            SELECT 1 FROM audit_events\n"
+                                "                            WHERE session_id = ?\n"
+                                "                              AND event_type = 'challenge_reason_review_pending'\n"
+                                "                              AND json_extract(payload_json, '$.messageKey') = ?\n"
+                                "                            LIMIT 1\n                            ",
+                                (session_id, payload.idempotencyKey),
+                            ).fetchone()
+                            if duplicate is None:
+                                services.record_event(
+                                    database,
+                                    session_id,
+                                    'challenge_reason_review_pending',
+                                    {
+                                        'messageKey': payload.idempotencyKey,
+                                        'baseVersionId': payload.baseVersionId,
+                                        'challengeId': hypotheses.get('challengeId') or challenge_context.get('challengeId'),
+                                        'sourceUserTurnId': user_turn_id,
+                                        'state': 'review_pending',
+                                        'task': 'challenge_review',
+                                        'failureStage': 'upstream',
+                                        'failureCode': exception.code,
+                                        'attemptsUsed': exception.attempts_used,
+                                        'maximumAttempts': 2,
+                                        'retryable': True,
+                                        'safeReason': exception.safe_message,
+                                    },
+                                    services.utc_now(),
+                                )
+                            now = services.utc_now()
+                            database.execute(
+                                "\n                            UPDATE challenge_reason_reviews\n"
+                                "                            SET status = 'review_pending', attempts_used = ?,\n"
+                                "                                failure_code = ?, updated_at = ?\n"
+                                "                            WHERE review_id = ? AND session_id = ?\n                            ",
+                                (exception.attempts_used, exception.code, now, challenge_review_id, session_id),
+                            )
+                            database.execute(
+                                "\n                            UPDATE revision_challenges\n"
+                                "                            SET status = 'review_pending', updated_at = ?\n"
+                                "                            WHERE challenge_id = ? AND session_id = ?\n                            ",
+                                (now, challenge_id, session_id),
+                            )
+                        raise ApiError(
+                            exception.status_code,
+                            'CHALLENGE_REVIEW_FAILED',
+                            exception.safe_message,
+                            retryable=True,
+                            details={
+                                'task': 'challenge_review',
+                                'failureStage': 'upstream',
+                                'failureCode': exception.code,
+                                'attemptsUsed': exception.attempts_used,
+                                'maximumAttempts': 2,
+                            },
+                        ) from exception
+                    comparison = challenge_reason_classification.get('comparison')
+                    if comparison:
+                        safe_comparison = _salvage_challenge_analysis(comparison, context['rows'], stage_context.get('entityBindings'), language)
+                        if not safe_comparison:
+                            exception = ValueError('No grounded comparison remained after removing invalid fragments.')
+                            with services.connect(immediate=True) as database:
+                                active_session = require_active_session(database, session_id, access_cookie, services=services)
+                                require_current_base(active_session, payload.baseVersionId)
+                                services.record_event(
+                                    database,
+                                    session_id,
+                                    'challenge_reason_review_pending',
+                                    {
+                                        'messageKey': payload.idempotencyKey,
+                                        'baseVersionId': payload.baseVersionId,
+                                        'challengeId': hypotheses.get('challengeId'),
+                                        'sourceUserTurnId': user_turn_id,
+                                        'state': 'review_pending',
+                                        'task': 'challenge_review',
+                                        'failureStage': 'binding',
+                                        'failureCode': 'MAP_GROUNDING_INVALID',
+                                        'attemptsUsed': challenge_reason_classification.get('attemptsUsed', 1),
+                                        'maximumAttempts': 2,
+                                        'retryable': True,
+                                        'safeReason': 'The comparison did not match the current Stage facts.',
+                                    },
+                                    services.utc_now(),
+                                )
+                                now = services.utc_now()
+                                database.execute(
+                                    "\n                                UPDATE challenge_reason_reviews\n"
+                                    "                                SET status = 'review_pending', attempts_used = ?,\n"
+                                    "                                    failure_code = 'MAP_GROUNDING_INVALID', updated_at = ?\n"
+                                    "                                WHERE review_id = ? AND session_id = ?\n                                ",
+                                    (challenge_reason_classification.get('attemptsUsed', 1), now, challenge_review_id, session_id),
+                                )
+                                database.execute(
+                                    "\n                                UPDATE revision_challenges\n"
+                                    "                                SET status = 'review_pending', updated_at = ?\n"
+                                    "                                WHERE challenge_id = ? AND session_id = ?\n                                ",
+                                    (now, challenge_id, session_id),
+                                )
+                            raise ApiError(
+                                502,
+                                'CHALLENGE_REVIEW_FAILED',
+                                "Kimi's judgment did not match the current Stage facts. Retry the message.",
+                                retryable=True,
+                                details={
                                     'task': 'challenge_review',
                                     'failureStage': 'binding',
                                     'failureCode': 'MAP_GROUNDING_INVALID',
                                     'attemptsUsed': challenge_reason_classification.get('attemptsUsed', 1),
                                     'maximumAttempts': 2,
-                                    'retryable': True,
-                                    'safeReason': 'The comparison did not match the current Stage facts.',
                                 },
-                                services.utc_now(),
-                            )
-                            now = services.utc_now()
-                            database.execute(
+                            ) from exception
+                        challenge_reason_classification['comparison'] = safe_comparison
+                    stage_context['challengeReasonClassification'] = challenge_reason_classification
+                    with services.connect(immediate=True) as database:
+                        services.record_event(
+                            database,
+                            session_id,
+                            'challenge_reason_review_resolved',
+                            {
+                                'messageKey': payload.idempotencyKey,
+                                'baseVersionId': payload.baseVersionId,
+                                'challengeId': hypotheses.get('challengeId') or challenge_context.get('challengeId'),
+                                'sourceUserTurnId': user_turn_id,
+                                'state': 'reason_review',
+                                'attemptsUsed': challenge_reason_classification.get('attemptsUsed', 1),
+                            },
+                            services.utc_now(),
+                        )
+                        now = services.utc_now()
+                        database.execute(
+                            "\n                        UPDATE challenge_reason_reviews\n"
+                            "                        SET status = 'resolved', attempts_used = ?, failure_code = NULL,\n"
+                            "                            result_json = ?, updated_at = ?\n"
+                            "                        WHERE review_id = ? AND session_id = ?\n                        ",
+                            (
+                                challenge_reason_classification.get('attemptsUsed', 1),
+                                dump_json(challenge_reason_classification),
+                                now,
+                                challenge_review_id,
+                                session_id,
+                            ),
+                        )
+                        review_settled = True
+                except Exception:
+                    if not review_settled:
+                        with services.connect(immediate=True) as cleanup_database:
+                            cleanup_now = services.utc_now()
+                            cleanup_database.execute(
                                 "\n                                UPDATE challenge_reason_reviews\n"
-                                "                                SET status = 'review_pending', attempts_used = ?,\n"
-                                "                                    failure_code = 'MAP_GROUNDING_INVALID', updated_at = ?\n"
-                                "                                WHERE review_id = ? AND session_id = ?\n                                ",
-                                (challenge_reason_classification.get('attemptsUsed', 1), now, challenge_review_id, session_id),
+                                "                                SET status = 'review_pending', updated_at = ?\n"
+                                "                                WHERE review_id = ? AND session_id = ? AND status = 'reviewing'\n                                ",
+                                (cleanup_now, challenge_review_id, session_id),
                             )
-                            database.execute(
+                            cleanup_database.execute(
                                 "\n                                UPDATE revision_challenges\n"
                                 "                                SET status = 'review_pending', updated_at = ?\n"
-                                "                                WHERE challenge_id = ? AND session_id = ?\n                                ",
-                                (now, challenge_id, session_id),
+                                "                                WHERE challenge_id = ? AND session_id = ? AND status = 'reviewing'\n                                ",
+                                (cleanup_now, challenge_id, session_id),
                             )
-                        raise ApiError(
-                            502,
-                            'CHALLENGE_REVIEW_FAILED',
-                            "Kimi's judgment did not match the current Stage facts. Retry the message.",
-                            retryable=True,
-                            details={
-                                'task': 'challenge_review',
-                                'failureStage': 'binding',
-                                'failureCode': 'MAP_GROUNDING_INVALID',
-                                'attemptsUsed': challenge_reason_classification.get('attemptsUsed', 1),
-                                'maximumAttempts': 2,
-                            },
-                        ) from exception
-                    challenge_reason_classification['comparison'] = safe_comparison
-                stage_context['challengeReasonClassification'] = challenge_reason_classification
-                with services.connect(immediate=True) as database:
-                    services.record_event(
-                        database,
-                        session_id,
-                        'challenge_reason_review_resolved',
-                        {
-                            'messageKey': payload.idempotencyKey,
-                            'baseVersionId': payload.baseVersionId,
-                            'challengeId': hypotheses.get('challengeId') or challenge_context.get('challengeId'),
-                            'sourceUserTurnId': user_turn_id,
-                            'state': 'reason_review',
-                            'attemptsUsed': challenge_reason_classification.get('attemptsUsed', 1),
-                        },
-                        services.utc_now(),
-                    )
-                    now = services.utc_now()
-                    database.execute(
-                        "\n                        UPDATE challenge_reason_reviews\n"
-                        "                        SET status = 'resolved', attempts_used = ?, failure_code = NULL,\n"
-                        "                            result_json = ?, updated_at = ?\n"
-                        "                        WHERE review_id = ? AND session_id = ?\n                        ",
-                        (
-                            challenge_reason_classification.get('attemptsUsed', 1),
-                            dump_json(challenge_reason_classification),
-                            now,
-                            challenge_review_id,
-                            session_id,
-                        ),
-                    )
+                    raise
     revision_state, revision_brief = services.llm.classify_revision_request(context['conversation'], context['stageContext'])
     if payload.action == 'execute_revision':
         revision_state = 'authorized'
@@ -1867,6 +1994,8 @@ def _send_message_locked_impl(
         revision_state = 'proposal_requested'
         revision_brief = ' '.join((str(source_offer.get(field) or '').strip() for field in ('summary', 'rationale'))).strip()
         context['stageContext']['authorizedRevisionBrief'] = revision_brief
+    elif challenge_choice_resolution == 'retain_current':
+        revision_state, revision_brief = ('not_request', None)
     elif challenge_choice_resolution is not None:
         active_disagreement = context['stageContext'].get('activeDisagreement') or {}
         accepted_reason = str(active_disagreement.get('acceptedReason') or '').strip()
@@ -1912,13 +2041,31 @@ def _send_message_locked_impl(
                 except ValueError as error:
                     raise ApiError(409, 'PROPOSAL_PRECONDITION_FAILED', 'The challenged tile changes are no longer applicable.') from error
                 source_guidance = load_json(challenge_source['guidance_json']) or {}
+                challenged_offer = source_guidance.get('proposalOffer') or {}
+                challenged_workflow = (
+                    (
+                        challenged_binding.get('revisionWorkflow')
+                        if isinstance(challenged_binding.get('revisionWorkflow'), dict) and challenged_binding.get('revisionWorkflow')
+                        else None
+                    )
+                    or (
+                        challenged_offer.get('revisionWorkflow')
+                        if isinstance(challenged_offer, dict)
+                        and isinstance(challenged_offer.get('revisionWorkflow'), dict)
+                        and challenged_offer.get('revisionWorkflow')
+                        else None
+                    )
+                    or {}
+                )
                 context['stageContext'].update(
                     {
                         'explicitAction': 'execute_revision',
                         'deterministicExactExecution': True,
                         'proposalBindingFrozen': True,
                         'authorizedExecutionBrief': challenged_brief,
-                        'sourceProposalOffer': source_guidance.get('proposalOffer') or {},
+                        'sourceProposalOffer': challenged_offer,
+                        'challengedRevisionWorkflow': copy.deepcopy(challenged_workflow),
+                        'challengedSourceOfferTurnId': challenge_source_id,
                     }
                 )
             revision_brief = proposal_summary
@@ -2224,6 +2371,7 @@ def _send_message_locked_impl(
                 context['rows'],
                 language,
                 context['stageContext'],
+                deadline=request.state.llm_deadline,
                 services=services,
             )
         else:
@@ -2237,10 +2385,16 @@ def _send_message_locked_impl(
             )
     if payload.action == 'alternative_revision' and (not proposal_recovery):
         execution = _ensure_alternative_revision_execution(execution, source_offer, language, source_binding)
+    model_disagreement = (execution.guidance or {}).get('disagreement')
+    model_retain_resolution = (
+        isinstance(model_disagreement, dict)
+        and model_disagreement.get('status') == 'resolved'
+        and model_disagreement.get('resolution') == 'retain_current'
+    )
     if (
         payload.action in {'none', 'continue_challenge'}
         and active_disagreement.get('subject') == 'ai_revision_challenge'
-        and (active_disagreement.get('phase') == 'choice_pending')
+        and (active_disagreement.get('phase') == 'choice_pending' or model_retain_resolution)
     ):
         execution = _enforce_challenge_choice_execution(execution, active_disagreement, challenge_choice_resolution, language)
     if challenge_choice_resolution == 'user':
@@ -2294,7 +2448,8 @@ def _send_message_locked_impl(
     candidate_intent = str(execution_guidance.get('intentHypothesis') or '').strip()
     candidate_claims = execution_guidance.get('_intentSemanticClaims') or [] if candidate_intent else []
     intent_allowed = bool(
-        context['stageContext'].get('conversationBranch') == 'ordinary'
+        allow_progress
+        and context['stageContext'].get('conversationBranch') == 'ordinary'
         and execution_guidance.get('_intentDecision', {}).get('classification') == 'candidate'
     )
     if candidate_intent and (
@@ -2398,6 +2553,18 @@ def _send_message_locked_impl(
     trace_proposal('commit', 'commit', 'started')
     with services.connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie, services=services)
+        if payload.baseVersionId != session['current_version_id'] and (
+            execution.proposed_rows is not None
+            or (execution.guidance or {}).get('proposalOffer')
+            or (execution.guidance or {}).get('proposalDiscovery')
+            or (payload.action != 'none')
+        ):
+            raise ApiError(
+                409,
+                'PROPOSAL_STALE',
+                'The Stage version changed while preparing this proposal. Send a request based on the current Stage.',
+                details={'reason': 'version_changed'},
+            )
         require_current_base(session, payload.baseVersionId)
         current = get_current_version(database, session)
         captured_binding = context.get('commitBinding')
@@ -2454,8 +2621,21 @@ def _send_message_locked_impl(
             design_context_guidance = dict(safe_guidance)
             allow_progress = False
             question_answer_review = {'results': [], 'answeredQuestionIds': []}
+            initial_disagreement_for_deferred = context['stageContext'].get('activeDisagreement')
+            initial_identity = component_recovery.disagreement_identity(
+                database, session_id, payload.baseVersionId, initial_disagreement_for_deferred
+            )
+            canonical_identity = component_recovery.disagreement_identity(
+                database, session_id, payload.baseVersionId, canonical_active
+            )
             state_transition_deferred = bool(
-                canonical_active and canonical_active.get('subject') == 'human_edit' and (canonical_active.get('status') == 'active')
+                not superseded
+                and not newer_receipt
+                and canonical_active
+                and canonical_active.get('subject') == 'human_edit'
+                and (canonical_active.get('status') == 'active')
+                and canonical_identity
+                and canonical_identity == initial_identity
             )
             execution = replace(
                 execution,
@@ -2547,6 +2727,7 @@ def _send_message_locked_impl(
             proposal_validation = _solve_changed_proposal_or_api_error(
                 load_json(current['rows_json']),
                 execution.proposed_rows,
+                deadline=request.state.llm_deadline,
                 services=services,
             )
             current_rows = load_json(current['rows_json'])
@@ -2604,10 +2785,28 @@ def _send_message_locked_impl(
                 preserved_binding.get('revisionWorkflow')
                 or ((execution.revision_contract or {}).get('revisionWorkflow') if isinstance(execution.revision_contract, dict) else None)
                 or ((pre_review_offer or {}).get('revisionWorkflow') if isinstance(pre_review_offer, dict) else None)
+                or (
+                    copy.deepcopy(context['stageContext'].get('challengedRevisionWorkflow'))
+                    if isinstance(context['stageContext'].get('challengedRevisionWorkflow'), dict)
+                    and context['stageContext'].get('challengedRevisionWorkflow')
+                    else None
+                )
                 or ((source_binding or {}).get('revisionWorkflow') if isinstance(source_binding, dict) else None)
                 or ((source_offer or {}).get('revisionWorkflow') if isinstance(source_offer, dict) else None)
                 or {}
             )
+            source_offer_turn_id = (
+                payload.sourceTurnId
+                if payload.action == 'execute_revision' and payload.sourceTurnId
+                else (
+                    context['stageContext'].get('challengedSourceOfferTurnId')
+                    if challenge_choice_resolution == 'ai'
+                    else None
+                )
+            )
+            execution_revision_contract = dict(execution.revision_contract or {})
+            if isinstance(revision_workflow, dict) and revision_workflow and not execution_revision_contract.get('revisionWorkflow'):
+                execution_revision_contract['revisionWorkflow'] = dict(revision_workflow)
             preserved_binding = {
                 **preserved_binding,
                 'baseVersionId': payload.baseVersionId,
@@ -2615,7 +2814,7 @@ def _send_message_locked_impl(
                 'entityBindingFingerprint': (entity_bindings or {}).get('bindingFingerprint'),
                 **({'executionBrief': execution_brief} if isinstance(execution_brief, dict) else {}),
                 'revisionWorkflow': dict(revision_workflow) if isinstance(revision_workflow, dict) else {},
-                **({'sourceOfferTurnId': payload.sourceTurnId} if payload.action == 'execute_revision' and payload.sourceTurnId else {}),
+                **({'sourceOfferTurnId': source_offer_turn_id} if source_offer_turn_id else {}),
                 'status': preserved_binding.get('status') or 'active',
             }
             execution = replace(
@@ -2623,6 +2822,7 @@ def _send_message_locked_impl(
                 assistant_message=_verified_proposal_message(language),
                 modification_summary=verified_summary,
                 guidance=_proposal_review_guidance(execution.guidance, language),
+                revision_contract=execution_revision_contract,
                 proposal_binding=preserved_binding,
             )
         existing = database.execute(
@@ -2630,6 +2830,7 @@ def _send_message_locked_impl(
             "            WHERE session_id = ? AND request_id = ? AND role = 'assistant'\n            ",
             (session_id, payload.idempotencyKey),
         ).fetchone()
+        assistant_turn_id = existing['id'] if existing is not None else None
         if existing is None:
             assistant_turn_id = services.insert_turn(
                 database,
@@ -3089,7 +3290,7 @@ def _decide_proposal_impl(
     decision_rewrite = None
     decision_rewrite_language = 'zh-CN'
     with services.connect(immediate=True) as database:
-        session = require_active_session(database, session_id, access_cookie, services=services)
+        session = require_browser_session(database, session_id, access_cookie, services=services)
         existing_decision = database.execute(
             '\n            SELECT d.id, d.proposal_id, d.decision_type, d.version_id, p.base_version_id\n'
             '            FROM designer_decisions AS d\n'
@@ -3107,6 +3308,7 @@ def _decide_proposal_impl(
             new_version_id = existing_decision['version_id']
             session_payload = services.serialize_session(database, session_id)
         else:
+            session = require_active_session(database, session_id, access_cookie, services=services)
             require_current_base(session, payload.baseVersionId)
             proposal = database.execute(
                 '\n                SELECT * FROM change_proposals WHERE id = ? AND session_id = ?\n                ',
@@ -3132,7 +3334,12 @@ def _decide_proposal_impl(
                 proposed_rows = load_json(proposal['proposed_rows_json'])
                 current = get_current_version(database, session)
                 current_rows = load_json(current['rows_json'])
-                validation = _solve_changed_proposal_or_api_error(current_rows, proposed_rows, services=services)
+                validation = _solve_changed_proposal_or_api_error(
+                    current_rows,
+                    proposed_rows,
+                    deadline=request.state.llm_deadline,
+                    services=services,
+                )
                 verified_summary = summarize_verified_diff(current_rows, validation.rows, session['language'])
                 proposal_offer = proposal_guidance.get('proposalOffer') if isinstance(proposal_guidance, dict) else None
                 proposal_brief = (
@@ -3198,6 +3405,7 @@ def _decide_proposal_impl(
                         load_json(current['validation_json']),
                         validation,
                         load_entity_bindings(database, session_id, current['id']),
+                        deadline=request.state.llm_deadline,
                     )
                 except SemanticConstraintError as exception:
                     raise ApiError(

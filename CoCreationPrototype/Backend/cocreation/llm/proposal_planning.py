@@ -412,23 +412,37 @@ def _requirement_review_components(verdict, record, turns):
         valid['issues'] = issues
     except (ValueError, TypeError, KeyError):
         failed.append('issues')
+    if 'accepted' in valid and 'issues' in valid:
+        if valid['accepted'] is False and not valid['issues']:
+            valid.pop('issues')
+            failed.append('issues')
+        elif valid['accepted'] is True and valid['issues']:
+            valid.pop('accepted')
+            failed.append('accepted')
     return (valid, failed)
 
 def _requirements_patch_request(payload, locked, turns, snapshot):
     candidate = {key: payload.get(key) for key in ('requirements', 'automaticBindings', 'exactTransitions')}
     targets = []
     raw_items = candidate.get('requirements')
+    valid_requirements = []
     if not isinstance(raw_items, list):
         targets.append(Target('requirements', ('requirements',), (list,)))
     else:
         for index, raw in enumerate(raw_items):
             if raw not in locked.values():
                 targets.append(Target(f'requirement-{index + 1}', ('requirements', index), (dict,)))
+            if isinstance(raw, dict):
+                try:
+                    validate_requirement_record({'requirements': [raw], 'automaticBindings': [], 'exactTransitions': []}, turns, snapshot)
+                    valid_requirements.append(raw)
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    continue
         candidate['additionalRequirements'] = []
         targets.append(Target('additionalRequirements', ('additionalRequirements',), (list,)))
     for key in ('automaticBindings', 'exactTransitions'):
         try:
-            validate_requirement_record({'requirements': [], 'automaticBindings': candidate['automaticBindings'] if key == 'automaticBindings' else [], 'exactTransitions': candidate['exactTransitions'] if key == 'exactTransitions' else []}, turns, snapshot)
+            validate_requirement_record({'requirements': valid_requirements if key == 'automaticBindings' else [], 'automaticBindings': candidate['automaticBindings'] if key == 'automaticBindings' else [], 'exactTransitions': candidate['exactTransitions'] if key == 'exactTransitions' else []}, turns, snapshot)
         except (ValueError, TypeError, KeyError, AttributeError):
             targets.append(Target(key, (key,), (list,)))
     return PatchRequest('requirements', candidate, targets, {'snapshot': snapshot, **{f"user:{turn['id']}": turn for turn in turns}})
@@ -504,7 +518,7 @@ def _proposal_objective_policy(conversation, stage_context):
     elif any((word in lowered for word in ('空间压迫', '路线选择', '扩展探索', 'space pressure', 'route choice'))):
         objective_class = 'space_route_choice'
     exact_labels = {str(item.get('label') or item.get('id') or '').upper() for item in ((stage_context or {}).get('entityBindings') or {}).get('entities') or [] if item.get('identityConfidence') == 'exact'}
-    target_entities = sorted({label.upper() for label in re.findall('\\b(?:B\\d+|T\\d+|P)\\b', text, flags=re.IGNORECASE) if label.upper() in exact_labels})
+    target_entities = sorted({label.upper() for label in re.findall('(?<![A-Za-z0-9_])(?:B\\d+|T\\d+|P)(?![A-Za-z0-9_])', text, flags=re.IGNORECASE) if label.upper() in exact_labels})
     return {'schemaVersion': 1, 'hardMetricGoals': hard_metrics, 'softObjectiveClass': objective_class, 'targetEntities': target_entities, 'requiresMechanismEvidence': objective_class != 'general'}
 
 def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
@@ -615,7 +629,7 @@ def _objective_validating_proposal_validator(proposal_validator, base_rows, base
 
     @proposal_phase('structure_and_solve', 'candidate')
     def validate(candidate_rows):
-        validation = proposal_validator(candidate_rows) if proposal_validator is not None else _solve_stage(candidate_rows)
+        validation = proposal_validator(candidate_rows) if proposal_validator is not None else _solve_stage(candidate_rows, **{'deadline': deadline} if deadline is not None else {})
         features = _proposal_route_features(candidate_rows, validation, entity_bindings, **{'deadline': deadline} if deadline is not None else {})
         evidence = _objective_mechanism_evidence(base_rows, candidate_rows, baseline_features, features, policy)
         evidence_by_fingerprint[map_fingerprint(candidate_rows)] = evidence
@@ -708,8 +722,10 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
     baseline_metrics = dict(baseline_metrics or {})
     if 'minimumPushes' not in baseline_metrics:
         try:
-            baseline_metrics['minimumPushes'] = minimum_pushes(rows, clock=svc.clock)
-        except Exception:
+            baseline_metrics['minimumPushes'] = minimum_pushes(rows, deadline=deadline, clock=svc.clock)
+        except Exception as min_push_error:
+            if _is_search_budget_error(min_push_error):
+                raise LLMServiceError('PROPOSAL_SEARCH_BUDGET_EXCEEDED', 'The baseline minimum-push check exceeded its time budget.', request_id, True, 0, 504) from min_push_error
             baseline_metrics['minimumPushes'] = None
     models = _unified_model_attempts(svc.config.proposal_generation_attempts)
     movement_requirement = _authorized_movement_requirement(conversation)
@@ -736,6 +752,7 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         try:
             corrected_plan, correction_attempts, _ = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, svc.clock.monotonic() + svc.config.proposal_plan_retry_timeout_seconds), max_attempts=1, initial_validation_feedback=correction_feedback, first_attempt_timeout=svc.config.proposal_plan_retry_timeout_seconds), timeout=max(0.001, min(svc.config.proposal_plan_retry_timeout_seconds, svc.remaining_until(deadline)))))
             attempts_used += correction_attempts
+            corrected_plan = _bind_execution_brief_to_plan(corrected_plan, stage_context.get('authorizedExecutionBrief') if stage_context else None)
             corrected_plan = _apply_objective_policy_to_plan(corrected_plan, objective_policy, preserved_components)
             plan, corrected_failures = _preflight_revision_strategies(corrected_plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') if stage_context else '')
             contract_preflight_failures.extend(corrected_failures)
@@ -769,8 +786,16 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         error.proposal_diagnostics = {'category': 'coordinate_or_contract_conflict'}
         raise error from exception
     evidence_by_fingerprint = {}
-    baseline_validation = _solve_stage(rows, **{'deadline': deadline} if stage_context.get('binaryDiscovery') else {})
-    objective_validator = _objective_validating_proposal_validator(proposal_validator, rows, baseline_validation, objective_policy, stage_context.get('entityBindings'), evidence_by_fingerprint, revision_contract.get('revisionWorkflow'), deadline=deadline if stage_context.get('binaryDiscovery') else None)
+    try:
+        baseline_validation = _solve_stage(rows, deadline=deadline)
+        objective_validator = _objective_validating_proposal_validator(proposal_validator, rows, baseline_validation, objective_policy, stage_context.get('entityBindings'), evidence_by_fingerprint, revision_contract.get('revisionWorkflow'), deadline=deadline)
+    except Exception as exception:
+        if _is_search_budget_error(exception):
+            error = LLMServiceError('PROPOSAL_SEARCH_BUDGET_EXCEEDED', 'Deterministic map validation exceeded the proposal time budget.', request_id, True, attempts_used, 504)
+            error.revision_plan = plan.as_dict()
+            error.revision_contract = revision_contract
+            raise error from exception
+        raise
     exact_strategies = [item for item in revision_contract.get('strategies') or [] if item.get('requiredTransitions')]
     can_execute_exactly = exact_strategies and len(exact_strategies) == len(revision_contract.get('strategies') or []) and (exact_strategies[0].get('effect') not in {'relocate_start', 'relocate_box', 'relocate_target'} or bool(stage_context.get('entityBindings')))
     if can_execute_exactly:
@@ -779,6 +804,11 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         try:
             exact = _deterministic_exact_revision(rows, exact_brief, request_id, language, objective_validator, stage_context.get('entityBindings'))
         except Exception as exception:
+            if _is_search_budget_error(exception):
+                error = LLMServiceError('PROPOSAL_SEARCH_BUDGET_EXCEEDED', 'Exact proposal validation exceeded its time budget.', request_id, True, attempts_used, 504)
+                error.revision_plan = plan.as_dict()
+                error.revision_contract = revision_contract
+                raise error from exception
             error = LLMServiceError('EXACT_TRANSITION_INFEASIBLE', 'The frozen tile transitions could not produce a valid solvable proposal.', request_id, False, attempts_used, 422)
             error.revision_plan = plan.as_dict()
             error.revision_contract = revision_contract
@@ -827,6 +857,12 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         try:
             if fallback is None:
                 fallback = _deterministic_revision_fallback(rows=rows, plan=plan, revision_contract=revision_contract, request_id=request_id, language=language, proposal_validator=objective_validator, baseline_metrics=baseline_metrics, movement_requirement=movement_requirement, preserved_components=preserved_components, entity_bindings=(stage_context or {}).get('entityBindings'), started_at=started_at, deadline=deadline, excluded_map_fingerprints=excluded_candidate_fingerprints)
+        except TimeoutError as search_timeout:
+            budget_error = LLMServiceError('PROPOSAL_SEARCH_BUDGET_EXCEEDED', 'Deterministic local search reached its time budget before finding a complete candidate.', request_id, True, exception.attempts_used, 504)
+            budget_error.revision_plan = plan.as_dict()
+            budget_error.revision_contract = revision_contract
+            budget_error.proposal_diagnostics = dict(getattr(exception, 'proposal_diagnostics', {}) or {})
+            raise budget_error from search_timeout
         except ProposalSearchExhausted as search_exception:
             diagnostics = dict(getattr(exception, 'proposal_diagnostics', {}) or {})
             diagnostics['deterministicFallback'] = search_exception.diagnostics
@@ -837,7 +873,12 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
             exception.proposal_diagnostics = diagnostics
             rejection_categories = {item.get('category') for item in diagnostics.get('rejectionRecords') or [] if isinstance(item, dict)}
             fallback_reasons = set((search_exception.diagnostics.get('failureReasons') or {}).keys())
-            if rejection_categories and rejection_categories <= {'soft_objective_evidence_missing', 'candidate_duplicated'} and (fallback_reasons <= {'ObjectiveEvidenceError'}):
+            if _is_search_budget_error(search_exception.diagnostics) or _is_search_budget_error(diagnostics):
+                exception.code = 'PROPOSAL_SEARCH_BUDGET_EXCEEDED'
+                exception.retryable = True
+                exception.status_code = 504
+                exception.safe_message = 'Deterministic validation or local search reached its time budget before finding a complete candidate.'
+            elif rejection_categories and rejection_categories <= {'soft_objective_evidence_missing', 'candidate_duplicated'} and (fallback_reasons <= {'ObjectiveEvidenceError'}):
                 exception.code = 'SOFT_OBJECTIVE_EVIDENCE_MISSING'
                 exception.safe_message = 'Solvable local candidates were found, but none produced verified evidence for the requested play mechanism.'
             elif 'semantic_contract' in rejection_categories or 'SemanticConstraintError' in fallback_reasons:
@@ -863,10 +904,8 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         operation_result = replace(fallback, attempts_used=exception.attempts_used, revision_plan=plan.as_dict(), revision_contract=revision_contract, proposal_diagnostics=fallback_diagnostics)
     elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
     guidance = dict(operation_result.guidance)
-    latest_user = _latest_role_content(conversation, 'user')
-    intent_hypothesis = _replace_echoed_intent_hypothesis(_natural_intent_candidate(latest_user, language, _latest_user_explicitly_agrees(latest_user), difficulty_reframe=_user_reframes_difficulty_judgment(conversation)), latest_user, language) if _user_states_first_person_view(latest_user) else None
-    guidance['intentHypothesis'] = intent_hypothesis
-    guidance['intentConfidence'] = 'medium' if intent_hypothesis else None
+    guidance['intentHypothesis'] = None
+    guidance['intentConfidence'] = None
     diagnostics = dict(operation_result.proposal_diagnostics)
     selected_evidence = evidence_by_fingerprint.get(map_fingerprint(operation_result.proposed_rows or []))
     diagnostics['objectivePolicy'] = objective_policy
@@ -1087,10 +1126,10 @@ async def _compile_revision_plan(*, api_key, base_url, models, messages, request
     validation_feedback = initial_validation_feedback
     first_failure_code = None
     repair_request = None
-    raw_plan = {}
     svc = _current_service()
     deadline = deadline or min(_request_deadline(started_at), started_at + svc.config.proposal_llm_phase_timeout_seconds)
     for attempt in range(1, max_attempts + 1):
+        raw_plan = None
         if attempt == 1 or first_failure_code == 'MODEL_RESPONSE_INVALID':
             model = models[0]
         else:
@@ -1107,6 +1146,8 @@ async def _compile_revision_plan(*, api_key, base_url, models, messages, request
                 plan = parse_revision_plan(raw_plan)
                 return (plan, attempt, model)
             response = await asyncio.wait_for(_request_completion(api_key, base_url, model, _revision_plan_messages_with_feedback(messages, validation_feedback), PROPOSAL_PLAN_MAX_TOKENS, attempt_timeout, task='revision_plan'), timeout=attempt_timeout)
+            if not getattr(response, 'choices', None):
+                raise EmptyModelResponse('The model returned an empty response.')
             choice = response.choices[0]
             response_fields = _response_diagnostics(response, choice)
             if str(getattr(choice, 'finish_reason', '') or '') == 'length':
@@ -1126,11 +1167,14 @@ async def _compile_revision_plan(*, api_key, base_url, models, messages, request
             if last_error.code == 'MODEL_RESPONSE_INVALID' and failure_reason:
                 last_error.safe_message = failure_reason[:1200]
                 validation_feedback = failure_reason[:1200]
-                try:
-                    repair_request = _revision_plan_patch_request(raw_plan, messages)
-                except PatchError:
-                    last_error.details = {'task': 'revision_plan', 'failureStage': 'envelope', 'component': 'plan'}
-                    break
+                if isinstance(raw_plan, dict) and raw_plan:
+                    try:
+                        repair_request = _revision_plan_patch_request(raw_plan, messages)
+                    except PatchError:
+                        repair_request = None
+                        last_error.details = {'task': 'revision_plan', 'failureStage': 'envelope', 'component': 'plan'}
+                else:
+                    repair_request = None
         if attempt == 1:
             first_failure_code = last_error.code
         fields = {'requestId': request_id, 'task': 'map_proposal', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'revision_plan', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
@@ -1178,7 +1222,7 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
         strategy_data = strategy.as_dict()
         entity_operators = {'move_player', 'move_box', 'move_target'}
         required_transitions = strategy_data.get('requiredTransitions') or []
-        required_operators = {_operation_kind(item['from'], item['to']) for item in required_transitions}
+        required_operators = {op for item in required_transitions for op in _transition_operators(item['from'], item['to'])}
         if required_transitions:
             minimum_changed_cells = max(2, len(required_transitions)) if required_operators.intersection(entity_operators) else len(required_transitions)
         else:
@@ -1242,26 +1286,35 @@ def _operation_patch_request(payload, contract, rows):
         targets.append(Target('candidates', ('candidates',), (list,)))
     else:
         for index, item in enumerate(candidates):
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or set(item) > {'strategyIndex', 'operations'}:
                 targets.append(Target(f'candidate-{index + 1}', ('candidates', index), (dict,)))
                 continue
             strategy = item.get('strategyIndex')
             if type(strategy) is not int or not 1 <= strategy <= len(contract.get('strategies') or []):
                 targets.append(Target(f'candidate-{index + 1}.strategyIndex', ('candidates', index, 'strategyIndex'), (int,)))
             operations = item.get('operations')
-            missing = []
-            if isinstance(operations, list):
-                for op_index, operation in enumerate(operations):
-                    if isinstance(operation, dict) and type(operation.get('row')) is int and (type(operation.get('column')) is int) and ('to' not in operation):
-                        missing.append(Target(f'candidate-{index + 1}.operation-{op_index + 1}.to', ('candidates', index, 'operations', op_index, 'to'), (str,)))
-            targets.extend(missing or [Target(f'candidate-{index + 1}.operations', ('candidates', index, 'operations'), (list,))])
+            if not isinstance(operations, list) or not operations:
+                targets.append(Target(f'candidate-{index + 1}.operations', ('candidates', index, 'operations'), (list,)))
+                continue
+            op_targets = []
+            for op_index, operation in enumerate(operations):
+                if not isinstance(operation, dict) or set(operation) - {'row', 'column', 'from', 'to'}:
+                    op_targets.append(Target(f'candidate-{index + 1}.operation-{op_index + 1}', ('candidates', index, 'operations', op_index), (dict,)))
+                    continue
+                for coord_key in ('row', 'column'):
+                    if type(operation.get(coord_key)) is not int:
+                        op_targets.append(Target(f'candidate-{index + 1}.operation-{op_index + 1}.{coord_key}', ('candidates', index, 'operations', op_index, coord_key), (int,)))
+                if 'from' in operation and operation.get('from') is not None and not isinstance(operation.get('from'), str):
+                    op_targets.append(Target(f'candidate-{index + 1}.operation-{op_index + 1}.from', ('candidates', index, 'operations', op_index, 'from'), (str,)))
+                if not isinstance(operation.get('to'), str):
+                    op_targets.append(Target(f'candidate-{index + 1}.operation-{op_index + 1}.to', ('candidates', index, 'operations', op_index, 'to'), (str,)))
+            targets.extend(op_targets or [Target(f'candidate-{index + 1}.operations', ('candidates', index, 'operations'), (list,))])
     return PatchRequest('operations', candidate, targets, {'execution_contract': contract, 'snapshot': build_stage_snapshot(rows)})
 
 @proposal_phase('operation_candidates', 'operations')
 async def _generate_map_operation_candidates(*, api_key, base_url, models, messages, base_rows, request_id, language, proposal_validator, revision_contract, baseline_metrics, started_at, deadline=None, candidate_evidence=None, excluded_map_fingerprints=None):
     last_error = None
     repair_request = None
-    payload = {}
     validation_feedback = None
     attempted_candidate_count = 0
     rejected_operation_signatures = set()
@@ -1274,6 +1327,7 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
     while len(attempted_models) < svc.config.proposal_generation_attempts:
         attempted_models.append(models[0])
     for attempt, configured_model in enumerate(attempted_models, start=1):
+        payload = None
         model = models[0] if validation_feedback is not None else configured_model
         remaining = svc.remaining_until(deadline)
         if remaining <= 0:
@@ -1288,6 +1342,8 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
                 content = json.dumps(payload, ensure_ascii=False)
             else:
                 response = await asyncio.wait_for(_request_completion(api_key, base_url, model, attempt_messages, PROPOSAL_OPERATION_MAX_TOKENS, attempt_timeout, task='operation_candidates'), timeout=attempt_timeout)
+                if not getattr(response, 'choices', None):
+                    raise EmptyModelResponse('The model returned an empty response.')
                 choice = response.choices[0]
                 if str(getattr(choice, 'finish_reason', '') or '') == 'length':
                     raise ValueError('The operation-candidate output reached its token limit.')
@@ -1295,10 +1351,10 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
                 content = str(choice.message.content or '')
             if not content.strip():
                 raise EmptyModelResponse('The model returned an empty response.')
-            payload = json.loads(content)
+            payload = parse_json_object(content)
             if isinstance(payload, dict) and isinstance(payload.get('candidates'), list):
                 attempted_candidate_count = max(attempted_candidate_count, len(payload['candidates']))
-            selected_rows, selected_index, candidate_count, selected_operations = _select_operation_candidate(payload, base_rows, revision_contract, proposal_validator, baseline_metrics, rejected_operation_signatures, rejected_map_signatures, rejection_records, candidate_evidence, excluded_map_fingerprints)
+            selected_rows, selected_index, candidate_count, selected_operations = _select_operation_candidate(payload, base_rows, revision_contract, proposal_validator, baseline_metrics, rejected_operation_signatures, rejected_map_signatures, rejection_records, candidate_evidence, excluded_map_fingerprints, deadline=deadline)
             latency_ms = int((svc.clock.monotonic() - started_at) * 1000)
             changed_cell_count = _changed_cell_count(base_rows, selected_rows)
             result = LLMExecutionResult(assistant_message='我整理了一份等待你审查的地图提案。' if language == 'zh-CN' else 'I prepared a map proposal for your review.', attempts_used=attempt, request_id=request_id, proposed_rows=list(selected_rows), modification_summary='', model=model, latency_ms=latency_ms, guidance={'move': 'deliver_revision', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'uiCues': []}, revision_contract=revision_contract, revision_operations=selected_operations, proposal_diagnostics={'candidateCount': candidate_count, 'validCandidates': 1, 'constructedCandidates': candidate_count, 'selectedCandidateIndex': selected_index, 'selectedStrategyIndex': _candidate_strategy_index(payload, selected_index), 'changedCellCount': changed_cell_count})
@@ -1313,7 +1369,7 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
             if last_error.code == 'MODEL_RESPONSE_INVALID' and failure_reason:
                 last_error.safe_message = failure_reason[:1200]
                 validation_feedback = json.dumps(rejection_records[-3:] or [{'reason': failure_reason[:500]}], ensure_ascii=False, separators=(',', ':'))[:1200]
-                repair_request = _operation_patch_request(payload, revision_contract, base_rows)
+                repair_request = _operation_patch_request(payload, revision_contract, base_rows) if isinstance(payload, dict) and payload else None
         failure_fields = {'requestId': request_id, 'task': 'map_proposal', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'operation_candidates', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
         if failure_reason:
             failure_fields['validationReason'] = failure_reason[:1200]
@@ -1371,7 +1427,7 @@ def _operation_messages_with_feedback(messages, validation_feedback):
     return corrected
 
 @proposal_phase('candidate_validation', 'candidate', revalidates='operations')
-def _select_operation_candidate(payload, base_rows, revision_contract, proposal_validator, baseline_metrics=None, rejected_operation_signatures=None, rejected_map_signatures=None, rejection_records=None, candidate_evidence=None, excluded_map_fingerprints=None):
+def _select_operation_candidate(payload, base_rows, revision_contract, proposal_validator, baseline_metrics=None, rejected_operation_signatures=None, rejected_map_signatures=None, rejection_records=None, candidate_evidence=None, excluded_map_fingerprints=None, *, deadline=None):
     if not isinstance(payload, dict):
         raise ValueError('The map proposal must be a JSON object.')
     candidates = payload.get('candidates')
@@ -1422,12 +1478,14 @@ def _select_operation_candidate(payload, base_rows, revision_contract, proposal_
             if proposal_validator is not None:
                 validation = proposal_validator(rows)
             else:
-                validation = _solve_stage(rows)
-            _validate_metric_goals(strategy.get('metricGoals') or [], baseline_metrics or {}, validation)
+                validation = _solve_stage(rows, **{'deadline': deadline} if deadline is not None else {})
+            _validate_metric_goals(strategy.get('metricGoals') or [], baseline_metrics or {}, validation, deadline=deadline)
             evidence = candidate_evidence.get(full_map_hash) or {}
             positive_deltas = [value for value in (evidence.get('metricDeltas') or {}).values() if isinstance(value, int) and value > 0]
             valid.append((tuple(evidence['goalRank']) + (-changed_cells, -strategy_index, tuple(rows)) if 'goalRank' in evidence else (int(bool(evidence.get('passed', True))), len(positive_deltas), sum(positive_deltas), -changed_cells, -strategy_index, tuple(rows)), rows, index, list(operations)))
         except Exception as exception:
+            if _is_search_budget_error(exception):
+                raise TimeoutError(str(exception)) from exception
             reason = _safe_validation_reason(exception)
             trace_proposal('candidate_validation', 'candidate', 'rejected', reason_code(exception), attempt=index, issues=safe_issues(exception))
             failures.append(f'candidate {index}: {reason}')
@@ -1466,6 +1524,8 @@ def _candidate_rejection_category(exception):
             return 'solver_budget_exhausted'
         return code.casefold()
     text = _safe_validation_reason(exception).casefold()
+    if 'search_budget_exceeded' in text or 'min_push_search_budget_exceeded' in text:
+        return 'solver_budget_exhausted'
     if 'metric goal' in text:
         return 'hard_objective_not_met'
     if 'duplicate' in text or 'repeats' in text:
@@ -1512,6 +1572,27 @@ def validate_ai_edit_diff(base_rows, candidate_rows):
             if before != after and (before not in {'#', '.', '@'} or after not in {'#', '.', '@'} or (x, y) in shell):
                 raise ProposalValidationError([{'fieldPath': 'candidate', 'reasonCode': 'PROTECTED_EDIT', 'sourceKind': 'server'}], message='AI revisions may edit water and internal walls only.')
 
+def _is_search_budget_error(value):
+    if isinstance(value, TimeoutError):
+        return True
+    if isinstance(value, dict):
+        if value.get('deadlineReached'):
+            return True
+        reasons = value.get('failureReasons') or {}
+        if any((key in reasons for key in ('SEARCH_BUDGET_EXCEEDED', 'MIN_PUSH_SEARCH_BUDGET_EXCEEDED', 'TimeoutError'))):
+            return True
+        records = value.get('rejectionRecords') or []
+        return any((isinstance(item, dict) and (item.get('category') == 'solver_budget_exhausted' or 'SEARCH_BUDGET_EXCEEDED' in str(item.get('reason') or '') or 'MIN_PUSH_SEARCH_BUDGET_EXCEEDED' in str(item.get('reason') or '')) for item in records))
+    code = str(getattr(value, 'code', '') or '')
+    text = str(value or '')
+    return code in {'SEARCH_BUDGET_EXCEEDED', 'MIN_PUSH_SEARCH_BUDGET_EXCEEDED', 'PROPOSAL_SEARCH_BUDGET_EXCEEDED'} or 'SEARCH_BUDGET_EXCEEDED' in text or 'MIN_PUSH_SEARCH_BUDGET_EXCEEDED' in text
+
+def _transition_operators(before, after):
+    kind = _operation_kind(before, after)
+    if isinstance(kind, tuple):
+        return kind
+    return (kind,) if kind is not None else ()
+
 @proposal_phase('execution_replay', 'execution')
 def _deterministic_exact_revision(rows, execution_brief, request_id, language, proposal_validator, entity_bindings=None):
     """Execute a frozen transition contract without asking an LLM to guess cells."""
@@ -1519,8 +1600,7 @@ def _deterministic_exact_revision(rows, execution_brief, request_id, language, p
     transitions = brief['requiredTransitions']
     if not transitions:
         return None
-    operator_by_transition = {('.', '#'): 'add_wall', ('#', '.'): 'remove_wall', ('.', '@'): 'add_water', ('@', '.'): 'remove_water', ('p', '.'): 'move_player', ('.', 'p'): 'move_player', ('s', '.'): 'move_box', ('.', 's'): 'move_box', ('t', '.'): 'move_target', ('.', 't'): 'move_target'}
-    operators = list(dict.fromkeys((operator_by_transition[item['from'], item['to']] for item in transitions)))
+    operators = list(dict.fromkeys((op for item in transitions for op in _transition_operators(item['from'], item['to']))))
     if len(operators) > 4:
         raise LLMServiceError('PROPOSAL_SEARCH_EXHAUSTED', 'The frozen transition contract is too broad for one local proposal.', request_id, False, 0, 422)
     effect = brief.get('effect')
@@ -1588,7 +1668,7 @@ def _apply_map_operations(base_rows, operations, revision_brief=None, strategy_c
     return [''.join(row) for row in mutable]
 
 def _operation_kind(before, after):
-    return {('.', '#'): 'add_wall', ('#', '.'): 'remove_wall', ('p', '.'): 'move_player', ('.', 'p'): 'move_player', ('s', '.'): 'move_box', ('.', 's'): 'move_box', ('t', '.'): 'move_target', ('.', 't'): 'move_target', ('.', '@'): 'add_water', ('@', '.'): 'remove_water'}.get((before, after))
+    return {('.', '#'): 'add_wall', ('#', '.'): 'remove_wall', ('p', '.'): 'move_player', ('.', 'p'): 'move_player', ('s', '.'): 'move_box', ('.', 's'): 'move_box', ('t', '.'): 'move_target', ('.', 't'): 'move_target', ('.', '@'): 'add_water', ('@', '.'): 'remove_water', ('@', '#'): ('remove_water', 'add_wall'), ('#', '@'): ('remove_wall', 'add_water')}.get((before, after))
 
 def _changed_cell_count(before_rows, after_rows):
     return sum((before != after for before_row, after_row in zip(before_rows, after_rows) for before, after in zip(before_row, after_row)))
@@ -1602,23 +1682,24 @@ def _validate_operation_contract(operations, strategy):
     positions = []
     operator_counts = {}
     for x, y, before, after in operations:
-        operator = _operation_kind(before, after)
-        if operator is None:
+        operators_for_cell = _transition_operators(before, after)
+        if not operators_for_cell:
             raise ValueError(f'unsupported tile transition {before!r} to {after!r}')
-        if operator not in allowed:
-            raise ValueError(f'operation {operator} is outside the revision contract')
-        component = component_by_operator.get(operator)
-        if component and component in preserved:
-            raise ValueError(f'operation changes preserved component {component}')
-        if operator in {'add_wall', 'remove_wall'} and 'walls' in preserved:
-            raise ValueError('operation changes preserved walls')
+        for operator in operators_for_cell:
+            if operator not in allowed:
+                raise ValueError(f'operation {operator} is outside the revision contract')
+            component = component_by_operator.get(operator)
+            if component and component in preserved:
+                raise ValueError(f'operation changes preserved component {component}')
+            if operator in {'add_wall', 'remove_wall'} and 'walls' in preserved:
+                raise ValueError('operation changes preserved walls')
+            observed.add(operator)
+            operator_counts[operator] = operator_counts.get(operator, 0) + 1
         focus = strategy.get('focus')
         if focus is not None:
             if max(abs(focus['column'] - 1 - x), abs(focus['row'] - 1 - y)) > focus['radius']:
                 raise ValueError('operation is outside the revision focus')
-        observed.add(operator)
         positions.append((x, y))
-        operator_counts[operator] = operator_counts.get(operator, 0) + 1
     expected = effect_operators.get(strategy.get('effect'), set())
     if not observed.intersection(expected):
         raise ValueError('operations do not realize the planned effect')
@@ -1633,14 +1714,16 @@ def _validate_operation_contract(operations, strategy):
         if observed_transitions != required:
             raise ValueError('operations must exactly match the frozen required tile transitions')
 
-def _validate_metric_goals(goals, baseline_metrics, validation):
+def _validate_metric_goals(goals, baseline_metrics, validation, *, deadline=None):
     values = {'solutionSteps': getattr(validation, 'solution_steps', None), 'solutionPushes': getattr(validation, 'solution_pushes', None), 'minimumPushes': None, 'searchedStates': getattr(validation, 'searched_states', None)}
     for goal in goals:
         metric = goal.get('metric')
         if metric == 'minimumPushes':
             try:
-                values[metric] = minimum_pushes(validation.rows, clock=_active_clock())
-            except Exception:
+                values[metric] = minimum_pushes(validation.rows, deadline=deadline, clock=_active_clock())
+            except Exception as min_push_error:
+                if _is_search_budget_error(min_push_error):
+                    raise
                 values[metric] = None
         before = baseline_metrics.get(metric)
         after = values.get(metric)
@@ -1659,7 +1742,11 @@ def _connected_outer_shell(rows):
     width = len(rows[0]) if rows else 0
     for y, row in enumerate(rows):
         for x, tile in enumerate(row):
-            if tile == '#' and (x in {0, width - 1} or y in {0, height - 1}):
+            if tile != '#':
+                continue
+            on_edge = x in {0, width - 1} or y in {0, height - 1}
+            touches_void = any((0 <= ny < height and 0 <= nx < len(rows[ny]) and (rows[ny][nx] == ' ') for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))))
+            if on_edge or touches_void:
                 pending.append((x, y))
     while pending:
         position = pending.pop()
@@ -2000,7 +2087,7 @@ def _proposal_clarification_forbidden_detail(value):
 def _proposal_clarification_allowed_labels(value, stage_context):
     specification = (stage_context or {}).get('proposalClarification') or {}
     allowed = {str(label).upper() for label in specification.get('allowedEntityLabels') or [] if str(label).strip()}
-    mentioned = {label.upper() for label in re.findall('\\b(?:P|B\\d+|T\\d+)\\b', str(value or ''), re.IGNORECASE)}
+    mentioned = {label.upper() for label in re.findall('(?<![A-Za-z0-9_])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9_])', str(value or ''), re.IGNORECASE)}
     return mentioned.issubset(allowed)
 
 def _clean_proposal_clarification_body(body, stage_context):
@@ -2055,7 +2142,11 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
         raise asyncio.TimeoutError()
     try:
         response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 1000, remaining, task='proposal_clarification_review', response_format_override=proposal_options.review_response_format() if option_mode else None), timeout=remaining)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, APIConnectionError, APIStatusError) as error:
+        if isinstance(error, APIStatusError):
+            classified = classify_exception(error, request_id, 0)
+            if not classified.retryable:
+                raise classified from error
         response = None
     sentences = _content_block_sentences(body)
     sentence_ids = {f'sentence-{i}': sentence for i, sentence in enumerate(sentences, 1)}
@@ -2085,7 +2176,11 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
             option_component(verdict, valid, issues)
             if issues:
                 raise PatchError('CLARIFICATION_REVIEW_REFERENCE_INVALID')
-        except (ValueError, TypeError, KeyError, asyncio.TimeoutError) as error:
+        except (ValueError, TypeError, KeyError, asyncio.TimeoutError, APIConnectionError, APIStatusError) as error:
+            if isinstance(error, APIStatusError):
+                classified = classify_exception(error, request_id, 0)
+                if not classified.retryable:
+                    raise classified from error
             failure = LLMServiceError('MODEL_RESPONSE_INVALID', 'The clarification review could not be verified. Retry the original message.', request_id, True, 0, 502)
             failure.details = {'task': 'proposal_clarification', 'failureStage': 'clarification_review', 'failureKind': 'review_validation', 'component': 'clarification_review', 'repairAttemptsUsed': 1, 'maximumRepairAttempts': 1}
             raise failure from error
@@ -2122,7 +2217,7 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
     specification = (stage_context or {}).get('proposalClarification') or {}
     option_mode = specification.get('optionPolicyVersion') == proposal_options.VERSION
     try:
-        payload = json.loads(str(content or ''))
+        payload = parse_json_object(str(content or ''))
     except (TypeError, ValueError, json.JSONDecodeError):
         if option_mode:
             raise
@@ -2170,10 +2265,12 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
 def _proposal_clarification_observability(body, question, stage_context):
     specification = (stage_context or {}).get('proposalClarification') or {}
     route_evidence = specification.get('routeEvidence') or {}
+    zh_mode_by_label = {'已核对的路线概况': 'verified_route_summary', '仅有总量信息': 'totals_only', '路线信息暂不可用': 'unavailable'}
+    route_evidence_mode = route_evidence.get('mode') or zh_mode_by_label.get(route_evidence.get('路线证据状态'), 'unavailable')
     choice_question = bool(re.search('(?:\\bor\\b|\\bversus\\b|\\bvs\\.?\\b|还是|或者|或是)', str(question or ''), re.IGNORECASE))
-    question_labels = set(re.findall('\\b(?:P|B\\d+|T\\d+)\\b', str(question or ''), re.IGNORECASE))
-    body_labels = set(re.findall('\\b(?:P|B\\d+|T\\d+)\\b', str(body or ''), re.IGNORECASE))
-    return {'clarificationRouteEvidenceMode': route_evidence.get('mode', 'unavailable'), 'clarificationBodySentenceCount': len(_content_block_sentences(body)), 'clarificationAnalysisOptionCount': 2 if choice_question else None, 'clarificationQuestionForm': 'choice' if choice_question else 'open', 'clarificationOptionsCovered': question_labels.issubset(body_labels) if choice_question and question_labels else None}
+    question_labels = set(re.findall('(?<![A-Za-z0-9_])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9_])', str(question or ''), re.IGNORECASE))
+    body_labels = set(re.findall('(?<![A-Za-z0-9_])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9_])', str(body or ''), re.IGNORECASE))
+    return {'clarificationRouteEvidenceMode': route_evidence_mode, 'clarificationBodySentenceCount': len(_content_block_sentences(body)), 'clarificationAnalysisOptionCount': 2 if choice_question else None, 'clarificationQuestionForm': 'choice' if choice_question else 'open', 'clarificationOptionsCovered': question_labels.issubset(body_labels) if choice_question and question_labels else None}
 
 def _deterministic_revision_advice_body(messages, visible_content, language):
     corpus = ' '.join((part for part in (_latest_role_content(messages, 'user'), visible_content) if str(part or '').strip())).casefold()
@@ -2574,7 +2671,6 @@ def _validate_revision_plan_payload(value, rows=None, entity_bindings=None):
     changes = value.get('changes')
     if not isinstance(changes, list) or not 1 <= len(changes) <= 12:
         raise ValueError('revisionPlan.changes must contain one to twelve exact cell changes.')
-    transition_by_operation = {('.', '#'): 'add_wall', ('#', '.'): 'remove_wall', ('p', '.'): 'move_player', ('.', 'p'): 'move_player', ('s', '.'): 'move_box', ('.', 's'): 'move_box', ('t', '.'): 'move_target', ('.', 't'): 'move_target', ('.', '@'): 'add_water', ('@', '.'): 'remove_water'}
     transitions = []
     operations = []
     seen_coordinates = set()
@@ -2587,11 +2683,14 @@ def _validate_revision_plan_payload(value, rows=None, entity_bindings=None):
         after = change['after']
         operation = change['operation']
         anchor_entity = change.get('anchorEntity')
-        if isinstance(row, bool) or isinstance(column, bool) or (not isinstance(row, int)) or (not isinstance(column, int)) or (not 1 <= row <= 10) or (not 1 <= column <= 12) or (before not in set('#.@pst')) or (after not in set('#.@pst')) or (before == after) or ((row, column) in seen_coordinates) or (operation not in {'add_wall', 'remove_wall', 'move_player', 'move_box', 'move_target', 'add_water', 'remove_water'}) or (transition_by_operation.get((before, after)) != operation) or (anchor_entity is not None and anchor_entity not in {'P', 'B1', 'B2', 'T1', 'T2'}):
+        cell_operators = _transition_operators(before, after)
+        if isinstance(row, bool) or isinstance(column, bool) or (not isinstance(row, int)) or (not isinstance(column, int)) or (not 1 <= row <= 10) or (not 1 <= column <= 12) or (before not in set('#.@pst')) or (after not in set('#.@pst')) or (before == after) or ((row, column) in seen_coordinates) or (operation not in {'add_wall', 'remove_wall', 'move_player', 'move_box', 'move_target', 'add_water', 'remove_water'}) or (operation not in cell_operators) or (anchor_entity is not None and anchor_entity not in {'P', 'B1', 'B2', 'T1', 'T2'}):
             raise ValueError(f'revisionPlan.changes[{index}] is not an exact supported transition.')
         seen_coordinates.add((row, column))
         transitions.append({'row': row, 'column': column, 'from': before, 'to': after, **({'anchorEntity': anchor_entity} if anchor_entity is not None else {})})
-        operations.append(operation)
+        for op in cell_operators:
+            if op not in operations:
+                operations.append(op)
     preserve = value.get('preserve')
     valid_preserve = {'outer_shell', 'player', 'boxes', 'targets', 'water', 'walls', 'unrelated_areas'}
     if not isinstance(preserve, list) or any((not isinstance(item, str) for item in preserve)) or len(set(preserve)) != len(preserve) or any((item not in valid_preserve for item in preserve)):
@@ -2651,16 +2750,16 @@ def _validate_execution_brief(value, rows=None, entity_bindings=None):
     objective = value.get('playObjective')
     if objective is not None and (not isinstance(objective, str) or not objective.strip() or len(objective) > 120 or ('\n' in objective) or ('\r' in objective)):
         raise ValueError('executionBrief.playObjective is invalid.')
-    operator_for_transition = {('.', '#'): 'add_wall', ('#', '.'): 'remove_wall', ('p', '.'): 'move_player', ('.', 'p'): 'move_player', ('s', '.'): 'move_box', ('.', 's'): 'move_box', ('t', '.'): 'move_target', ('.', 't'): 'move_target', ('.', '@'): 'add_water', ('@', '.'): 'remove_water'}
     for transition in normalized_transitions:
-        operator = operator_for_transition.get((transition['from'], transition['to']))
-        if operator is None or operator not in operators:
+        cell_operators = _transition_operators(transition['from'], transition['to'])
+        if not cell_operators or any((operator not in operators for operator in cell_operators)):
             raise ValueError('executionBrief.allowedOperators cannot realize a required transition.')
-        if operator in {'add_wall', 'remove_wall'} and 'walls' in preserve:
-            raise ValueError('executionBrief preserves walls but requires a wall edit.')
-        component = {'move_player': 'player', 'move_box': 'boxes', 'move_target': 'targets', 'add_water': 'water', 'remove_water': 'water'}.get(operator)
-        if component and component in preserve:
-            raise ValueError(f'executionBrief preserves {component} but requires an edit.')
+        for operator in cell_operators:
+            if operator in {'add_wall', 'remove_wall'} and 'walls' in preserve:
+                raise ValueError('executionBrief preserves walls but requires a wall edit.')
+            component = {'move_player': 'player', 'move_box': 'boxes', 'move_target': 'targets', 'add_water': 'water', 'remove_water': 'water'}.get(operator)
+            if component and component in preserve:
+                raise ValueError(f'executionBrief preserves {component} but requires an edit.')
         if focus is not None and max(abs(focus['column'] - transition['column']), abs(focus['row'] - transition['row'])) > focus['radius']:
             raise ValueError('executionBrief.focus does not contain every required transition.')
     if rows is not None:
@@ -2706,7 +2805,7 @@ def _validate_execution_brief(value, rows=None, entity_bindings=None):
         for label, group in tagged.items():
             if len(group['sources']) != 1 or len(group['destinations']) != 1:
                 raise ValueError(f'executionBrief entity move for {label} requires one source and one destination.')
-        moving_operators = {operator_for_transition[item['from'], item['to']] for item in normalized_transitions if (item['from'], item['to']) in operator_for_transition} & {'move_player', 'move_box', 'move_target'}
+        moving_operators = {op for item in normalized_transitions for op in _transition_operators(item['from'], item['to'])} & {'move_player', 'move_box', 'move_target'}
         if moving_operators and entity_bindings is not None and any((item.get('anchorEntity') is None for item in normalized_transitions)):
             raise ValueError('entity movement transitions must identify their anchorEntity.')
         if any((label not in anchors for label in tagged)):

@@ -259,25 +259,56 @@ class SQLiteRepository:
         self.clock: Clock = clock or SYSTEM_CLOCK
         self._init_lock = Lock()
         self._initialized = False
+        self._memory_lock = Lock()
+        self._memory_conn: sqlite3.Connection | None = None
 
     def initialize(self) -> None:
         from .session_projection import initialize_database
 
-        file_missing = str(self.db_path) != ":memory:" and not self.db_path.exists()
+        is_memory = str(self.db_path) == ":memory:"
+        file_missing = not is_memory and not self.db_path.exists()
         if self._initialized and not file_missing:
             return
         with self._init_lock:
-            file_missing = str(self.db_path) != ":memory:" and not self.db_path.exists()
+            file_missing = not is_memory and not self.db_path.exists()
             if self._initialized and not file_missing:
                 return
-            initialize_database(self.db_path, clock=self.clock)
+            if is_memory:
+                with self._memory_lock:
+                    if self._memory_conn is None:
+                        self._memory_conn = sqlite3.connect(":memory:", timeout=15, check_same_thread=False)
+                        self._memory_conn.row_factory = sqlite3.Row
+                    initialize_database(self.db_path, clock=self.clock, database=self._memory_conn)
+            else:
+                initialize_database(self.db_path, clock=self.clock)
             self._initialized = True
 
     @contextmanager
     def connect(self, immediate: bool = False):
         self.initialize()
+        if str(self.db_path) == ":memory:":
+            with self._memory_lock:
+                database = self._memory_conn
+                database.execute("PRAGMA foreign_keys=ON")
+                database.execute("PRAGMA busy_timeout=15000")
+                try:
+                    if immediate:
+                        database.execute("BEGIN IMMEDIATE")
+                    yield database
+                    database.commit()
+                except Exception:
+                    database.rollback()
+                    raise
+            return
         with connect(self.db_path, immediate=immediate) as database:
             yield database
+
+    def close(self) -> None:
+        with self._memory_lock:
+            if self._memory_conn is not None:
+                self._memory_conn.close()
+                self._memory_conn = None
+                self._initialized = False
 
     def serialize_session(self, database: sqlite3.Connection, session_id: str, *, now: datetime | None = None):
         from .session_projection import serialize_session
@@ -391,18 +422,34 @@ def map_fingerprint(rows):
 
 
 def _public_guidance(value):
-    result = dict(value or {}) if isinstance(value, dict) else {}
-    result.pop("designContextPatch", None)
-    result.pop("designContextPatchError", None)
-    result.pop("proposalDiscovery", None)
-    result.pop("openingPresentation", None)
-    result.pop("_intentHypothesisId", None)
-    result.pop("_intentReviewState", None)
+    result = (
+        {
+            key: item
+            for key, item in value.items()
+            if not str(key).startswith("_")
+        }
+        if isinstance(value, dict)
+        else {}
+    )
+    for hidden_key in (
+        "designContextPatch",
+        "designContextPatchError",
+        "proposalDiscovery",
+        "openingPresentation",
+        "openingRecovery",
+        "manualEditReview",
+        "dashboardNode",
+    ):
+        result.pop(hidden_key, None)
     offer = result.get("proposalOffer")
-    if isinstance(offer, dict) and "executionBrief" in offer:
-        offer = dict(offer)
-        offer.pop("executionBrief", None)
-        result["proposalOffer"] = offer
+    if isinstance(offer, dict):
+        hidden_offer_keys = {"executionBrief", "revisionWorkflow", "revisionPlan"}
+        if any(key in offer or str(key).startswith("_") for key in offer):
+            result["proposalOffer"] = {
+                key: item
+                for key, item in offer.items()
+                if key not in hidden_offer_keys and not str(key).startswith("_")
+            }
     return result
 
 

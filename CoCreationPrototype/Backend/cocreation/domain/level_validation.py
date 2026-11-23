@@ -555,7 +555,7 @@ def build_entity_bindings(
         kind = entity.get("kind")
         if kind not in current_positions:
             continue
-        if transition.get("from") not in {"p", "s", "t"}:
+        if transition.get("from") not in {".", "p", "s", "t"}:
             continue
         if transition.get("to") not in {".", "p", "s", "t"}:
             continue
@@ -1346,17 +1346,6 @@ def format_map_claim_correction(conflicts, language="en"):
     if not conflicts:
         return ""
     first = conflicts[0]
-    if language == "zh-CN" and first.get("kind") == "entity":
-        if first.get("reason") == "entity_identity_unknown":
-            return (
-                f"\u5f53\u524d Stage \u53ea\u80fd\u786e\u8ba4\u76f8\u5173\u683c\u5b50\u4e0a\u7684\u5b9e\u4f53\uff0c\u6682\u65f6\u65e0\u6cd5\u628a\u5b83\u4e0e\u5386\u53f2 {first.get('entity')} \u8eab\u4efd\u53ef\u9760\u5bf9\u5e94\u3002"
-                "\u8bf7\u7528\u5f53\u524d\u5730\u56fe\u7684\u884c\u5217\u4f4d\u7f6e\u63cf\u8ff0\u5b83\uff0c\u6211\u4f1a\u6309\u8fd9\u4e2a\u4e2d\u6027\u4f4d\u7f6e\u7ee7\u7eed\u5206\u6790\u3002"
-            )
-        if not first.get("expected"):
-            return (
-                f"\u5f53\u524d Stage \u4e2d\u6ca1\u6709\u53ef\u9a8c\u8bc1\u7684 {first.get('entity')} \u8eab\u4efd\u3002"
-                "\u8bf7\u6539\u7528\u5f53\u524d\u5730\u56fe\u7684\u884c\u5217\u4f4d\u7f6e\u63cf\u8ff0\u8981\u8ba8\u8bba\u7684\u5b9e\u4f53\u3002"
-            )
     if language == "zh-CN":
         if first.get("kind") == "entity":
             if first.get("reason") == "entity_identity_unknown":
@@ -1379,20 +1368,6 @@ def format_map_claim_correction(conflicts, language="en"):
         return (
             f"\u4f60\u63d0\u5230\u7684\u7b2c {first.get('row')} \u884c\u7b2c {first.get('column')} \u5217\u4e0e\u5f53\u524d Stage \u4e0d\u4e00\u81f4\uff1b"
             f"\u5f53\u524d\u4fdd\u5b58\u5730\u56fe\u4e2d\u8fd9\u91cc\u662f{actual_name}\uff0c\u6211\u4f1a\u4ee5\u8fd9\u4e2a\u683c\u5b50\u72b6\u6001\u7ee7\u7eed\u5206\u6790\u3002"
-        )
-    if language == "zh-CN":
-        if first.get("kind") == "entity":
-            label = first.get("entity")
-            expected = first.get("expected") or {}
-            return (
-                f"你提到的 {label} 位置与当前 Stage 不一致。当前保存地图中 {label} "
-                f"位于第 {expected.get('row')} 行第 {expected.get('column')} 列，我会以这个位置继续分析。"
-            )
-        tile_names = {"@": "水域", "#": "墙体", ".": "地面"}
-        actual = tile_names.get(first.get("actualTile"), "当前格子")
-        return (
-            f"你提到的第 {first.get('row')} 行第 {first.get('column')} 列与当前 Stage 不一致；"
-            f"当前保存地图中这里是{actual}，我会以这个格子状态继续分析。"
         )
     if first.get("kind") == "entity":
         expected = first.get("expected") or {}
@@ -1420,32 +1395,43 @@ def format_map_claim_correction(conflicts, language="en"):
 
 
 def _boundary_wall_cells(rows):
-    pending = []
-    visited = set()
+    exterior_void = deque()
+    visited_void = set()
 
     for y in range(HEIGHT):
         for x in range(WIDTH):
             if x not in {0, WIDTH - 1} and y not in {0, HEIGHT - 1}:
                 continue
-            if rows[y][x] == "#":
-                pending.append((x, y))
+            if rows[y][x] == " ":
+                exterior_void.append((x, y))
+                visited_void.add((x, y))
 
-    while pending:
-        position = pending.pop()
-
-        if position in visited:
-            continue
-
-        visited.add(position)
-        x, y = position
-
+    while exterior_void:
+        x, y = exterior_void.popleft()
         for next_x, next_y in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
             if not (0 <= next_x < WIDTH and 0 <= next_y < HEIGHT):
                 continue
-            if rows[next_y][next_x] == "#" and (next_x, next_y) not in visited:
-                pending.append((next_x, next_y))
+            if (next_x, next_y) in visited_void:
+                continue
+            if rows[next_y][next_x] == " ":
+                visited_void.add((next_x, next_y))
+                exterior_void.append((next_x, next_y))
 
-    return visited
+    shell = set()
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            if rows[y][x] != "#":
+                continue
+            if x in {0, WIDTH - 1} or y in {0, HEIGHT - 1}:
+                shell.add((x, y))
+                continue
+            if any(
+                (x + dx, y + dy) in visited_void
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1))
+            ):
+                shell.add((x, y))
+
+    return shell
 
 
 def _find_all(rows, tile):

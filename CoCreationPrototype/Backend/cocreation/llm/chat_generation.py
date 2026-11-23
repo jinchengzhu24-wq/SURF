@@ -212,8 +212,9 @@ def _generate_manual_edit_assessment_pair(conversation, rows, language, solver_m
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
-            last_error.retryable = True
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception), frozenVerdict=conflict_decision.get('verdict'))
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=last_error.retryable, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception), frozenVerdict=conflict_decision.get('verdict'))
+            if not last_error.retryable:
+                raise last_error
             if raw_content and attempt < 2:
                 messages.extend([{'role': 'assistant', 'content': raw_content}, {'role': 'user', 'content': 'Preserve these already validated components exactly: ' + json.dumps(locked_components, ensure_ascii=False) + f'. Repair only rejected components. Your review failed server validation: {exception}. Keep the frozen conflict decision unchanged and return a corrected complete JSON object.'}])
     if last_error is not None:
@@ -396,7 +397,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
     clarification_repair_request = None
     clarification_semantic_review_failed = False
     total_grounding_dropped_count = 0
-    intent_repair_map_facts = json.dumps(_stage_snapshot_for_prompt(rows, stage_context), ensure_ascii=False, separators=(',', ':'))
+    intent_repair_map_facts = json.loads(_stage_snapshot_for_prompt(rows, stage_context))
     max_attempts = len(models)
     ordinary_discussion = validation_mode in {'ordinary_chat', 'route_discussion'}
     human_edit_engagement_required = _active_human_edit_disagreement(stage_context)
@@ -494,16 +495,32 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                     else:
                         raise LowQualityModelResponse('No independently reliable Kimi clarification remains.')
                 clarification_author = 'server_fallback' if clarification_fallback_used and clarification_question_issue else 'mixed' if clarification_fallback_used or clarification_question_issue else 'kimi'
-            content = _sanitize_visible_model_text(_normalize_unsaved_change_claims(_normalize_single_level_language(content.strip()), language), language)
+            raw_content = content.strip()
+            guidance_start = raw_content.find('<GUIDANCE>')
+            guidance_end = raw_content.find('</GUIDANCE>', guidance_start + len('<GUIDANCE>')) if guidance_start >= 0 else -1
+            if guidance_start >= 0 and guidance_end >= 0:
+                raw_visible = raw_content[:guidance_start].strip()
+                guidance_suffix = raw_content[guidance_start:guidance_end + len('</GUIDANCE>')]
+                trailing_visible = raw_content[guidance_end + len('</GUIDANCE>'):].strip()
+                if trailing_visible:
+                    raw_visible = '\n\n'.join((part for part in (raw_visible, trailing_visible) if part))
+            elif guidance_start >= 0:
+                raw_visible = raw_content[:guidance_start].strip()
+                guidance_suffix = ''
+            else:
+                raw_visible = raw_content
+                guidance_suffix = ''
+            prose_content = _sanitize_visible_model_text(_normalize_unsaved_change_claims(_normalize_single_level_language(raw_visible), language), language)
             if not stage_opening and (stage_context.get('conversationOnly') or (proposal_options.current_set(stage_context.get('proposalDiscovery')) and (not clarification_active))):
-                content, permission_issue = await _current_service().review_proposal_clarification(api_key, base_url, content, '', stage_context, request_id, deadline)
-                if permission_issue or not content.strip():
+                prose_content, permission_issue = await _current_service().review_proposal_clarification(api_key, base_url, prose_content, '', stage_context, request_id, deadline)
+                if permission_issue or not prose_content.strip():
                     raise LowQualityModelResponse('No independently reliable permission-safe discussion remains.')
-            discussion_focus = _extract_plain_discussion_focus(content, language, stage_opening, stage_context)
-            visible_content, intent_hypothesis, proposal_offer, ui_cues = _extract_plain_guidance(content, language, stage_context, stage_opening, rows=rows, strict_metadata=False)
+            raw_for_guidance = f'{prose_content}\n{guidance_suffix}' if guidance_suffix else prose_content
+            discussion_focus = _extract_plain_discussion_focus(raw_for_guidance, language, stage_opening, stage_context)
+            visible_content, intent_hypothesis, proposal_offer, ui_cues = _extract_plain_guidance(raw_for_guidance, language, stage_context, stage_opening, rows=rows, strict_metadata=False)
             latest_user_text = _latest_role_content(semantic_messages, 'user')
             try:
-                intent_decision = _extract_plain_intent_decision(content)
+                intent_decision = _extract_plain_intent_decision(guidance_suffix)
             except ValueError:
                 if not stage_opening and validation_mode in {'ordinary_chat', 'route_discussion'}:
                     intent_decision = None
@@ -562,13 +579,14 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
             route_recovery['droppedSentenceCount'] += grounding_dropped_count
             if route_recovery['changed']:
                 discussion_focus = _extract_plain_discussion_focus(visible_content, language, stage_opening, stage_context)
-            coordinate_links = _extract_plain_coordinate_links(content, rows)
-            design_context_patch, design_context_patch_error = _extract_plain_design_context_patch(content)
+            coordinate_links = _extract_plain_coordinate_links(guidance_suffix, rows)
+            design_context_patch, design_context_patch_error = _extract_plain_design_context_patch(guidance_suffix)
             if clarification_active:
                 coordinate_links = []
                 design_context_patch = None
                 design_context_patch_error = None
-            disagreement = _extract_plain_disagreement(content, language, stage_context)
+            disagreement = _extract_plain_disagreement(guidance_suffix, language, stage_context)
+            content = prose_content
             state_transition_deferred = False
             human_edit_engagement = None
             if human_edit_engagement_required:
@@ -755,7 +773,9 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                         repair_card = True
                     if repair_body or repair_card:
                         if repair_body:
-                            stage_context.setdefault('_reliabilityState', {})['bodyReviewRequired'] = True
+                            state = stage_context.setdefault('_reliabilityState', {})
+                            state['bodyReviewRequired'] = True
+                            state.setdefault('lockedIntentReview', copy.deepcopy(intent_review))
                             trace_reply('body_repair', 'started', repairAttempts=1)
                         body, selected_card = await _repair_reviewed_intent_presentation(api_key=api_key, base_url=base_url, user_text=latest_user_text, body=body, card_text=selected_card, claims=intent_review['claims'], issues=(intent_review.get('issues') or []) + ([pre_repair_body_issue] if pre_repair_body_issue else []), repair_body=repair_body, repair_card=repair_card, map_facts=intent_repair_map_facts, language=language, request_id=request_id, deadline=deadline, optional_budget=optional_budget, card_required=intent_review['relation'] == 'conflict', component_checks=component_checks, rows=rows, entity_bindings=(stage_context or {}).get('entityBindings'), discussion_background=_dialogue_background_prompt(stage_context))
                         if repair_body and rows:
@@ -770,7 +790,25 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                             if not body:
                                 raise LowQualityModelResponse('No reliable second-pass intent prose remained after map-grounding cleanup.')
                     if repair_body:
-                        stage_context['_reliabilityState']['bodyReviewRequired'] = False
+                        state = stage_context.setdefault('_reliabilityState', {})
+                        recheck_review = await _current_service().review_intent_candidate_async(
+                            api_key=api_key,
+                            base_url=base_url,
+                            user_text=latest_user_text,
+                            body=body,
+                            decision=intent_decision,
+                            active_inclinations=active_intents,
+                            language=language,
+                            request_id=request_id,
+                            deadline=deadline,
+                            discussion_background=_dialogue_background_prompt(stage_context),
+                            visible_questions=(stage_context or {}).get('ordinaryOpenQuestions'),
+                            component_state=state,
+                            locked_review=state.get('lockedIntentReview') or intent_review,
+                        )
+                        if not recheck_review.get('bodyValid'):
+                            raise LowQualityModelResponse('The repaired intent body still failed semantic body review.')
+                        state['bodyReviewRequired'] = False
                         trace_reply('body_repair', 'passed')
                     if relation_unverified:
                         selected_card = ''
@@ -868,6 +906,14 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
             if stage_opening and _is_human_edit_stage_opening(True, stage_context):
                 opening_body = _compact_human_edit_opening_inventory(body, language)
             assistant_message = _compose_assistant_message(_format_stage_opening_paragraphs(opening_body) if stage_opening else body, guidance, language, stage_opening, stage_context)
+            entity_bindings = (stage_context or {}).get('entityBindings')
+            guidance['coordinateLinks'] = _recover_coordinate_links(
+                assistant_message,
+                rows,
+                _filter_coordinate_links(guidance.get('coordinateLinks'), assistant_message, rows, entity_bindings),
+                entity_bindings,
+            )
+            route_recovery['coordinateLinksDropped'] = original_coordinate_link_count > len(guidance['coordinateLinks'])
             _assert_visible_output_language(language, assistant_message, guidance=guidance, assessment=assessment)
             if ordinary_discussion:
                 _validate_map_grounding_texts([assistant_message], rows, historical_reference=historical_reference, entity_bindings=(stage_context or {}).get('entityBindings'))
@@ -888,7 +934,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
             failure_reason = _safe_validation_reason(exception)
             trace_reply('body_validation', 'rejected', _diagnostic_failure_reason(exception), attempt=attempt)
             last_error = classify_exception(exception, request_id, attempt)
-            if last_error.code == 'MODEL_RESPONSE_INVALID' and failure_reason:
+            if last_error.code in {'MODEL_RESPONSE_INVALID', 'MODEL_LOW_QUALITY_RESPONSE'} and failure_reason:
                 validation_feedback = failure_reason
         failure_fields = {'requestId': request_id, 'task': task, 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'plain_text', **response_fields, **_provider_error_fields(last_error)}
         if failure_reason:
@@ -938,6 +984,8 @@ async def _generate_with_model_fallback(*, api_key, base_url, models, messages, 
         try:
             attempt_messages = _messages_with_validation_feedback(messages, validation_feedback, task)
             response = await asyncio.wait_for(_request_completion(api_key, base_url, model, attempt_messages, max_tokens, attempt_timeout, task=task), timeout=attempt_timeout)
+            if not getattr(response, 'choices', None):
+                raise EmptyModelResponse('The model returned an empty response.')
             choice = response.choices[0]
             finish_reason = str(getattr(choice, 'finish_reason', '') or '')
             if finish_reason == 'length':
@@ -948,7 +996,7 @@ async def _generate_with_model_fallback(*, api_key, base_url, models, messages, 
                 raise EmptyModelResponse('The model returned an empty response.')
             if len(content) > CHAT_RESPONSE_HARD_LENGTH * 2:
                 raise ValueError('The model response exceeded the transport safety limit.')
-            payload = json.loads(content)
+            payload = parse_json_object(content)
             if assessment_only:
                 payload = _canonicalize_stage_assessment_payload(payload, stage_context)
                 if isinstance(payload.get('assistantMessage'), str):
@@ -967,9 +1015,19 @@ async def _generate_with_model_fallback(*, api_key, base_url, models, messages, 
                 raise ValueError('An explicitly requested map proposal requires proposedRows.')
             if validated[2] is not None and proposal_validator is not None:
                 proposal_validator(validated[2])
-            route_recovery['coordinateLinksDropped'] = isinstance(payload.get('guidance'), dict) and len(payload['guidance'].get('coordinateLinks') or []) > len(validated[4].get('coordinateLinks') or [])
+            assistant_message = _compose_assistant_message(validated[0], validated[4], language, assessment_only, stage_context)
+            entity_bindings = (stage_context or {}).get('entityBindings')
+            validated[4]['coordinateLinks'] = _recover_coordinate_links(
+                assistant_message,
+                rows,
+                _filter_coordinate_links(validated[4].get('coordinateLinks'), assistant_message, rows, entity_bindings),
+                entity_bindings,
+            )
+            raw_guidance = payload.get('guidance') if isinstance(payload, dict) else None
+            raw_links = raw_guidance.get('coordinateLinks') if isinstance(raw_guidance, dict) else None
+            route_recovery['coordinateLinksDropped'] = isinstance(raw_links, list) and len(raw_links) > len(validated[4].get('coordinateLinks') or [])
             latency_ms = int((svc.clock.monotonic() - started_at) * 1000)
-            result = LLMExecutionResult(assistant_message=_compose_assistant_message(validated[0], validated[4], language, assessment_only, stage_context), assessment=validated[1], proposed_rows=validated[2], modification_summary=validated[3], attempts_used=attempt, request_id=request_id, model=model, latency_ms=latency_ms, guidance=validated[4])
+            result = LLMExecutionResult(assistant_message=assistant_message, assessment=validated[1], proposed_rows=validated[2], modification_summary=validated[3], attempts_used=attempt, request_id=request_id, model=model, latency_ms=latency_ms, guidance=validated[4])
             opening_recovery = validated[4].get('openingRecovery') or []
             opening_presentation = dict(validated[4].get('openingPresentation') or {})
             if assessment_only:
@@ -982,7 +1040,7 @@ async def _generate_with_model_fallback(*, api_key, base_url, models, messages, 
         except Exception as exception:
             failure_reason = _safe_validation_reason(exception)
             last_error = classify_exception(exception, request_id, attempt)
-            if last_error.code == 'MODEL_RESPONSE_INVALID' and failure_reason:
+            if last_error.code in {'MODEL_RESPONSE_INVALID', 'MODEL_LOW_QUALITY_RESPONSE'} and failure_reason:
                 validation_feedback = failure_reason
         failure_fields = {'requestId': request_id, 'task': task, 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'json_object', **_provider_error_fields(last_error)}
         failure_fields.update(response_fields)
@@ -1938,13 +1996,6 @@ def _safe_incomplete_chat_reply(language, stage_opening=False, rows=None):
     if language == 'zh-CN':
         return '我会继续从当前已确认的设计信息出发。'
     return 'I will continue from the currently confirmed design information.'
-    if language == 'zh-CN':
-        message = '这次分析没有完整生成，我先不保留半截结论；请再发送一次，我会保留关键设计判断，并把路径推演收束得更清楚。'
-    else:
-        message = 'This analysis did not finish cleanly, so I will not keep the partial conclusion. Please send it once more; I will preserve the key design judgment and keep the route reasoning tighter.'
-    if stage_opening:
-        return _ensure_stage_one_orientation(message, rows, language)
-    return message
 
 def _server_snapshot_fallback_message(rows, language, *, stage_context=None, stage_opening=False):
     """Produce a useful body from server facts when model prose is unusable."""

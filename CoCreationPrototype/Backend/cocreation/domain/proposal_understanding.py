@@ -235,14 +235,18 @@ def bind_latest(understanding, turn_id, version_id):
     return result
 
 
-def reusable_understanding(result, version_id):
+def reusable_understanding(result, version_id, *, expected_signature=None, context=None):
     if (not isinstance(result, dict) or result.get("semanticPolicyVersion") != POLICY_VERSION
             or result.get("dialogueContextVersion") != CONTEXT_VERSION
             or result.get("versionId") != version_id
             or not isinstance(result.get("evidenceSignature"), str) or len(result["evidenceSignature"]) != 64):
         return False
-    reason = critical_review_reason(result, None)
+    if expected_signature is not None and result.get("evidenceSignature") != expected_signature:
+        return False
+    reason = critical_review_reason(result, context)
     review = result.get("criticalReview") or {}
+    if review and review.get("policyVersion") != MEANING_REVIEW_VERSION:
+        return False
     return reason is None or (review.get("verified") is True and review.get("policyVersion") == MEANING_REVIEW_VERSION)
 
 

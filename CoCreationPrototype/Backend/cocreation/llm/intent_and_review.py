@@ -241,17 +241,19 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
     for attempt, cap in enumerate((25.0, 15.0), start=1):
         raw_content = None
         remaining = svc.remaining_until(deadline)
-        if remaining < svc.config.min_retry_budget_seconds:
+        if remaining <= 0 or (attempt > 1 and remaining < svc.config.min_retry_budget_seconds):
             break
         timeout_seconds = min(cap, remaining)
         _log_llm_event('llm_attempt_started', requestId=request_id, task='manual_edit_conflict_classification', model=model, attempt=attempt, maxAttempts=2, timeoutSeconds=round(timeout_seconds, 3), responseMode='json_schema')
         try:
             response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, messages, MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS, timeout_seconds, task='manual_edit_conflict_classification', manual_edit_direction_count=len(directions)), timeout=timeout_seconds))
+            if not getattr(response, 'choices', None):
+                raise EmptyModelResponse('The model returned an empty response.')
             choice = response.choices[0]
             if str(getattr(choice, 'finish_reason', '') or '') == 'length':
                 raise ValueError('The manual-edit conflict classification reached its output limit.')
             raw_content = str(choice.message.content or '')
-            decision = _validate_manual_edit_conflict_classification(json.loads(raw_content), evidence)
+            decision = _validate_manual_edit_conflict_classification(parse_json_object(raw_content), evidence)
             _log_llm_event('llm_request_completed', requestId=request_id, task='manual_edit_conflict_classification', outcome='success', model=model, attemptsUsed=attempt, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), verdict=decision.get('verdict'), comparisonCount=len(decision.get('comparisons') or []))
             return decision
         except asyncio.TimeoutError:
@@ -262,8 +264,9 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
-            last_error.retryable = True
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception))
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=last_error.retryable, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception))
+            if not last_error.retryable:
+                raise last_error
             if raw_content and attempt < 2:
                 messages.extend([{'role': 'assistant', 'content': raw_content}, {'role': 'user', 'content': f'Your classification failed server validation: {exception}. Return a corrected JSON object with exactly the supplied direction slots, one valid relation and one non-empty explanation per slot, and no direction IDs, evidence IDs, omissions, or additional fields.'}])
     if last_error is not None:
@@ -430,7 +433,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             if (getattr(exception, 'details', {}) or {}).get('proposalDiagnostic') and diagnostic is not None:
                 diagnostic.error(phase, 'understanding', exception)
             else:
-                trace_proposal(phase, 'understanding_review' if phase == 'understanding_review' else 'understanding', 'revalidation_failed' if repair_request is not None else 'rejected', reason_code(exception), attempt=attempt, issues=safe_issues(exception), issuesTruncated=getattr(exception, 'issues_truncated', False), issueCount=getattr(exception, 'issue_count', None))
+                trace_proposal(phase, 'understanding_review' if phase == 'understanding_review' else 'understanding', 'revalidation_failed' if (repair_request is not None or review_repair_request is not None) else 'rejected', reason_code(exception), attempt=attempt, issues=safe_issues(exception), issuesTruncated=getattr(exception, 'issues_truncated', False), issueCount=getattr(exception, 'issue_count', None))
             _log_llm_event('proposal_understanding_rejected', requestId=request_id, attempt=attempt, reason=reason_code(exception), issues=safe_issues(exception), issuesTruncated=getattr(exception, 'issues_truncated', False), issueCount=getattr(exception, 'issue_count', None))
             if reason_code(exception) == 'SEMANTIC_REVIEW_REJECTED':
                 trace_proposal(phase, 'understanding_review', 'not_repairable', 'SEMANTIC_REVIEW_REJECTED', attempt=attempt)
@@ -440,7 +443,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 review_source = json.loads(review_messages[1]['content'])
                 review_repair_request = review_patch_request(verdict, exception, review_source['correctionTargets'], sources, review_source)
                 review_cold_retry = not verdict
-                trace_repair('understanding_review', 'proposed' if attempt < 2 else 'exhausted')
+                if review_repair_request is not None:
+                    trace_repair('understanding_review', 'proposed' if attempt < 2 else 'exhausted')
+                elif attempt >= 2:
+                    trace_repair('understanding_review', 'exhausted')
                 if verdict and review_repair_request is None:
                     break
                 continue
@@ -455,7 +461,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 repair_request = None
             review_repair_request = None
             review_cold_retry = False
-            trace_repair('understanding', 'proposed' if attempt < 2 else 'exhausted')
+            if repair_request is not None:
+                trace_repair('understanding', 'proposed' if attempt < 2 else 'exhausted')
+            elif attempt >= 2:
+                trace_repair('understanding', 'exhausted')
             messages.append({'role': 'user', 'content': ('Repair only the server-listed failed fields. Validated speech acts, changes and latest evidence are locked: ' + json.dumps(locked_base, ensure_ascii=False) + '. ' if locked_base is not None else 'Repair the failed understanding with the same original evidence and topic. ') + json.dumps({'issues': safe_issues(exception), 'reasonCode': reason_code(exception), 'designerTurns': [{'id': key, 'content': value} for key, value in sources.items()], 'sourceIdRule': 'sourceTurnId must be a designerTurns.id (latest or a real Turn ID). evidenceRefs use external user:<id> keys only; never copy these keys into sourceTurnId. Do not invent a source, rewrite a quote or drop a goal/lock to pass validation.'}, ensure_ascii=False)})
     error = LLMServiceError('MODEL_RESPONSE_INVALID', "Kimi could not reliably classify the designer's latest message. Retry it.", request_id, True, attempt, 502)
     error.details = {'task': 'turn_understanding', 'failureStage': phase, 'reasonCode': reason_code(last_error), 'issues': safe_issues(last_error), 'failureKind': 'timeout' if isinstance(last_error, (TimeoutError, asyncio.TimeoutError)) else 'semantic_rejection' if reason_code(last_error) == 'SEMANTIC_REVIEW_REJECTED' else 'review_validation' if phase == 'understanding_review' else 'understanding', 'maximumAttempts': 2}
@@ -560,7 +569,7 @@ def classify_challenge_reason(user_reason, hypotheses, proposal_summary, request
                     messages.append({'role': 'system', 'content': 'Your semantic labels were usable, but comparison was missing or too short. Return the same JSON contract and provide a concrete two-to-four-sentence comparison.'})
                     continue
                 raise ValueError('No substantive Kimi comparison was returned.')
-            if comparison_validator is not None:
+            if comparison_validator is not None and comparison:
                 comparison = comparison_validator(comparison)
                 if not comparison:
                     raise ValueError('MAP_GROUNDING_INVALID: no reliable comparison remained.')
@@ -615,6 +624,8 @@ def review_intent_feedback(candidate, active_inclinations, evidence_summary, lan
             break
         try:
             response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS, timeout_seconds, task='intent_feedback_review'), timeout=timeout_seconds))
+            if not getattr(response, 'choices', None):
+                raise EmptyModelResponse('The model returned an empty response.')
             choice = response.choices[0]
             if str(getattr(choice, 'finish_reason', '') or '') == 'length':
                 raise ValueError('The intent review reached its output limit.')
@@ -642,7 +653,7 @@ def review_intent_feedback(candidate, active_inclinations, evidence_summary, lan
                 raise ValueError('Intent review explanation is too short.')
             elif supersedes_ids:
                 raise ValueError('A rejected intent review cannot replace active memory.')
-            elif verdict == 'conflict' and (not conflicting_ids):
+            elif verdict == 'conflict' and active and (not conflicting_ids):
                 raise ValueError('A conflict review must identify prior inclination IDs.')
             elif verdict == 'unclear' and conflicting_ids:
                 raise ValueError('An unclear review cannot cite confirmed conflicts.')
@@ -660,7 +671,8 @@ def review_intent_feedback(candidate, active_inclinations, evidence_summary, lan
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
-            last_error.retryable = True
+            if not last_error.retryable:
+                raise last_error
         if attempt == 1:
             messages.append({'role': 'system', 'content': 'The prior response was invalid. Return exactly verdict, explanation, supersedesHypothesisIds, and conflictingHypothesisIds using the required JSON schema; do not add markdown or other fields.'})
     if last_error is not None:
@@ -696,7 +708,12 @@ def review_question_answers(questions, user_reply, language, request_id, *, _dea
             break
         try:
             response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS, timeout_seconds, task='question_answer_review'), timeout=timeout_seconds))
-            payload = parse_json_object(response.choices[0].message.content)
+            if not getattr(response, 'choices', None):
+                raise EmptyModelResponse('The model returned an empty response.')
+            choice = response.choices[0]
+            if str(getattr(choice, 'finish_reason', '') or '') == 'length':
+                raise ValueError('Question review was truncated.')
+            payload = parse_json_object(choice.message.content)
             if set(payload) != {'results'} or not isinstance(payload['results'], list):
                 raise ValueError('Question review has an invalid envelope.')
             expected = {item['questionId'] for item in safe_questions}
@@ -719,7 +736,8 @@ def review_question_answers(questions, user_reply, language, request_id, *, _dea
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
-            last_error.retryable = True
+            if not last_error.retryable:
+                raise last_error
     if last_error is not None:
         raise last_error
     raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not review question answers in time.', request_id, True, 0, 504)
@@ -751,7 +769,12 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
         validation_feedback = None
         try:
             response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, messages, INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS, timeout_seconds, task='intent_progress_rewrite'), timeout=timeout_seconds))
-            payload = parse_json_object(response.choices[0].message.content)
+            if not getattr(response, 'choices', None):
+                raise EmptyModelResponse('The model returned an empty response.')
+            choice = response.choices[0]
+            if str(getattr(choice, 'finish_reason', '') or '') == 'length':
+                raise ValueError('Progress rewrite was truncated.')
+            payload = parse_json_object(choice.message.content)
             if set(payload) != {'detailedText', 'summaryText'}:
                 raise ValueError('Progress rewrite has unexpected fields.')
             summary = _normalize_response_paragraphs(str(payload.get('summaryText') or ''))[:1200]
@@ -780,7 +803,6 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
         except Exception as exception:
             validation_feedback = str(exception)[:500]
             last_error = classify_exception(exception, request_id, attempt)
-            last_error.retryable = True
         if attempt == 1 and last_error.retryable:
             feedback = validation_feedback or str(last_error)
             messages.append({'role': 'system', 'content': 'The prior rewrite was rejected: ' + feedback + ' Return fresh JSON with a genuinely concise summaryText that does not copy the canonical text. For inclination and confirmed_decision, set detailedText to null. Do not mention this correction.'})
@@ -939,7 +961,8 @@ async def _repair_intent_components_async(*, api_key, base_url, user_text, body,
         timeout = min(30.0, svc.remaining_until(deadline))
         if timeout <= 0:
             raise asyncio.TimeoutError()
-        messages = [{'role': 'system', 'content': 'Repair ONLY the rejected body, preserving locked claims and exact user evidence. Only water/internal walls may be edited; never propose rearranging boxes/targets/player/shell. Normal Sokoban pushes during play may be discussed. Return JSON with only bodyParagraphs, a non-empty array of complete paragraphs. Fix the specified relevance or semantic defect; add no user purpose, authorization, state success or map changes. Use the supplied Stage facts only. Keep concise natural prose without a fixed sentence count. Write in ' + ('Simplified Chinese.' if language == 'zh-CN' else 'English.') + '\n\n' + _visible_reply_style('repair') + '\nLOCKED CLAIMS:\n' + json.dumps(claims, ensure_ascii=False) + '\n\nAUTHORITATIVE STAGE FACTS:\n' + str(map_facts or '')[:8000] + '\n\nCURRENT BODY:\n' + str(body or '')[:5000] + '\n\nCURRENT CARD:\n' + str(card_text or '')[:1200] + '\n\nREVIEW ISSUES:\n' + json.dumps(issues or [], ensure_ascii=False) + '\nREPAIR BODY: yes\nREPAIR CARD: no' + discussion_background}, {'role': 'user', 'content': str(user_text or '')[:2000]}]
+        serialized_facts = json.dumps(map_facts, ensure_ascii=False, separators=(',', ':')) if isinstance(map_facts, (dict, list)) else str(map_facts or '')
+        messages = [{'role': 'system', 'content': 'Repair ONLY the rejected body, preserving locked claims and exact user evidence. Only water/internal walls may be edited; never propose rearranging boxes/targets/player/shell. Normal Sokoban pushes during play may be discussed. Return JSON with only bodyParagraphs, a non-empty array of complete paragraphs. Fix the specified relevance or semantic defect; add no user purpose, authorization, state success or map changes. Use the supplied Stage facts only. Keep concise natural prose without a fixed sentence count. Write in ' + ('Simplified Chinese.' if language == 'zh-CN' else 'English.') + '\n\n' + _visible_reply_style('repair') + '\nLOCKED CLAIMS:\n' + json.dumps(claims, ensure_ascii=False) + '\n\nAUTHORITATIVE STAGE FACTS:\n' + serialized_facts[:8000] + '\n\nCURRENT BODY:\n' + str(body or '')[:5000] + '\n\nCURRENT CARD:\n' + str(card_text or '')[:1200] + '\n\nREVIEW ISSUES:\n' + json.dumps(issues or [], ensure_ascii=False) + '\nREPAIR BODY: yes\nREPAIR CARD: no' + discussion_background}, {'role': 'user', 'content': str(user_text or '')[:2000]}]
         response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task='intent_body_repair'), timeout=timeout)
         choice = response.choices[0]
         if str(getattr(choice, 'finish_reason', '')) == 'length':

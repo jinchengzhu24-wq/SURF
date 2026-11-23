@@ -103,6 +103,7 @@ class CoCreationSettings:
     draft_regeneration_claimed_timeout_seconds: int = DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS
     draft_regeneration_sweep_interval_seconds: float = float(DRAFT_REGENERATION_SWEEP_INTERVAL_SECONDS)
     binary_discovery_enabled: bool = True
+    legacy_chat_enabled: bool = False
     sweeper_enabled: bool = True
     host: str = HOST
     port: int = PORT
@@ -198,6 +199,7 @@ class CoCreationSettings:
                 float(DRAFT_REGENERATION_SWEEP_INTERVAL_SECONDS),
             ),
             binary_discovery_enabled=_env_bool(source, 'COCREATION_BINARY_DISCOVERY_ENABLED', True),
+            legacy_chat_enabled=_env_bool(source, 'COCREATION_LEGACY_CHAT_ENABLED', False),
             sweeper_enabled=_env_bool(source, 'COCREATION_SWEEPER_ENABLED', True),
         )
 
@@ -478,19 +480,8 @@ class HttpOnlineSyncGateway:
         created_at: str,
         guidance: dict[str, Any] | None = None,
     ) -> None:
-        metadata: dict[str, Any] = {
-            'eventId': f'turn:{turn_id}',
-            'eventType': 'turn',
-            'turnId': turn_id,
-            'role': role,
-            'content': content,
-            'language': language,
-            'stageNumber': stage_number,
-            'createdAt': created_at,
-        }
-        if guidance is not None:
-            metadata['guidance'] = guidance
-        self.sync_event(session, 'turn', stage_number=stage_number, metadata=metadata)
+        """Deprecated single-turn sync; superseded by node projections via sync_event."""
+        return None
 
     def sync_final_intention(
         self,

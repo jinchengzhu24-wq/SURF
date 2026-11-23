@@ -26,18 +26,19 @@ import {
     safeReplyDiagnostic,
     translations,
     validationTileNames,
-} from "./i18n.js?v=binary-discovery-20261123-v2-esm";
+} from "./i18n.js?v=binary-discovery-20261123-v3-esm";
 import {
     ELEMENT_IDS,
     createElements,
     createInitialState,
     createStateStorage,
+    isCardActionPending,
     isLevelValidationError,
     recoverMessageFailure,
     setButtonDisabled,
     validApiPayload,
-} from "./state-storage.js?v=binary-discovery-20261123-v2-esm";
-import { createUnityBridge } from "./unity-bridge.js?v=binary-discovery-20261123-v2-esm";
+} from "./state-storage.js?v=binary-discovery-20261123-v3-esm";
+import { createUnityBridge } from "./unity-bridge.js?v=binary-discovery-20261123-v3-esm";
 import {
     buildEntityLabels,
     createMapEditor,
@@ -46,7 +47,7 @@ import {
     tileClass,
     tileLabel,
     tileName,
-} from "./map-editor.js?v=binary-discovery-20261123-v2-esm";
+} from "./map-editor.js?v=binary-discovery-20261123-v3-esm";
 import {
     assistantBodyWithoutCues,
     createChatCards,
@@ -54,8 +55,8 @@ import {
     formatCoordinatePoint,
     isInternalProposalFailureCue,
     normalizedCoordinatePoint,
-} from "./chat-cards.js?v=binary-discovery-20261123-v2-esm";
-import { createSessionActions, retryDelay } from "./session-actions.js?v=binary-discovery-20261123-v2-esm";
+} from "./chat-cards.js?v=binary-discovery-20261123-v3-esm";
+import { createSessionActions, retryDelay } from "./session-actions.js?v=binary-discovery-20261123-v3-esm";
 
 export {
     COMPONENT_RECOVERY_TIMEOUT_MS,
@@ -96,6 +97,7 @@ export {
     formatCoordinatePoint,
     formatEntityCoordinate,
     formatTileCoordinate,
+    isCardActionPending,
     isInternalProposalFailureCue,
     isLevelValidationError,
     normalizedCoordinatePoint,
@@ -236,6 +238,7 @@ export function createWorkbenchApp(deps = {}) {
     const toggleProposalMode = (...args) => ports.toggleProposalMode(...args);
     const cancelBinaryProposal = (...args) => ports.cancelBinaryProposal(...args);
     const retryBinaryProposal = (...args) => ports.retryBinaryProposal(...args);
+    const cancelBinaryRefreshTimer = (...args) => ports.cancelBinaryRefreshTimer(...args);
     const scheduleBinaryRefresh = (...args) => ports.scheduleBinaryRefresh(...args);
     const retryPendingMessage = (...args) => ports.retryPendingMessage(...args);
     const saveManualStage = (...args) => ports.saveManualStage(...args);
@@ -341,6 +344,23 @@ export function createWorkbenchApp(deps = {}) {
         await initialize();
     }
 
+    async function enterWorkspaceFromSession() {
+        state.language = state.session.language || state.language;
+
+        if (!findVersion(state.selectedVersionId)) {
+            state.selectedVersionId = state.session.currentVersionId;
+        }
+
+        localStorage.setItem(selectedStageKey(), state.selectedVersionId);
+        syncHash();
+        state.activeCoordinateLink = null;
+        resetDraftFromSelection();
+        restoreUnsavedMapDraft();
+        ports.render();
+        void ensureVisibleTranslations();
+        await ensureAssessment(state.session.currentVersionId);
+    }
+
     async function refreshSession() {
         state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
         announceEmbeddedLabReady();
@@ -358,20 +378,7 @@ export function createWorkbenchApp(deps = {}) {
             return false;
         }
 
-        state.language = state.session.language;
-
-        if (!findVersion(state.selectedVersionId)) {
-            state.selectedVersionId = state.session.currentVersionId;
-        }
-
-        localStorage.setItem(selectedStageKey(), state.selectedVersionId);
-        syncHash();
-        state.activeCoordinateLink = null;
-        resetDraftFromSelection();
-        restoreUnsavedMapDraft();
-        ports.render();
-        void ensureVisibleTranslations();
-        await ensureAssessment(state.session.currentVersionId);
+        await ports.enterWorkspaceFromSession();
         return true;
     }
 
@@ -405,9 +412,9 @@ export function createWorkbenchApp(deps = {}) {
             button.className = "stage-card";
             button.dataset.uiHelpKind = "stage";
             button.dataset.uiHelpStage = String(version.stageNumber);
-            button.disabled = deadlineExpired()
+            setButtonDisabled(button, deadlineExpired()
                 || state.translationInProgress
-                || state.unityPlayActive;
+                || state.unityPlayActive);
             if (version.versionId === state.selectedVersionId) button.classList.add("selected");
             if (version.versionId === state.session.currentVersionId) button.classList.add("current");
             button.addEventListener("click", () => selectVersion(version.versionId));
@@ -483,6 +490,10 @@ export function createWorkbenchApp(deps = {}) {
             const elapsedSeconds = Math.floor((performance.now() - state.deadlineAnchorStartedAt) / 1000);
             const seconds = Math.max(0, state.deadlineAnchorSeconds - elapsedSeconds);
             if (seconds <= 0) state.session.deadlineExpired = true;
+            if (deadlineExpired() && state.deadlineTimerId !== null) {
+                clearInterval(state.deadlineTimerId);
+                state.deadlineTimerId = null;
+            }
             state.session.remainingSeconds = seconds;
             const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
             const remainder = String(seconds % 60).padStart(2, "0");
@@ -524,7 +535,7 @@ export function createWorkbenchApp(deps = {}) {
 
     function updateControls() {
         if (!state.session) {
-            elements.regenerateDraftButton.disabled = state.busy || state.demoCreationPending;
+            elements.regenerateDraftButton.disabled = state.busy || state.demoCreationPending || Boolean(state.sessionId);
             elements.enterSessionButton.disabled = true;
             elements.setupChineseButton.disabled = elements.setupEnglishButton.disabled = state.busy || state.demoCreationPending;
             return;
@@ -552,12 +563,16 @@ export function createWorkbenchApp(deps = {}) {
         scheduleBinaryRefresh();
         const proposalPlanning = proposalFlowStatus === "planning";
         const proposalRetryPending = proposalFlowStatus === "retry_pending" && Boolean(state.pendingMessage);
+        const binaryRetryPending = binaryActive && proposalFlowStatus === "retry_pending";
         const interactionBusy = state.busy || state.unityPlayActive;
         const generationPending = state.chatStatus === "waiting"
             || state.assessmentRetryTimers.size > 0
             || state.assessing.size > 0;
+        const canDiscardDraft = state.session.status === "active"
+            && !state.unityPlayActive
+            && state.selectedVersionId === state.session.currentVersionId;
         elements.saveStageButton.disabled = !editable || !state.dirty || interactionBusy;
-        elements.discardDraftButton.disabled = !editable || !state.dirty || interactionBusy;
+        elements.discardDraftButton.disabled = !canDiscardDraft || !state.dirty || interactionBusy;
         elements.restoreStageButton.hidden = state.selectedVersionId === state.session.currentVersionId || state.session.status !== "active";
         elements.restoreStageButton.disabled = interactionBusy || expired;
         elements.playButton.disabled = interactionBusy || expired || state.dirty || pending || !selectedVersion();
@@ -566,17 +581,19 @@ export function createWorkbenchApp(deps = {}) {
             || (!selectedHistoricalStage && !expired && (state.dirty || pending));
         elements.messageInput.disabled = interactionBusy || !editable || intentConflictPending
             || proposalPlanning || proposalRetryPending || binaryActive;
-        elements.messageInput.placeholder = binaryActive
-            ? (state.language === "zh-CN" ? "请点选 A/B；想重新描述时，先取消本次方案。" : "Choose A or B. Cancel this proposal to describe a different request.")
-            : intentConflictPending
+        elements.messageInput.placeholder = intentConflictPending
             ? t("intentConflictPlaceholder")
             : proposalPlanning
                 ? t("proposalPlanningPlaceholder")
-                : proposalRetryPending
+                : (proposalRetryPending || binaryRetryPending)
                     ? t("proposalRetryPlaceholder")
-                    : proposalFlowStatus === "revision_needed"
-                        ? t("proposalSupplementPlaceholder")
-                        : t("messagePlaceholder");
+                    : binaryActive && proposalFlowStatus === "revision_needed"
+                        ? t("binaryRevisionNeededPlaceholder")
+                        : binaryActive
+                            ? (state.language === "zh-CN" ? "请点选 A/B；想重新描述时，先取消本次方案。" : "Choose A or B. Cancel this proposal to describe a different request.")
+                            : proposalFlowStatus === "revision_needed"
+                                ? t("proposalSupplementPlaceholder")
+                                : t("messagePlaceholder");
         const disagreementActive = selectedStageHasActiveDisagreement();
         const proposalLocked = proposalFlowActive();
         if ((!editable || disagreementActive || intentConflictPending) && state.proposalMode) {
@@ -596,7 +613,7 @@ export function createWorkbenchApp(deps = {}) {
         if (cancel) {
             cancel.hidden = !binaryActive;
             cancel.textContent = state.language === "zh-CN" ? "取消本次方案" : "Cancel proposal";
-            cancel.disabled = interactionBusy || expired || proposalPlanning || selectedHistoricalStage;
+            cancel.disabled = interactionBusy || !editable || proposalPlanning;
             cancel.onclick = cancelBinaryProposal;
         }
         document.querySelectorAll(".binary-choice-button").forEach(button => {
@@ -612,13 +629,19 @@ export function createWorkbenchApp(deps = {}) {
         });
         document.querySelectorAll(".revision-action-button").forEach(button => {
             setButtonDisabled(button, interactionBusy || !editable || disagreementActive
-                || button.dataset.actionable !== "true");
+                || binaryActive || button.dataset.actionable !== "true");
         });
         document.querySelectorAll(".intent-feedback-card button, .proposal-card button").forEach(button => {
             setButtonDisabled(button, interactionBusy || !editable);
         });
         document.querySelectorAll(".tile, .palette-button").forEach(button => {
             setButtonDisabled(button, interactionBusy || !editable);
+        });
+        const stageCardDisabled = expired
+            || state.translationInProgress
+            || state.unityPlayActive;
+        document.querySelectorAll(".stage-card").forEach(button => {
+            setButtonDisabled(button, stageCardDisabled);
         });
         elements.sendButton.textContent = t("send");
         renderControlHints();
@@ -634,6 +657,9 @@ export function createWorkbenchApp(deps = {}) {
 
     function selectedReplyFailure() {
         if (state.chatStatus === "waiting" && state.chatBusy && state.chatBusyVersionId === state.selectedVersionId) {
+            return null;
+        }
+        if (!canEditSelected()) {
             return null;
         }
         if (binaryFlowActive() && (state.session.proposalFlowState.retryable || state.pendingBinary && state.chatStatus === "error")) {
@@ -652,7 +678,7 @@ export function createWorkbenchApp(deps = {}) {
                 retryAction: retryBinaryProposal,
             };
         }
-        if (canEditSelected() && state.chatStatus === "error"
+        if (state.chatStatus === "error"
             && (!state.pendingMessage || state.pendingMessage.baseVersionId === state.selectedVersionId)) {
             return { error: state.chatError, retryAction: state.chatError?.retryable && state.pendingMessage
                 ? retryPendingMessage : null };
@@ -687,8 +713,24 @@ export function createWorkbenchApp(deps = {}) {
         elements.chatControlHint.hidden = !message;
         elements.chatRequestStatus.hidden = !message;
         elements.chatRequestStatus.className = `chat-request-status composer-feedback${failure?.error ? " error" : ""}`;
+        const binaryRetryAction = state.session?.proposalFlowState?.retryAction || state.pendingBinary;
+        let storedBinaryAction = null;
+        if (!binaryRetryAction && failure?.retryAction === retryBinaryProposal && state.sessionId) {
+            try {
+                storedBinaryAction = JSON.parse(localStorage.getItem(ports.binaryStorageKey()) || "null");
+            } catch (_) {
+                storedBinaryAction = null;
+            }
+        }
+        const effectiveBinaryAction = binaryRetryAction || storedBinaryAction;
+        const binaryChoiceDirtyBlocked = Boolean(
+            failure?.retryAction === retryBinaryProposal
+            && state.dirty
+            && (effectiveBinaryAction?.kind === "choice" || Boolean(effectiveBinaryAction?.choiceId))
+        );
         elements.chatRetryButton.hidden = !failure?.retryAction;
-        elements.chatRetryButton.disabled = state.busy || !failure?.retryAction;
+        elements.chatRetryButton.disabled = state.busy || state.unityPlayActive
+            || !failure?.retryAction || binaryChoiceDirtyBlocked;
         elements.chatRetryButton.textContent = t("retry");
         renderTechnicalDetails(elements.chatTechnicalDetails, failure?.error || null);
     }
@@ -784,8 +826,12 @@ export function createWorkbenchApp(deps = {}) {
             if (!document.hidden) resumeDraftRegenerationPolling();
             if (!document.hidden) stateStorage.componentRecovery.paused.clear();
             scheduleComponentRecovery();
+            scheduleBinaryRefresh();
         });
-        window.addEventListener("pagehide", cancelComponentRecoveryTimer);
+        window.addEventListener("pagehide", () => {
+            cancelComponentRecoveryTimer();
+            cancelBinaryRefreshTimer();
+        });
 
         initializeUiHelp();
         initializeWorkspaceHeaderAlignment();
@@ -809,6 +855,7 @@ export function createWorkbenchApp(deps = {}) {
             initialize,
             createDemoSession,
             openCreatedSession,
+            enterWorkspaceFromSession,
             refreshSession,
             render,
             renderStages,

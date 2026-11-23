@@ -618,6 +618,8 @@ export const chineseApiErrors = {
     EXECUTION_REPLAY_MISMATCH: "实际差异与已审查紫卡不一致，因此未应用。"
 };
 
+translations["zh-CN"].error_CLIENT_TIMEOUT = chineseApiErrors.CLIENT_TIMEOUT;
+
 Object.assign(chineseApiErrors, {
     INVALID_RESPONSE: "服务器响应不完整或无法读取，可重试原操作。",
     REQUIREMENT_INTERPRETATION_INVALID: "尚未可靠理解你的设计要求，可使用原消息重试。",
@@ -626,7 +628,22 @@ Object.assign(chineseApiErrors, {
     CHALLENGE_REVIEW_FAILED: "尚未可靠完成质疑理由的评审，可使用原消息重试。",
     DETERMINISTIC_SEARCH_EXHAUSTED: "尚未找到通过验证的方案，当前地图未改变。",
     CANDIDATE_DUPLICATED: "候选仍重复原方案，尚未形成经过验证的替代方案。",
-    CANDIDATE_UNSOLVABLE: "候选未通过可解性验证，当前地图未改变。"
+    CANDIDATE_UNSOLVABLE: "候选未通过可解性验证，当前地图未改变。",
+    PROPOSAL_PENDING: "请先接受或拒绝当前待处理的地图提案。",
+    SESSION_DEADLINE_EXPIRED: "本次共创时间已到，不能再修改地图或发送消息，请提交最终版本。",
+    PROPOSAL_CHOICE_REQUIRED: "请先选择上方的 A 或 B 选项，或取消本次方案后再发送消息。",
+    BINARY_BUSY: "当前方案仍在处理中，请稍候再试。",
+    PROPOSAL_TRANSLATION_STALE: "方案选项已更新，请刷新后重新选择。",
+    BINARY_PROMISE_NOT_REALIZED: "候选改动未能落实你选择的方向，当前地图未改变。",
+    BINARY_DIRECTIONS_UNAVAILABLE: "暂时无法生成两个有明显区别的可行方向，当前地图未改变。",
+    BINARY_PREFLIGHT_BUDGET: "方案预检已达时间预算，可重试或取消本次方案。",
+    BINARY_PLANNING_BUDGET: "方案规划已达时间预算，可重试或取消本次方案。",
+    BINARY_VALIDATION_FAILED: "方案候选未通过地图规则与可解性验证，当前地图未改变。",
+    BINARY_SEMANTIC_REJECTED: "方案候选未满足已选方向要求，当前地图未改变。",
+    CHALLENGE_STALE: "这项方案质疑已不再处于可操作状态，请刷新后查看当前对话。",
+    CHALLENGE_REVIEW_BUSY: "质疑理由仍在评审中，请稍候再试。",
+    UPSTREAM_RATE_LIMIT: "模型服务请求过于频繁，请稍后重试原消息，不会产生重复记录。",
+    UPSTREAM_ERROR: "模型服务暂时遇到错误，可使用原消息安全重试，不会产生重复记录。"
 });
 Object.assign(translations.en, {
     error_INVALID_RESPONSE: "The server response was incomplete or unreadable. Retry the original operation.",
@@ -635,7 +652,29 @@ Object.assign(translations.en, {
     error_REQUIREMENT_PERMISSION_CONFLICT: "Explicit requirements conflict with the allowed editing scope. Adjust the direction.",
     error_DETERMINISTIC_SEARCH_EXHAUSTED: "No verified proposal was found. The map was not changed.",
     error_CANDIDATE_DUPLICATED: "The candidates repeated the original proposal. No verified alternative was produced.",
-    error_CANDIDATE_UNSOLVABLE: "The candidates did not pass solvability validation. The map was not changed."
+    error_CANDIDATE_UNSOLVABLE: "The candidates did not pass solvability validation. The map was not changed.",
+    error_VERSION_CONFLICT: "The current Stage has changed. Refresh before continuing.",
+    error_UNCHANGED_LEVEL: "The map has not changed and cannot be saved as a new Stage.",
+    error_PENDING_PROPOSAL: "Accept or reject the pending map proposal before continuing.",
+    error_PROPOSAL_PENDING: "Accept or reject the pending map proposal before continuing.",
+    error_SESSION_LOCKED: "This co-creation session is locked and can no longer be edited.",
+    error_SESSION_ACCESS_DENIED: "This browser does not have access to this co-creation session.",
+    error_INVALID_BOOTSTRAP_TOKEN: "This session link is invalid. Re-open the lab from Unity.",
+    error_BOOTSTRAP_TOKEN_USED: "This session link has already been used. Continue in the original browser tab.",
+    error_SESSION_DEADLINE_EXPIRED: "The co-creation time limit has expired. Editing and chat are closed; submit the final version.",
+    error_PROPOSAL_CHOICE_REQUIRED: "Choose option A or B above, or cancel this proposal before sending a message.",
+    error_BINARY_BUSY: "This proposal is still being processed. Wait a moment and try again.",
+    error_PROPOSAL_TRANSLATION_STALE: "The proposal options were updated. Refresh and choose again.",
+    error_BINARY_PROMISE_NOT_REALIZED: "The candidate edit did not realize your selected direction. The current map was not changed.",
+    error_BINARY_DIRECTIONS_UNAVAILABLE: "Two distinct verified directions could not be prepared right now. The current map was not changed.",
+    error_BINARY_PREFLIGHT_BUDGET: "Proposal preflight reached its time limit before finishing. Retry safely or cancel this proposal.",
+    error_BINARY_PLANNING_BUDGET: "Proposal planning reached its time limit before finishing. Retry safely or cancel this proposal.",
+    error_BINARY_VALIDATION_FAILED: "The proposal candidate did not pass map validation and solvability checks. The map was not changed.",
+    error_BINARY_SEMANTIC_REJECTED: "The proposal candidate did not satisfy the selected requirements. The map was not changed.",
+    error_CHALLENGE_STALE: "This proposal challenge is no longer active. Refresh to view the current conversation.",
+    error_CHALLENGE_REVIEW_BUSY: "The challenge reason is still being reviewed. Wait a moment and try again.",
+    error_UPSTREAM_RATE_LIMIT: "The model service is temporarily rate-limited. Retry safely without creating a duplicate.",
+    error_UPSTREAM_ERROR: "The upstream model service encountered a temporary error. Retry safely without creating a duplicate."
 });
 
 export const LEVEL_VALIDATION_ERROR_CODES = new Set([
@@ -666,7 +705,10 @@ export const REQUEST_COPY = Object.fromEntries(["en", "zh-CN"].map(language => [
     Object.freeze(Object.fromEntries(["executeBoundProposal", "challengeRevision", "alternativeRevision", "proposalConsent"]
         .map(key => [key, translations[language][key]])))
 ]));
-export const ORIGINAL_ERROR_COPY = { en: { ...translations.en }, "zh-CN": { ...chineseApiErrors } };
+export const ORIGINAL_ERROR_COPY = {
+    en: { ...translations.en },
+    "zh-CN": { ...translations["zh-CN"], ...chineseApiErrors },
+};
 
 // Player-facing copy; never use these new labels as action request content.
 Object.assign(translations["en"], {
@@ -965,10 +1007,16 @@ export const UI_TILE_HELP = {
 Object.assign(translations.en, {
     editorHelpTitle: "Editing help", editorHelpBody: "Hover over a tool or tile to see what it means. Select a tool, then click a map tile to replace it. Save changes to create a new Stage.",
     progressHelpBody: "Revisit open questions and your confirmed ideas here. Open Processed to revisit earlier questions.",
+    draftGenerationFailed: "Unity could not generate a new draft from the selected parameters. Try again.",
+    draftLlmFailed: "The AI draft planner could not finish this request. Try generating another.",
+    binaryRevisionNeededPlaceholder: "Cancel this proposal to describe a different request."
 });
 Object.assign(translations["zh-CN"], {
     editorHelpTitle: "编辑说明", editorHelpBody: "悬停在工具或格子上查看说明。先选工具，再点击地图格子进行替换；改好后存档，才会成为新 Stage。",
     progressHelpBody: "这里收着还没聊完的问题，以及你确认过的点子。展开“已处理”可回看之前的问题。",
+    draftGenerationFailed: "Unity 未能根据当前参数生成新的 Draft，请再试一次。",
+    draftLlmFailed: "AI 初始草稿规划未能完成，请重试生成。",
+    binaryRevisionNeededPlaceholder: "当前方案无法继续，请先取消本次方案，再重新描述你的想法。"
 });
 export function createI18n(ctx) {
     const {
@@ -1072,7 +1120,8 @@ export function createI18n(ctx) {
         if (key === "saveStageButton" && !state.dirty) return t("noChangesHint");
         if (key === "discardDraftButton" && !state.dirty) return t("noChangesHint");
         if (key === "sendButton" && !elements.messageInput.value.trim()) return t("emptyMessageHint");
-        if (key === "proposalRequestButton" && (selectedStageHasActiveDisagreement() || proposalFlowActive())) return t("needsDiscussion");
+        if (key === "proposalRequestButton" && selectedStageHasActiveDisagreement()) return t("needsDiscussion");
+        if (key === "proposalRequestButton" && proposalFlowActive()) return t("proposalTopicActive");
         if (state.session?.status && state.session.status !== "active") return t("closedHint");
         if (["map", "palette"].includes(key) && state.selectedVersionId !== state.session?.currentVersionId) return t("historyHint");
         return helpLocale(["当前暂不可用。", "Currently unavailable."]);

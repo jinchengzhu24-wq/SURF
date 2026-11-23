@@ -374,11 +374,12 @@ def public_question(topic):
         "selectedChoiceId": selected, "status": "selected" if selected else "pending" if topic["status"] == "clarifying" else "expired"}
 
 
-def current_topic(database, session_id, version_id):
+def current_topic(database, session_id, version_id, clock=None):
     row = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='binary_discovery_state' "
         "AND json_extract(payload_json,'$.versionId')=? ORDER BY id DESC LIMIT 1", (session_id, version_id)).fetchone()
     topic = json.loads(row["payload_json"]) if row else None
-    if topic and topic["status"] == "planning" and topic.get("leaseUntil", 0) < time.time():
+    now_ts = clock.utc_datetime().timestamp() if clock is not None else time.time()
+    if topic and topic["status"] == "planning" and topic.get("leaseUntil", 0) < now_ts:
         topic["status"] = "retry_pending"
         topic["failureCode"] = "BINARY_REQUEST_INTERRUPTED"
     return topic

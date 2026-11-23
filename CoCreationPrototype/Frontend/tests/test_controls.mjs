@@ -1624,3 +1624,758 @@ test("manual_edit and clarification cards match the unified PREFIX · subtitle f
         "NEEDS CLARIFICATION · 这里再明确一下",
     );
 });
+
+function makeValidRows(fill = ".") {
+    return Array.from({ length: 10 }, (_, y) =>
+        Array.from({ length: 12 }, (_, x) => (y === 0 || y === 9 || x === 0 || x === 11 ? "#" : fill)).join(""),
+    );
+}
+
+function makeRichVersion(versionId = "v1", stageNumber = 1, rows = makeValidRows()) {
+    return {
+        versionId,
+        stageNumber,
+        parentVersionId: null,
+        source: "initial",
+        rows,
+        summary: "Stage",
+        diff: [],
+        validation: { solutionSteps: 3, solutionPushes: 1, searchedStates: 12 },
+        playAttempts: [],
+    };
+}
+
+test("P0-1: discardDraftButton stays enabled after deadline and finalizeSession surfaces level validation errors", async () => {
+    const baseRows = makeValidRows();
+    const { app, state, elements } = loadApp({
+        overrides: {
+            scheduleComponentRecovery: () => {},
+            ensureVisibleTranslations: async () => {},
+            api: async () => {
+                const err = new Error("Unsolvable");
+                err.code = "UNSOLVABLE_LEVEL";
+                err.retryable = false;
+                err.details = { searchedStates: 42 };
+                throw err;
+            },
+        },
+    });
+    state.session.versions = [makeRichVersion("v1", 1, baseRows)];
+    state.session.deadlineExpired = true;
+    state.dirty = true;
+    state.draftRows = makeValidRows("@");
+
+    app.updateControls();
+    assert.equal(elements.saveStageButton.disabled, true);
+    assert.equal(elements.discardDraftButton.disabled, false);
+    assert.equal(elements.finalizeButton.disabled, false);
+
+    await app.finalizeSession();
+    assert.equal(state.validationError?.code, "UNSOLVABLE_LEVEL");
+    assert.match(elements.validationCard.className, /\binvalid\b/);
+    assert.match(elements.validationCard.innerHTML, /42/);
+
+    app.discardDraft();
+    assert.equal(state.dirty, false);
+    assert.equal(state.validationError, null);
+    assert.equal(elements.discardDraftButton.disabled, true);
+    assert.equal(elements.finalizeButton.disabled, false);
+});
+
+test("P0-2: withBusyImpl handles PATCH /language retryable failures without half-initializing workspace", async () => {
+    const landingSession = {
+        ...createDefaultSession(),
+        demoMode: true,
+        languageLocked: false,
+        language: "zh-CN",
+        versions: [makeRichVersion("v1", 1)],
+        turns: [],
+        draftPreview: { rows: makeValidRows(), generation: 1, mutable: true },
+    };
+    const apiErrors = { patchShouldFail: true, getLocked: false };
+    let assessedVersion = "";
+    let replacedUrl = "";
+    const { app, state, elements, document } = loadApp({
+        history: { replaceState: (_s, _t, url) => { replacedUrl = url; } },
+        overrides: {
+            applyTranslations: () => {},
+            ensureVisibleTranslations: async () => {},
+            ensureAssessment: async versionId => { assessedVersion = versionId; },
+            api: async (path, options = {}) => {
+                if (options.method === "PATCH" && apiErrors.patchShouldFail) {
+                    const err = new Error("upstream down");
+                    err.code = "UPSTREAM_SERVER_ERROR";
+                    err.retryable = true;
+                    throw err;
+                }
+                return {
+                    ...landingSession,
+                    languageLocked: apiErrors.getLocked,
+                    language: apiErrors.getLocked ? "en" : "zh-CN",
+                };
+            },
+        },
+    });
+    elements.emptyChat.append(document.createElement("h3"), document.createElement("p"));
+    state.session = { ...landingSession };
+    state.selectedVersionId = "";
+    state.draftRows = [];
+    state.language = "en";
+    elements.workspace.hidden = true;
+    elements.landing.hidden = false;
+
+    await app.confirmSessionLanguage();
+    assert.equal(elements.workspace.hidden, true);
+    assert.equal(elements.landing.hidden, false);
+    assert.equal(state.language, "en");
+    assert.equal(elements.retryButton.hidden, false);
+
+    apiErrors.getLocked = true;
+    await app.confirmSessionLanguage();
+    assert.equal(elements.workspace.hidden, false);
+    assert.equal(state.selectedVersionId, "v1");
+    assert.equal(state.draftRows.length, 10);
+    assert.match(replacedUrl, /stage=v1/);
+    assert.equal(assessedVersion, "v1");
+});
+
+test("P0-3: finalizeSession and submitIntention reuse stable idempotency keys until success or payload change", async () => {
+    const sent = [];
+    let shouldFail = true;
+    let idSeq = 0;
+    const { app, state, elements } = loadApp({
+        overrides: {
+            uniqueId: prefix => `${prefix}-${++idSeq}`,
+            render: () => {},
+            renderMap: () => {},
+            ensureVisibleTranslations: async () => {},
+            api: async (path, options = {}) => {
+                if (options.method === "POST") {
+                    sent.push({ path, body: options.body });
+                }
+                if (shouldFail && options.method === "POST") {
+                    const err = new Error("timeout");
+                    err.code = "CLIENT_TIMEOUT";
+                    err.retryable = true;
+                    throw err;
+                }
+                return { ...state.session };
+            },
+        },
+    });
+    state.session.deadlineExpired = true;
+    state.dirty = true;
+    state.draftRows = ["###"];
+
+    await app.finalizeSession();
+    await app.finalizeSession();
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].body.idempotencyKey, sent[1].body.idempotencyKey);
+
+    state.draftRows = ["@@@"];
+    await app.finalizeSession();
+    assert.notEqual(sent[2].body.idempotencyKey, sent[0].body.idempotencyKey);
+
+    shouldFail = false;
+    await app.finalizeSession();
+    assert.equal(sent[3].body.idempotencyKey, sent[2].body.idempotencyKey);
+    assert.equal(state.pendingFinalize, null);
+
+    sent.length = 0;
+    shouldFail = true;
+    elements.intentionInput.value = "  Keep boxes apart  ";
+    await app.submitIntention({ preventDefault() {} });
+    await app.submitIntention({ preventDefault() {} });
+    assert.equal(sent[0].body.idempotencyKey, sent[1].body.idempotencyKey);
+
+    elements.intentionInput.value = "Keep boxes together";
+    await app.submitIntention({ preventDefault() {} });
+    assert.notEqual(sent[2].body.idempotencyKey, sent[0].body.idempotencyKey);
+
+    shouldFail = false;
+    await app.submitIntention({ preventDefault() {} });
+    assert.equal(sent[3].body.idempotencyKey, sent[2].body.idempotencyKey);
+    assert.equal(state.pendingIntention, null);
+});
+
+test("P1: binary action reconciles committed failure and scheduleBinaryRefresh polls safely without wiping draft", async () => {
+    const scheduled = [];
+    const cleared = [];
+    const windowListeners = new Map();
+    let mode = "committed_turn";
+    const { app, state, document, localStorage } = loadApp({
+        window: {
+            location: { pathname: "/cocreation/", origin: "http://localhost", href: "http://localhost/cocreation/", search: "", hash: "" },
+            history: { replaceState() {} },
+            addEventListener: (type, handler) => windowListeners.set(type, handler),
+            removeEventListener() {},
+        },
+        setTimeout: (cb, delay) => { scheduled.push({ cb, delay }); return scheduled.length; },
+        clearTimeout: id => cleared.push(id),
+        overrides: {
+            render: () => {},
+            startChatTimer: () => {},
+            stopChatTimer: () => {},
+            ensureVisibleTranslations: async () => {},
+            api: async (_path, options = {}) => {
+                if (options.method === "POST") {
+                    const err = new Error("timeout");
+                    err.code = "CLIENT_TIMEOUT";
+                    err.retryable = true;
+                    throw err;
+                }
+                if (mode === "committed_turn") {
+                    return {
+                        ...state.session,
+                        turns: [{ role: "assistant", versionId: "v1", requestId: "bin-1" }],
+                        proposalFlowState: { active: true, interactionMode: "binary_choice", status: "clarifying" },
+                    };
+                }
+                if (mode === "cancelled") {
+                    return {
+                        ...state.session,
+                        proposalFlowState: { active: false, interactionMode: "binary_choice", status: "cancelled" },
+                    };
+                }
+                if (mode === "recovered_failure") {
+                    return {
+                        ...state.session,
+                        proposalFlowState: { active: true, interactionMode: "binary_choice", status: "clarifying" },
+                        lastMessageFailure: {
+                            messageKey: "bin-2",
+                            baseVersionId: "v1",
+                            code: "PROPOSAL_TRANSLATION_STALE",
+                            retryable: false,
+                            committed: false,
+                        },
+                    };
+                }
+                return {
+                    ...state.session,
+                    proposalFlowState: { active: false, interactionMode: "binary_choice", status: "proposal_ready" },
+                };
+            },
+        },
+    });
+    app.initDom();
+    state.session.turns = [];
+    state.session.proposalFlowState = { active: true, interactionMode: "binary_choice", status: "clarifying" };
+
+    await app.submitBinaryAction({ kind: "choice", baseVersionId: "v1", topicId: "t1", questionId: "q1", choiceId: "c1", idempotencyKey: "bin-1" });
+    assert.equal(state.pendingBinary, null);
+    assert.equal(localStorage.getItem(app.binaryStorageKey()), null);
+    assert.equal(state.chatStatus, "idle");
+    assert.equal(state.chatError, null);
+
+    mode = "cancelled";
+    await app.submitBinaryAction({ kind: "cancel", baseVersionId: "v1", topicId: "t1", idempotencyKey: "bin-cancel" });
+    assert.equal(state.pendingBinary, null);
+    assert.equal(state.chatStatus, "idle");
+
+    mode = "recovered_failure";
+    state.session.proposalFlowState = { active: true, interactionMode: "binary_choice", status: "clarifying" };
+    await app.submitBinaryAction({ kind: "choice", baseVersionId: "v1", topicId: "t1", questionId: "q1", choiceId: "c1", idempotencyKey: "bin-2" });
+    assert.equal(state.chatError?.code, "PROPOSAL_TRANSLATION_STALE");
+    assert.equal(state.pendingBinary, null);
+
+    // scheduleBinaryRefresh guards & lightweight polling preserve draftRows and activeCoordinateLink
+    state.session.proposalFlowState = { active: true, interactionMode: "binary_choice", status: "planning" };
+    state.dirty = true;
+    state.draftRows = ["unsaved-map"];
+    state.activeCoordinateLink = { versionId: "v1", turnId: "t1", linkIndex: 0 };
+    state.pendingBinary = { kind: "choice", baseVersionId: "v1", idempotencyKey: "bin-poll" };
+    state.chatStatus = "error";
+    state.chatError = { code: "CLIENT_TIMEOUT", retryable: true };
+
+    document.hidden = true;
+    app.scheduleBinaryRefresh();
+    assert.equal(scheduled.length, 0);
+
+    document.hidden = false;
+    app.scheduleBinaryRefresh();
+    assert.equal(scheduled.length, 1);
+
+    document.hidden = true;
+    app.scheduleBinaryRefresh();
+    assert.deepEqual(cleared, [1]);
+
+    document.hidden = false;
+    app.scheduleBinaryRefresh();
+    assert.equal(scheduled.length, 2);
+
+    mode = "proposal_ready";
+    await scheduled[1].cb();
+    assert.equal(state.draftRows[0], "unsaved-map");
+    assert.equal(state.dirty, true);
+    assert.equal(state.activeCoordinateLink.turnId, "t1");
+    assert.equal(state.pendingBinary, null);
+    assert.equal(state.chatStatus, "idle");
+    assert.equal(state.chatError, null);
+
+    state.session.proposalFlowState = { active: true, interactionMode: "binary_choice", status: "planning" };
+    app.scheduleBinaryRefresh();
+    const timerBeforePagehide = state.binaryRefreshTimer;
+    windowListeners.get("pagehide")();
+    assert.ok(timerBeforePagehide !== null && state.binaryRefreshTimer === null);
+});
+
+test("P1: binary/cancel/revision guards and selectedReplyFailure enforce editable & dirty constraints", async () => {
+    const apiCalls = [];
+    const { app, state, elements, document } = loadApp({
+        overrides: {
+            api: async path => { apiCalls.push(path); return state.session; },
+        },
+    });
+    state.session.turns = [];
+    state.session.proposalFlowState = {
+        active: true,
+        interactionMode: "binary_choice",
+        status: "retry_pending",
+        retryable: true,
+        retryAction: { kind: "choice", baseVersionId: "v1", questionId: "q1", choiceId: "c1", idempotencyKey: "k1" },
+    };
+    const revBtn = document.createElement("button");
+    revBtn.className = "revision-action-button";
+    revBtn.dataset.actionable = "true";
+
+    app.updateControls();
+    assert.equal(revBtn.disabled, true);
+    const cancelBtn = document.getElementById("cancelProposalButton");
+    assert.equal(cancelBtn.hidden, false);
+
+    state.dirty = true;
+    app.updateControls();
+    assert.equal(elements.chatRetryButton.disabled, true);
+    await app.retryBinaryProposal();
+    assert.equal(apiCalls.length, 0);
+
+    state.dirty = false;
+    state.session.deadlineExpired = true;
+    state.replyFeedback = { message: "stale feedback", versionId: "v1" };
+    app.updateControls();
+    assert.equal(cancelBtn.disabled, true);
+    assert.equal(app.selectedReplyFailure(), null);
+    await app.retryBinaryProposal();
+    assert.equal(apiCalls.length, 0);
+
+    state.session.deadlineExpired = false;
+    state.session.status = "awaiting_intention";
+    app.updateControls();
+    assert.equal(cancelBtn.disabled, true);
+    assert.equal(app.selectedReplyFailure(), null);
+});
+
+test("P1: card/challenge retries preserve composer draft, set requestProposal=false, and clear non-retryable errors", async () => {
+    let apiBehavior = "succeed";
+    const { app, state, elements, localStorage } = loadApp({
+        keepSubmit: true,
+        keepPersistPending: true,
+        overrides: {
+            render: () => {},
+            startChatTimer: () => {},
+            stopChatTimer: () => {},
+            hideNotice: () => {},
+            renderChatRequestStatus: () => {},
+            updateControls: () => {},
+            updateCharacterCount: () => {},
+            isLatestRevisionOfferTurn: () => true,
+            api: async () => {
+                if (apiBehavior === "retryable_commit") {
+                    const err = new Error("dropped");
+                    err.code = "CLIENT_TIMEOUT";
+                    err.retryable = true;
+                    throw err;
+                }
+                if (apiBehavior === "non_retryable") {
+                    const err = new Error("blocked");
+                    err.code = "DISAGREEMENT_ACTIVE";
+                    err.retryable = false;
+                    throw err;
+                }
+                return { ...state.session };
+            },
+        },
+    });
+    state.session.turns = [];
+    elements.messageInput.value = "My unsent composer note";
+    localStorage.setItem(app.composerKey(), "My unsent composer note");
+    state.proposalMode = true;
+
+    app.sendRevisionCardAction("execute_revision", { turnId: "t-offer" }, {});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(state.pendingMessage, null); // cleared on success
+    assert.equal(elements.messageInput.value, "My unsent composer note");
+    assert.equal(localStorage.getItem(app.composerKey()), "My unsent composer note");
+    assert.equal(state.proposalMode, true);
+
+    // Reload recovery must not discard failed card-action retry when composer draft differs, nor overwrite composer
+    const failedCard = {
+        content: "Execute the bound proposal.",
+        baseVersionId: "v1",
+        idempotencyKey: "card-1",
+        requestProposal: false,
+        action: "execute_revision",
+        sourceTurnId: "t-offer",
+    };
+    localStorage.setItem(app.pendingMessageKey(), JSON.stringify(failedCard));
+    app.recoverPendingMessage();
+    assert.equal(state.pendingMessage?.idempotencyKey, "card-1");
+    assert.equal(elements.messageInput.value, "My unsent composer note");
+    assert.equal(state.proposalMode, true);
+
+    await app.retryPendingMessage();
+    assert.equal(elements.messageInput.value, "My unsent composer note");
+
+    // sendMessage compares Boolean(requestProposal) !== proposalMode and ignores card pendingMessage
+    state.pendingMessage = { ...failedCard, content: "My unsent composer note" };
+    state.proposalMode = false;
+    await app.sendMessage({ preventDefault() {} });
+    assert.equal(state.pendingMessage, null);
+
+    // Non-retryable error on normal composer message clears pendingMessage but keeps composer text
+    apiBehavior = "non_retryable";
+    elements.messageInput.value = "Keep my draft";
+    await app.sendMessage({ preventDefault() {} });
+    assert.equal(state.pendingMessage, null);
+    assert.equal(elements.messageInput.value, "Keep my draft");
+});
+
+test("P1: draft regeneration guards concurrency, recovers on RETRYABLE_REQUEST_FAILED/INVALID_RESPONSE, and preserves non-retryable 4xx", async () => {
+    let calls = 0;
+    let mode = "retryable_then_pending";
+    const { app, state } = loadApp({
+        overrides: {
+            renderDraftPreview: () => {},
+            updateControls: () => {},
+            api: async (_path, options = {}) => {
+                calls += 1;
+                if (options.method === "POST" && mode === "retryable_then_pending") {
+                    const err = new Error("bad gateway");
+                    err.code = "RETRYABLE_REQUEST_FAILED";
+                    err.retryable = true;
+                    throw err;
+                }
+                if (mode === "retryable_then_pending") {
+                    return {
+                        ...state.session,
+                        draftPreview: { rows: makeValidRows(), mutable: true, regenerationStatus: "pending", regenerationRequestId: "reg-1" },
+                    };
+                }
+                if (options.method === "POST" && mode === "4xx") {
+                    const err = new Error("locked");
+                    err.code = "SESSION_LOCKED";
+                    err.retryable = false;
+                    throw err;
+                }
+                return state.session;
+            },
+        },
+    });
+    state.session.demoMode = true;
+    state.session.languageLocked = false;
+    state.session.draftPreview = { rows: makeValidRows(), mutable: true };
+
+    const recovered = await app.createOrRecoverDraftRegeneration("reg-1");
+    assert.equal(recovered.draftPreview.regenerationStatus, "pending");
+    assert.equal(calls, 2);
+
+    // Also enters recovery on INVALID_RESPONSE and retries once cleanly
+    let invalidCalls = 0;
+    const invApp = loadApp({
+        overrides: {
+            api: async (_path, options = {}) => {
+                invalidCalls += 1;
+                if (options.method === "POST" && invalidCalls === 1) {
+                    const err = new Error("bad json");
+                    err.code = "INVALID_RESPONSE";
+                    err.retryable = true;
+                    throw err;
+                }
+                return {
+                    ...invApp.state.session,
+                    draftPreview: { rows: makeValidRows(), mutable: true, regenerationStatus: "pending", regenerationRequestId: "reg-inv" },
+                };
+            },
+        },
+    });
+    const invRecovered = await invApp.app.createOrRecoverDraftRegeneration("reg-inv");
+    assert.equal(invRecovered.draftPreview.regenerationRequestId, "reg-inv");
+    assert.equal(invalidCalls, 2);
+
+    mode = "4xx";
+    await assert.rejects(
+        () => app.createOrRecoverDraftRegeneration("reg-2"),
+        err => err.code === "SESSION_LOCKED" && err.retryable === false,
+    );
+
+    state.draftRegenerationPending = true;
+    const prevCalls = calls;
+    await app.regenerateDraft();
+    assert.equal(calls, prevCalls);
+});
+
+test("P2: error codes, challenge choice language, play composer guard, selectVersion early-return, deadline timer, stage cards, component recovery, question feedback, and bridge fixes", async () => {
+    const clearedIntervals = [];
+    const { app, state, elements, document, localStorage } = loadApp({
+        clearInterval: id => clearedIntervals.push(id),
+        overrides: {
+            render: () => {},
+            ensureVisibleTranslations: async () => {},
+            api: async (path, options = {}) => {
+                if (path.includes("/questions/") && options.method === "POST") {
+                    return { outcome: "ignored", session: state.session };
+                }
+                return state.session;
+            },
+        },
+    });
+
+    // 1. Error mappings & zh-CN CLIENT_TIMEOUT & draftRegenerationFailureMessage
+    const requiredCodes = [
+        "VERSION_CONFLICT", "UNCHANGED_LEVEL", "PENDING_PROPOSAL", "PROPOSAL_PENDING",
+        "SESSION_LOCKED", "SESSION_ACCESS_DENIED", "INVALID_BOOTSTRAP_TOKEN", "BOOTSTRAP_TOKEN_USED",
+        "SESSION_DEADLINE_EXPIRED", "PROPOSAL_CHOICE_REQUIRED", "BINARY_BUSY",
+        "PROPOSAL_TRANSLATION_STALE", "BINARY_PROMISE_NOT_REALIZED", "BINARY_DIRECTIONS_UNAVAILABLE",
+        "BINARY_PREFLIGHT_BUDGET", "BINARY_PLANNING_BUDGET", "BINARY_VALIDATION_FAILED",
+        "CHALLENGE_STALE", "CHALLENGE_REVIEW_BUSY", "UPSTREAM_RATE_LIMIT", "UPSTREAM_ERROR",
+    ];
+    for (const lang of ["zh-CN", "en"]) {
+        state.language = lang;
+        for (const code of requiredCodes) {
+            assert.notEqual(app.localizedErrorMessage({ code }), app.t("errorGeneric"), `${lang} missing ${code}`);
+            assert.notEqual(app.technicalErrorMessage({ code }), app.t("errorGeneric"), `${lang} tech missing ${code}`);
+        }
+        assert.notEqual(app.t("error_CLIENT_TIMEOUT"), "");
+        assert.match(app.draftRegenerationFailureMessage("generation_failed"), /draft|生成/i);
+        assert.match(app.draftRegenerationFailureMessage("llm_failed"), /AI|planner/i);
+    }
+    state.language = "zh-CN";
+    assert.doesNotMatch(app.t("error_CLIENT_TIMEOUT"), /browser safety limit/);
+
+    // 2. sendChallengeChoice uses Yes/No in English and 是/否 in zh-CN
+    state.language = "en";
+    app.sendChallengeChoice("challenge-1", "ai");
+    assert.equal(state.pendingMessage.content, "Yes");
+    assert.equal(state.pendingMessage.requestProposal, false);
+    state.pendingMessage = null;
+    state.language = "zh-CN";
+    app.sendChallengeChoice("challenge-1", "user");
+    assert.equal(state.pendingMessage.content, "否");
+    state.pendingMessage = null;
+
+    // 3. playSelectedStage on historical stage does not overwrite current composer draft
+    state.session.demoMode = true;
+    state.session.versions = [makeRichVersion("v0", 1), makeRichVersion("v1", 2)];
+    state.session.currentVersionId = "v1";
+    state.selectedVersionId = "v0";
+    localStorage.setItem(app.composerKey(), "Keep current draft");
+    elements.messageInput.value = "";
+    await app.playSelectedStage();
+    assert.equal(localStorage.getItem(app.composerKey()), "Keep current draft");
+
+    // 4. selectVersion early-returns on same versionId without forceReset
+    state.selectedVersionId = "v1";
+    state.proposalMode = true;
+    state.dirty = true;
+    state.draftRows = ["custom"];
+    app.selectVersion("v1");
+    assert.equal(state.proposalMode, true);
+    assert.equal(state.draftRows[0], "custom");
+    app.selectVersion("v1", false, { forceReset: true });
+    assert.equal(state.proposalMode, false);
+    assert.equal(state.dirty, false);
+
+    // 5. deadline update clears interval and updateControls syncs .stage-card disabled state
+    let intervalTick = null;
+    let perfNowMs = 2000;
+    const timerApp = loadApp({
+        performance: { now: () => perfNowMs },
+        setInterval: cb => { intervalTick = cb; return 77; },
+        clearInterval: id => clearedIntervals.push(id),
+    });
+    const stageCard = timerApp.document.createElement("button");
+    stageCard.className = "stage-card";
+    timerApp.state.session.deadlineAt = "2026-11-23T16:00:00Z";
+    timerApp.state.session.remainingSeconds = 1;
+    timerApp.app.renderDeadline();
+    assert.equal(stageCard.disabled, false);
+    perfNowMs += 1000;
+    intervalTick();
+    assert.equal(clearedIntervals.includes(77), true);
+    assert.equal(timerApp.state.deadlineTimerId, null);
+    assert.equal(stageCard.disabled, true);
+
+    // 6. component recovery: unityPlayActive, merge rejection during busy, unclaimed fallback GET
+    state.selectedVersionId = "v1";
+    state.unityPlayActive = true;
+    assert.equal(app.recoveryPageEligible(), false);
+    state.unityPlayActive = false;
+    state.busy = true;
+    assert.equal(app.mergeRecoverySession(state.session, { sessionId: "session", selectedVersionId: "v1", versionId: "v1" }), false);
+    state.busy = false;
+
+    const busyDeferred = loadApp({
+        overrides: {
+            render: () => {},
+            scheduleComponentRecovery: () => {},
+            api: async () => {
+                busyDeferred.state.chatBusy = true;
+                return {
+                    ...busyDeferred.state.session,
+                    interactionState: { versionId: "v1", revision: 2, recoveries: [] },
+                };
+            },
+        },
+    });
+    busyDeferred.state.session.interactionState = { versionId: "v1", revision: 1, recoveries: [] };
+    await busyDeferred.app.recoverComponent({ recoveryId: "r-busy", baseVersionId: "v1", status: "pending", nextAttemptKey: "r-busy-1" });
+    assert.equal(busyDeferred.app.componentRecovery.dispatched.has("r-busy-1"), false);
+    assert.equal(busyDeferred.state.session.interactionState.revision, 1);
+
+    const recoveryHarness = loadApp({
+        overrides: {
+            render: () => {},
+            scheduleComponentRecovery: () => {},
+            api: async (_path, options = {}) => {
+                if (options.method === "POST") throw new Error("network dropped");
+                return {
+                    ...state.session,
+                    interactionState: {
+                        versionId: "v1",
+                        revision: 1,
+                        recoveries: [{ recoveryId: "r-unclaimed", baseVersionId: "v1", status: "pending", nextAttemptKey: "r-unclaimed-1" }],
+                    },
+                };
+            },
+        },
+    });
+    recoveryHarness.state.session.interactionState = { versionId: "v1", revision: 1, recoveries: [] };
+    await recoveryHarness.app.recoverComponent({ recoveryId: "r-unclaimed", baseVersionId: "v1", status: "pending", nextAttemptKey: "r-unclaimed-1" });
+    assert.equal(recoveryHarness.app.componentRecovery.dispatched.has("r-unclaimed-1"), false);
+
+    // 7. submitQuestionFeedback captures baseVersionId + requestKey, serializes via withBusy, preserves proposalMode
+    const qCalls = [];
+    let qAttempt = 0;
+    const qApp = loadApp({
+        overrides: {
+            render: () => {},
+            ensureVisibleTranslations: async () => {},
+            api: async (_path, options = {}) => {
+                if (options.method === "POST") {
+                    qCalls.push(options.body);
+                    qAttempt += 1;
+                    if (qAttempt === 1) {
+                        const err = new Error("retry");
+                        err.retryable = true;
+                        throw err;
+                    }
+                    return { outcome: "ignored", session: qApp.state.session };
+                }
+                return qApp.state.session;
+            },
+        },
+    });
+    qApp.state.session.turns = [];
+    qApp.state.proposalMode = true;
+    const record = qApp.document.createElement("article");
+    // Same-stage question feedback preserves state.proposalMode
+    qAttempt = 1;
+    await qApp.app.submitQuestionFeedback("ignore", { questionId: "q-same" }, record);
+    assert.equal(qApp.state.proposalMode, true);
+    // Retryable failure preserves baseVersionId + idempotencyKey even if currentVersionId later changes
+    qAttempt = 0;
+    qCalls.length = 0;
+    await qApp.app.submitQuestionFeedback("ignore", { questionId: "q1" }, record);
+    qApp.state.session.currentVersionId = "v2";
+    await qApp.state.replyFeedback.retryAction();
+    assert.equal(qCalls.length, 2);
+    assert.equal(qCalls[0].baseVersionId, "v1");
+    assert.equal(qCalls[1].baseVersionId, "v1");
+    assert.equal(qCalls[0].idempotencyKey, qCalls[1].idempotencyKey);
+
+    // 8. regenerateDraftButton disabled when sessionId && !session; uiHelpBlockedStatus; revision_needed binary placeholder
+    const landingBroken = loadApp();
+    landingBroken.state.sessionId = "existing-session";
+    landingBroken.state.session = null;
+    landingBroken.app.updateControls();
+    assert.equal(landingBroken.elements.regenerateDraftButton.disabled, true);
+
+    state.session.proposalFlowState = { active: true, interactionMode: "binary_choice", status: "revision_needed" };
+    state.session.turns = [];
+    app.updateControls();
+    assert.equal(elements.messageInput.placeholder, app.t("binaryRevisionNeededPlaceholder"));
+    const propBtn = document.createElement("button");
+    propBtn.id = "proposalRequestButton";
+    propBtn.disabled = true;
+    assert.equal(app.uiHelpBlockedStatus(propBtn, "proposalRequestButton"), app.t("proposalTopicActive"));
+
+    // 9. play-return protocolVersion validation and control restoration on refresh error
+    let parentMsg;
+    const bridgeWin = {
+        location: { pathname: "/cocreation/", origin: "http://localhost", href: "http://localhost/cocreation/", search: "", hash: "" },
+        history: { replaceState() {} },
+        parent: { postMessage: m => { parentMsg = m; } },
+        addEventListener() {},
+        removeEventListener() {},
+    };
+    let shouldFailRefresh = true;
+    let recoveredCount = 0;
+    const bridgeApp = loadApp({
+        window: bridgeWin,
+        overrides: {
+            renderMap: () => {},
+            render: () => {},
+            restoreComposerDraft: () => {},
+            recoverPendingMessage: () => { recoveredCount += 1; },
+            ensureVisibleTranslations: async () => {},
+            ensureAssessment: async () => {},
+            api: async () => {
+                if (shouldFailRefresh) {
+                    const err = new Error("refresh failed");
+                    err.retryable = true;
+                    throw err;
+                }
+                return bridgeApp.state.session;
+            },
+        },
+    });
+    bridgeApp.state.session.demoMode = false;
+    bridgeApp.elements.formalStandaloneBlock.hidden = false;
+    shouldFailRefresh = false;
+    bridgeApp.app.handleUnityHostInit({ source: bridgeWin.parent, origin: "http://localhost" }, {
+        protocolVersion: 5,
+        sessionId: "session",
+    });
+    assert.equal(parentMsg.type, "sokoban:cocreation-lab-ready");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(recoveredCount, 1);
+
+    bridgeApp.state.unityPlayActive = true;
+    bridgeApp.app.updateControls();
+    assert.equal(bridgeApp.elements.playButton.disabled, true);
+    // Mismatched protocolVersion is ignored
+    await bridgeApp.app.handleUnityBridgeMessage({
+        source: bridgeWin.parent,
+        origin: "http://localhost",
+        data: { type: "sokoban:cocreation-play-return", protocolVersion: 4, sessionId: "session" },
+    });
+    assert.equal(bridgeApp.state.unityPlayActive, true);
+    // Valid protocolVersion with succeeding refresh calls recoverPendingMessage
+    await bridgeApp.app.handleUnityBridgeMessage({
+        source: bridgeWin.parent,
+        origin: "http://localhost",
+        data: { type: "sokoban:cocreation-play-return", protocolVersion: 5, sessionId: "session" },
+    });
+    assert.equal(recoveredCount, 2);
+    // Valid protocolVersion with failing refresh still restores controls
+    bridgeApp.state.unityPlayActive = true;
+    bridgeApp.app.updateControls();
+    shouldFailRefresh = true;
+    await bridgeApp.app.handleUnityBridgeMessage({
+        source: bridgeWin.parent,
+        origin: "http://localhost",
+        data: { type: "sokoban:cocreation-play-return", protocolVersion: 5, sessionId: "session" },
+    });
+    assert.equal(bridgeApp.state.unityPlayActive, false);
+    assert.equal(bridgeApp.elements.playButton.disabled, false);
+});

@@ -109,7 +109,7 @@ def validate_requirement_record(payload, user_turns, snapshot):
     requirements, seen = [], set()
     fields = set(requirement_response_schema()["properties"]["requirements"]["items"]["required"])
     for raw in raw_requirements:
-        if not isinstance(raw, dict) or not fields.issubset(raw) or set(raw) - fields - {"scope"}:
+        if not isinstance(raw, dict) or not fields.issubset(raw) or set(raw) - fields - {"scope", "sourceTurnIds"}:
             raise ValueError("Invalid typed requirement.")
         item = dict(raw)
         scope = item.get("scope", "all")
@@ -121,6 +121,20 @@ def validate_requirement_record(payload, user_turns, snapshot):
         span = item["evidenceSpan"]
         if source is None or not isinstance(span, str) or not span.strip() or span not in source:
             raise ValueError("Requirement lacks exact designer evidence.")
+        if "sourceTurnIds" in item:
+            raw_turn_ids = item["sourceTurnIds"]
+            if (
+                not isinstance(raw_turn_ids, list)
+                or not raw_turn_ids
+                or any(not isinstance(tid, str) or tid not in sources for tid in raw_turn_ids)
+                or item["sourceTurnId"] not in raw_turn_ids
+            ):
+                raise ValueError("Requirement sourceTurnIds must reference existing designer turns.")
+            deduped_ids = list(dict.fromkeys(raw_turn_ids))
+            if len(deduped_ids) > 1:
+                item["sourceTurnIds"] = deduped_ids
+            else:
+                item.pop("sourceTurnIds", None)
         if item["component"] not in COMPONENTS or item["property"] not in PROPERTIES or item["relation"] not in RELATIONS:
             raise ValueError("Unsupported requirement attribute.")
         if item["strength"] not in {"invariant", "goal", "preference"}:
@@ -176,8 +190,9 @@ def validate_requirement_record(payload, user_turns, snapshot):
                     existing_id += "|scope=" + existing_scope
                 if existing_id == identity:
                     turn_ids = existing.setdefault("sourceTurnIds", [existing["sourceTurnId"]])
-                    if source_id not in turn_ids:
-                        turn_ids.append(source_id)
+                    for sid in item.get("sourceTurnIds") or [source_id]:
+                        if sid not in turn_ids:
+                            turn_ids.append(sid)
                     if item.get("priorityEvidenceSpan") and not existing.get("priorityEvidenceSpan"):
                         existing["priorityEvidenceSpan"] = item["priorityEvidenceSpan"]
                     existing["focused"] = bool(existing.get("focused") or item.get("focused"))
@@ -234,9 +249,14 @@ def validate_requirement_components(payload, user_turns, snapshot):
 def requirement_model_view(record):
     """Remove server fields without losing optional scope on replay/review."""
     fields = requirement_response_schema()["properties"]["requirements"]["items"]["properties"]
+    projected_requirements = []
+    for item in (record or {}).get("requirements") or []:
+        projected = {key: item[key] for key in fields if key in item}
+        if isinstance(item.get("sourceTurnIds"), list) and len(item["sourceTurnIds"]) > 1:
+            projected["sourceTurnIds"] = list(item["sourceTurnIds"])
+        projected_requirements.append(projected)
     return {
-        "requirements": [{key: item[key] for key in fields if key in item}
-                         for item in (record or {}).get("requirements") or []],
+        "requirements": projected_requirements,
         "automaticBindings": [{"entity": item["entity"], "reason": item["reason"]}
                               for item in (record or {}).get("automaticBindings") or []],
         "exactTransitions": (record or {}).get("exactTransitions") or [],
@@ -298,14 +318,38 @@ def evaluate_requirements(base_rows, candidate_rows, record, before_features=Non
             elif isinstance(value_before, (int, float)) and isinstance(value_after, (int, float)):
                 sign = -1 if relation in {"decrease", "nearer", "early"} else 1
                 delta = sign * (value_after - value_before)
-                passed = delta >= 0
                 target = item["value"]
                 if item["unit"] == "absolute" and target is not None:
                     satisfied = value_after >= target if sign == 1 else value_after <= target
+                    if prop == "change_scope":
+                        passed = satisfied if sign == -1 else delta >= 0
+                        status = "fulfilled" if satisfied else "partial" if sign == 1 and value_after > 0 else "deferred"
+                        reason = (
+                            "verified"
+                            if satisfied
+                            else "below_requested_amount"
+                            if sign == 1 and value_after > 0
+                            else "opposite_direction"
+                        )
+                    else:
+                        distance_before = max(0, target - value_before) if sign == 1 else max(0, value_before - target)
+                        distance_after = max(0, target - value_after) if sign == 1 else max(0, value_after - target)
+                        passed = satisfied or distance_after <= distance_before
+                        status = "fulfilled" if satisfied else "partial" if distance_after < distance_before else "deferred"
+                        reason = (
+                            "verified"
+                            if satisfied
+                            else "opposite_direction"
+                            if not passed
+                            else "unchanged"
+                            if value_after == value_before
+                            else "below_requested_amount"
+                        )
                 else:
+                    passed = delta >= 0
                     satisfied = delta >= (target if target is not None else 1)
-                status = "fulfilled" if passed and satisfied else "partial" if delta > 0 else "deferred"
-                reason = "opposite_direction" if not passed else "verified" if satisfied else "unchanged" if delta == 0 else "below_requested_amount"
+                    status = "fulfilled" if passed and satisfied else "partial" if delta > 0 else "deferred"
+                    reason = "opposite_direction" if not passed else "verified" if satisfied else "unchanged" if delta == 0 else "below_requested_amount"
         elif prop in METRICS | {"distance", "timing"} or item["strength"] == "invariant":
             passed, reason = False, "required_fact_unavailable"
         if prop == "timing" and entities and "interruptions" in after_features:
@@ -352,10 +396,17 @@ def preflight_requirements(rows, record):
             change = item["relation"] not in {"preserve", "equal"} or (item["property"] == "count" and item["value"] is not None and item["value"] != before)
             if change:
                 issues.append({"requirementId": item["requirementId"], "reason": "protected_entity_change"})
+    from cocreation.domain.proposal_search import _connected_outer_shell
+
+    shell = _connected_outer_shell(rows)
     for item in (record or {}).get("exactTransitions") or []:
         point = item["row"], item["column"]
         r, c = point[0] - 1, point[1] - 1
-        if not (0 < r < len(rows) - 1 and 0 < c < len(rows[r]) - 1) or rows[r][c] != item["from"]:
+        if (
+            not (0 < r < len(rows) - 1 and 0 < c < len(rows[r]) - 1)
+            or (c, r) in shell
+            or rows[r][c] != item["from"]
+        ):
             issues.append({"reason": "exact_transition_conflicts_with_snapshot", "point": point})
         if point in transitions and transitions[point] != item["to"]:
             issues.append({"reason": "conflicting_exact_transitions", "point": point})

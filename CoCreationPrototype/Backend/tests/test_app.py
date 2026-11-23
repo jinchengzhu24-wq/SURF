@@ -257,6 +257,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.online_sync = FakeOnlineSyncGateway()
         self.services = create_test_services(
             self.temp_dir.name,
+            settings_overrides={"legacy_chat_enabled": True},
             llm=self.llm,
             online_sync=self.online_sync,
             clock=self.clock,
@@ -1580,6 +1581,24 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.headers["X-LLM-Attempts-Used"], "2")
+
+    def test_chat_endpoint_is_disabled_by_default(self):
+        default_services = create_test_services(
+            self.temp_dir.name + "-default-chat",
+            llm=self.llm,
+            online_sync=self.online_sync,
+            clock=self.clock,
+        )
+        default_client = create_test_client(default_services)
+        self.addCleanup(default_client.close)
+
+        response = default_client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "Hello."}]},
+        )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["code"], "LEGACY_CHAT_DISABLED")
 
     def test_system_prompt_is_grounded_and_neutral(self):
         prompt_messages = build_chat_messages(

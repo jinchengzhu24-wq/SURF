@@ -5,7 +5,11 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING
 
-from cocreation.domain.design_context import clone_design_context, empty_design_context
+from cocreation.domain.design_context import (
+    clone_design_context,
+    empty_design_context,
+    set_active_disagreement,
+)
 from cocreation.domain.level_validation import (
     build_entity_bindings,
     describe_diff,
@@ -59,10 +63,19 @@ def _create_session_record(
     generation_seed=None,
     generation_attempts=None,
     generation_summary=None,
+    validation=None,
     *,
     services: CoCreationServices,
 ):
-    validation = _solve_or_api_error(rows, services=services)
+    normalized_match_id = clean_optional(match_id, 128) or None
+    valid_player_number = (
+        not isinstance(player_number, bool)
+        and player_number in (1, 2)
+    )
+    if normalized_match_id is not None and not valid_player_number:
+        raise ApiError(400, 'INVALID_MATCH_PLAYER', 'matchId requires playerNumber 1 or 2.')
+    normalized_player_number = player_number if valid_player_number else None
+    resolved_validation = validation if validation is not None else _solve_or_api_error(rows, services=services)
     created_at = services.utc_now()
     with services.connect(immediate=True) as database:
         existing = database.execute(
@@ -90,17 +103,21 @@ def _create_session_record(
                     hash_token(integration_token),
                     hash_token(bootstrap_token),
                     1 if demo_mode else 0,
-                    clean_optional(match_id, 128),
-                    player_number if player_number in (1, 2) else None,
+                    normalized_match_id,
+                    normalized_player_number,
                     initial_draft_method,
                     language,
                     created_at,
                     created_at,
-                    dump_json(list(validation.rows)),
-                    dump_json(validation.as_dict()),
+                    dump_json(list(resolved_validation.rows)),
+                    dump_json(resolved_validation.as_dict()),
                 ),
             )
-            event_payload = {'initialDraftMethod': initial_draft_method, 'demoMode': bool(demo_mode)}
+            event_payload = {
+                'initialDraftMethod': initial_draft_method,
+                'demoMode': bool(demo_mode),
+                'initialRowsHash': map_fingerprint(resolved_validation.rows),
+            }
             if generation_seed is not None:
                 event_payload['generationSeed'] = generation_seed
             if generation_attempts is not None:
@@ -116,7 +133,26 @@ def _create_session_record(
                 '\n                SELECT * FROM level_versions\n                WHERE session_id = ? AND stage_number = 1\n                ',
                 (session_id,),
             ).fetchone()
+            created_event = database.execute(
+                "SELECT payload_json FROM audit_events WHERE session_id = ? AND event_type = 'session_created' ORDER BY id LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            created_payload = (load_json(created_event['payload_json']) or {}) if created_event is not None else {}
+            initial_rows_hash = created_payload.get('initialRowsHash')
             candidate_rows = load_json(existing['draft_rows_json']) if existing['draft_rows_json'] else None
+            same_initial_rows = (
+                map_fingerprint(resolved_validation.rows) == initial_rows_hash
+                if initial_rows_hash
+                else (
+                    candidate_rows == list(resolved_validation.rows)
+                    or (existing_version is not None and load_json(existing_version['rows_json']) == list(resolved_validation.rows))
+                )
+            )
+            existing_match_id = clean_optional(existing['match_id'], 128) or None
+            same_match = (
+                existing_match_id == normalized_match_id
+                and existing['player_number'] == normalized_player_number
+            )
             same_demo_request = (
                 demo_mode
                 and bool(existing['demo_mode'])
@@ -126,10 +162,8 @@ def _create_session_record(
                 not demo_mode
                 and not bool(existing['demo_mode'])
                 and existing['initial_draft_method'] == initial_draft_method
-                and (
-                    candidate_rows == list(validation.rows)
-                    or (existing_version is not None and load_json(existing_version['rows_json']) == list(validation.rows))
-                )
+                and same_match
+                and same_initial_rows
             )
             if not (same_demo_request or same_regular_request):
                 raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The session creation key was already used for different input.')
@@ -140,9 +174,9 @@ def _create_session_record(
     return (session_id, version_id, bootstrap_token, integration_token)
 
 
-def _expire_draft_regeneration(database, session, *, services: CoCreationServices):
+def _draft_regeneration_timeout_expired(session, *, services: CoCreationServices):
     if session is None or session['draft_regeneration_status'] not in {'pending', 'claimed'}:
-        return session
+        return (False, None, 0.0)
     status = session['draft_regeneration_status']
     lease_started_at = (
         session['draft_regeneration_requested_at']
@@ -150,7 +184,7 @@ def _expire_draft_regeneration(database, session, *, services: CoCreationService
         else session['draft_regeneration_updated_at']
     )
     if not lease_started_at:
-        return session
+        return (False, None, 0.0)
     age = (services.utc_datetime() - parse_time(lease_started_at)).total_seconds()
     timeout_seconds = (
         services.settings.draft_regeneration_pending_timeout_seconds
@@ -158,8 +192,16 @@ def _expire_draft_regeneration(database, session, *, services: CoCreationService
         else services.settings.draft_regeneration_claimed_timeout_seconds
     )
     if age < timeout_seconds:
-        return session
+        return (False, None, age)
     failure_code = 'unity_unavailable' if status == 'pending' else 'generation_timed_out'
+    return (True, failure_code, age)
+
+
+def _expire_draft_regeneration(database, session, *, services: CoCreationServices):
+    expired, failure_code, age = _draft_regeneration_timeout_expired(session, services=services)
+    if not expired:
+        return session
+    status = session['draft_regeneration_status']
     now = services.utc_now()
     database.execute(
         "UPDATE design_sessions\n"
@@ -337,10 +379,15 @@ def _insert_version(
             dump_json(describe_diff(current_rows, validation.rows)),
             dump_json(validation.as_dict()),
             dump_json(
-                clone_design_context(
-                    design_context
-                    if design_context is not None
-                    else load_design_context(database, session['id'], current['id'])
+                set_active_disagreement(
+                    clone_design_context(
+                        design_context
+                        if design_context is not None
+                        else load_design_context(database, session['id'], current['id'])
+                    ),
+                    None,
+                    current['id'],
+                    None,
                 )
             ),
             dump_json(version_bindings),
@@ -356,6 +403,12 @@ def _insert_version(
         database.execute(
             "UPDATE change_proposals SET status = 'superseded', decided_at = ? WHERE session_id = ? AND status = 'pending'",
             (now, session['id']),
+        )
+    if source in {'human_edit', 'restored', 'llm_accepted'}:
+        database.execute(
+            "UPDATE revision_challenges SET status = 'superseded', updated_at = ?\n"
+            "WHERE session_id = ? AND base_version_id = ? AND status NOT IN ('resolved', 'superseded')",
+            (now, session['id'], current['id']),
         )
     if services is not None:
         services.record_event(database, session['id'], 'version_created', {'versionId': version_id, 'source': source}, now)
@@ -612,8 +665,21 @@ def _proposal_binding_for_offer(offer, version_id, rows, entity_bindings=None):
     }
 
 
+def _interrupted_attempts_cutoff(*, services: CoCreationServices):
+    return iso_time(services.utc_datetime() - services.interrupted_after_timedelta())
+
+
+def has_expired_interrupted_attempts(database, session_id, *, services: CoCreationServices) -> bool:
+    cutoff = _interrupted_attempts_cutoff(services=services)
+    row = database.execute(
+        "SELECT 1 FROM play_attempts WHERE session_id = ? AND status IN ('issued', 'loaded', 'started') AND issued_at < ? LIMIT 1",
+        (session_id, cutoff),
+    ).fetchone()
+    return row is not None
+
+
 def expire_interrupted_attempts(database, session_id, *, services: CoCreationServices):
-    cutoff = iso_time(services.utc_datetime() - services.interrupted_after_timedelta())
+    cutoff = _interrupted_attempts_cutoff(services=services)
     database.execute(
         "\n        UPDATE play_attempts SET status = 'interrupted', finished_at = ?\n"
         "        WHERE session_id = ? AND status IN ('issued', 'loaded', 'started')\n"

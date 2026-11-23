@@ -4,8 +4,8 @@ import {
     DRAFT_REGENERATION_POLL_TIMEOUT_MS,
     DRAFT_REGENERATION_PROTOCOL_VERSION,
     UNITY_PLAY_BRIDGE_TIMEOUT_MS,
-} from "./i18n.js?v=binary-discovery-20261123-v2-esm";
-import { buildEntityLabels, tileClass, tileLabel } from "./map-editor.js?v=binary-discovery-20261123-v2-esm";
+} from "./i18n.js?v=binary-discovery-20261123-v3-esm";
+import { buildEntityLabels, tileClass, tileLabel } from "./map-editor.js?v=binary-discovery-20261123-v3-esm";
 
 export function createUnityBridge(ctx) {
     const { state, elements, window, document, setTimeout, clearTimeout, clearInterval, ports } = ctx;
@@ -46,6 +46,8 @@ export function createUnityBridge(ctx) {
     const initialize = (...args) => ports.initialize(...args);
     const createDemoSession = (...args) => ports.createDemoSession(...args);
     const updateControls = (...args) => ports.updateControls(...args);
+    const selectedVersion = (...args) => ports.selectedVersion(...args);
+    const renderMap = (...args) => ports.renderMap(...args);
     const requestEmbeddedHostView = (...args) => ports.requestEmbeddedHostView(...args);
     const ensureDraftRegenerationPolling = (...args) => ports.ensureDraftRegenerationPolling(...args);
 
@@ -67,7 +69,10 @@ export function createUnityBridge(ctx) {
         announceEmbeddedLabReady();
         if (state.session && !state.session.demoMode && !elements.formalStandaloneBlock.hidden) {
             void refreshSession().then(enteredWorkspace => {
-                if (enteredWorkspace) restoreComposerDraft();
+                if (enteredWorkspace) {
+                    restoreComposerDraft();
+                    recoverPendingMessage();
+                }
             }).catch(error => showError(error, initialize));
         }
         return true;
@@ -222,15 +227,21 @@ export function createUnityBridge(ctx) {
         }
 
         if (message.type !== "sokoban:cocreation-play-return") return;
+        if (message.protocolVersion !== bridge.protocolVersion) return;
 
         try {
             state.unityPlayActive = false;
             const enteredWorkspace = await refreshSession();
             if (enteredWorkspace) {
                 restoreComposerDraft();
+                recoverPendingMessage();
                 showPlayReturnNotice(message.status);
             }
         } catch (error) {
+            if (state.session && !elements.workspace.hidden && selectedVersion()) {
+                renderMap();
+            }
+            updateControls();
             showError(error, () => handleUnityBridgeMessage(event));
         }
     }
@@ -273,8 +284,9 @@ export function createUnityBridge(ctx) {
     }
 
     async function regenerateDraft() {
+        if (state.busy || state.draftRegenerationPending) return;
         if (!state.session) {
-            void createDemoSession();
+            if (!state.sessionId) void createDemoSession();
             return;
         }
         if (!state.session.draftPreview?.mutable || state.session.languageLocked) return;
@@ -329,6 +341,7 @@ export function createUnityBridge(ctx) {
             state.draftRegenerationKey = "";
         } catch (error) {
             if (preparedBridge) abortPreparedDraftRegeneration(preparedBridge);
+            if (!error?.retryable) state.draftRegenerationKey = "";
             showError(error, () => void regenerateDraft());
         } finally {
             if (!state.session?.demoMode) {
@@ -353,7 +366,9 @@ export function createUnityBridge(ctx) {
         try {
             return await create();
         } catch (error) {
-            if (error?.code && error.code !== "CLIENT_TIMEOUT" && error.code !== "REQUEST_FAILED") {
+            const shouldRecover = Boolean(error?.retryable)
+                || ["CLIENT_TIMEOUT", "RETRYABLE_REQUEST_FAILED", "INVALID_RESPONSE"].includes(error?.code);
+            if (!shouldRecover) {
                 throw error;
             }
             try {
@@ -369,7 +384,11 @@ export function createUnityBridge(ctx) {
             try {
                 return await create();
             } catch (retryError) {
-                retryError.retryable = true;
+                if (retryError
+                    && retryError.retryable === undefined
+                    && ["CLIENT_TIMEOUT", "RETRYABLE_REQUEST_FAILED", "INVALID_RESPONSE"].includes(retryError.code)) {
+                    retryError.retryable = true;
+                }
                 throw retryError;
             }
         }
@@ -541,6 +560,8 @@ export function createUnityBridge(ctx) {
         const detailKey = {
             blueprint_unavailable: "draftBlueprintUnavailable",
             generation_timed_out: "draftGenerationTimedOut",
+            generation_failed: "draftGenerationFailed",
+            llm_failed: "draftLlmFailed",
             validation_failed: "draftValidationFailed",
             unity_unavailable: "draftUnityUnavailable"
         }[failureCode] || "draftUnityUnavailable";

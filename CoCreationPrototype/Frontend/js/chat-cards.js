@@ -1,6 +1,6 @@
-import { GUIDANCE_CUE_LABELS, LLM_REQUEST_TIMEOUT_MS, REQUEST_COPY } from "./i18n.js?v=binary-discovery-20261123-v2-esm";
-import { tileName } from "./map-editor.js?v=binary-discovery-20261123-v2-esm";
-import { setButtonDisabled } from "./state-storage.js?v=binary-discovery-20261123-v2-esm";
+import { GUIDANCE_CUE_LABELS, LLM_REQUEST_TIMEOUT_MS, REQUEST_COPY } from "./i18n.js?v=binary-discovery-20261123-v3-esm";
+import { tileName } from "./map-editor.js?v=binary-discovery-20261123-v3-esm";
+import { setButtonDisabled } from "./state-storage.js?v=binary-discovery-20261123-v3-esm";
 
 export function isInternalProposalFailureCue(cue) {
     if (!cue || cue.type !== "clarification") return false;
@@ -235,34 +235,32 @@ function renderQuestionRecords(container, items, answered) {
     });
 }
 
-async function submitQuestionFeedback(action, item, record, idempotencyKey = null) {
+async function submitQuestionFeedback(action, item, record, idempotencyKey = null, baseVersionId = null) {
     if (state.busy || !canEditSelected() || !item?.questionId) return;
     const feedbackKey = `${item.questionId}:${action}`;
     if (state.questionFeedbackBusy.has(feedbackKey)) return;
     const requestKey = idempotencyKey || uniqueId(`question-${action}`);
+    const targetVersionId = baseVersionId || state.session.currentVersionId;
     state.questionFeedbackBusy.add(feedbackKey);
     record.setAttribute("aria-busy", "true");
     record.querySelectorAll("button").forEach(button => { button.disabled = true; });
     try {
-        const result = await api(
-            `/api/sessions/${state.sessionId}/questions/${item.questionId}/feedback`,
-            {
-                method: "POST",
-                body: {
-                    action,
-                    baseVersionId: state.session.currentVersionId,
-                    idempotencyKey: requestKey,
+        await withBusy(async () => {
+            const result = await api(
+                `/api/sessions/${state.sessionId}/questions/${item.questionId}/feedback`,
+                {
+                    method: "POST",
+                    body: {
+                        action,
+                        baseVersionId: targetVersionId,
+                        idempotencyKey: requestKey,
+                    },
                 },
-            },
-        );
-        state.session = result.session;
-        selectVersion(state.session.currentVersionId, false, { preserveSameStageDraft: true });
-        render();
-    } catch (error) {
-        showError(
-            error,
-            () => submitQuestionFeedback(action, item, record, requestKey),
-        );
+            );
+            state.session = result.session;
+            selectVersion(state.session.currentVersionId, false, { preserveSameStageDraft: true });
+            render();
+        });
     } finally {
         state.questionFeedbackBusy.delete(feedbackKey);
         if (record.isConnected) {
@@ -558,19 +556,20 @@ function renderAssistantBubbleContent(turn, bubble) {
                     ["challenge_revision", "challengeRevision"],
                     ["alternative_revision", "alternativeRevision"]
                 ].filter(([action]) => !Array.isArray(offer.availableActions) || offer.availableActions.includes(action)).forEach(([action, labelKey]) => {
-                    const disabled = !actionable;
+                    const stale = !actionable;
                     const button = makeButton(
                         t(labelKey),
-                        `secondary-button guidance-cue-button revision-action-button${disabled ? " guidance-cue-button-stale" : ""}`,
+                        `secondary-button guidance-cue-button revision-action-button${stale ? " guidance-cue-button-stale" : ""}`,
                         actionable
                             ? () => sendRevisionCardAction(action, turn, offer)
                             : null,
                         {
-                            disabled,
+                            disabled: stale,
                             title: actionable ? "" : proposalStateMessage(proposalStatus)
                         }
                     );
                     button.dataset.actionable = String(actionable);
+                    setButtonDisabled(button, stale || state.busy || binaryFlowActive());
                     revisionCue.appendChild(button);
                 });
             }
@@ -792,10 +791,14 @@ function canUseChallengeChoice(challengeId) {
 
 function sendChallengeChoice(challengeId, choice) {
     if (!canUseChallengeChoice(challengeId)) return;
+    const content = state.language === "zh-CN"
+        ? (choice === "ai" ? "是" : "否")
+        : (choice === "ai" ? "Yes" : "No");
     state.pendingMessage = {
-        content: choice === "ai" ? "是" : "否",
+        content,
         baseVersionId: state.session.currentVersionId,
         idempotencyKey: uniqueId("challenge-choice"),
+        requestProposal: false,
         action: "continue_challenge",
         challengeId,
         challengeChoice: choice
@@ -1323,7 +1326,7 @@ function prefillProposalConsent(offer) {
 }
 
 function sendRevisionCardAction(action, turn, offer) {
-    if (!canEditSelected() || state.busy) return;
+    if (!canEditSelected() || state.busy || binaryFlowActive() || selectedStageHasActiveDisagreement()) return;
     if (turn?.proposalState && turn.proposalState.actionable === false) {
         showReplyNotice(proposalStateMessage(turn.proposalState.status));
         render();
@@ -1343,6 +1346,7 @@ function sendRevisionCardAction(action, turn, offer) {
         content,
         baseVersionId: state.session.currentVersionId,
         idempotencyKey: uniqueId(`card-${action}`),
+        requestProposal: false,
         action,
         sourceTurnId: turn.turnId
     };

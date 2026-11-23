@@ -1,11 +1,11 @@
-import { LLM_REQUEST_TIMEOUT_MS, MESSAGE_REQUEST_TIMEOUT_MS } from "./i18n.js?v=binary-discovery-20261123-v2-esm";
+import { LLM_REQUEST_TIMEOUT_MS, MESSAGE_REQUEST_TIMEOUT_MS } from "./i18n.js?v=binary-discovery-20261123-v3-esm";
 
 export function retryDelay(attempt) {
     return Math.min(60000, 2000 * (2 ** Math.min(Math.max(0, attempt), 5)));
 }
 
 export function createSessionActions(ctx) {
-    const { state, elements, window, localStorage, setTimeout, unityHost, ports } = ctx;
+    const { state, elements, window, document, localStorage, setTimeout, clearTimeout, unityHost, ports } = ctx;
 
     const t = (...args) => ports.t(...args);
     const uniqueId = (...args) => ports.uniqueId(...args);
@@ -27,6 +27,7 @@ export function createSessionActions(ctx) {
     const withBusy = (...args) => ports.withBusy(...args);
     const clearUnsavedMapDraft = (...args) => ports.clearUnsavedMapDraft(...args);
     const isLevelValidationError = (...args) => ports.isLevelValidationError(...args);
+    const isCardActionPending = (...args) => ports.isCardActionPending(...args);
     const syncHash = (...args) => ports.syncHash(...args);
     const restoreComposerDraft = (...args) => ports.restoreComposerDraft(...args);
     const canEditSelected = (...args) => ports.canEditSelected(...args);
@@ -127,9 +128,10 @@ export function createSessionActions(ctx) {
 
         if (
             !state.pendingMessage
+            || isCardActionPending(state.pendingMessage)
             || state.pendingMessage.content !== content
             || state.pendingMessage.baseVersionId !== state.session.currentVersionId
-            || state.pendingMessage.requestProposal !== state.proposalMode
+            || Boolean(state.pendingMessage.requestProposal) !== state.proposalMode
         ) {
             const challenge = activeChallengeComposerState();
             state.pendingMessage = {
@@ -173,17 +175,19 @@ export function createSessionActions(ctx) {
     function binaryStorageKey() { return `cocreationBinaryAction:${state.sessionId}`; }
 
     async function cancelBinaryProposal() {
-        if (!binaryFlowActive() || state.busy || state.session.proposalFlowState.status === "planning") return;
+        if (!binaryFlowActive() || !canEditSelected() || state.busy || state.unityPlayActive || state.session.proposalFlowState.status === "planning") return;
         return submitBinaryAction({ kind: "cancel", baseVersionId: state.session.currentVersionId,
             topicId: state.session.proposalFlowState.topicId, idempotencyKey: uniqueId("binary-cancel") });
     }
 
     async function retryBinaryProposal() {
-        if (state.busy) return;
+        const interactionBusy = state.busy || state.unityPlayActive;
+        if (interactionBusy || !canEditSelected()) return;
         let stored;
         try { stored = JSON.parse(localStorage.getItem(binaryStorageKey()) || "null"); } catch (_) { stored = null; }
         const action = state.session?.proposalFlowState?.retryAction || state.pendingBinary || stored;
         if (!action || action.baseVersionId !== state.session.currentVersionId) return;
+        if (state.dirty && (action.kind === "choice" || Boolean(action.choiceId))) return;
         if (action.kind === "start") {
             const { kind, ...pending } = action;
             state.pendingMessage = pending;
@@ -192,8 +196,42 @@ export function createSessionActions(ctx) {
         return submitBinaryAction(action);
     }
 
+    function isBinaryActionCommitted(session, action) {
+        if (!session) return false;
+        const flow = session.proposalFlowState;
+        const status = flow?.status;
+        if (status === "cancelled" || status === "proposal_ready") return true;
+        if (!(flow?.interactionMode === "binary_choice" && flow?.active)) return true;
+        if (action?.idempotencyKey && (session.turns || []).some(turn =>
+            turn.role === "assistant"
+            && (!action.baseVersionId || turn.versionId === action.baseVersionId)
+            && turn.requestId === action.idempotencyKey
+        )) {
+            return true;
+        }
+        return false;
+    }
+
+    function clearBinaryPendingState() {
+        state.pendingBinary = null;
+        if (state.sessionId) localStorage.removeItem(binaryStorageKey());
+        clearPendingMessage();
+        setProposalMode(false);
+        state.chatStatus = "idle";
+        state.chatError = null;
+    }
+
+    function cancelBinaryRefreshTimer() {
+        if (state.binaryRefreshTimer !== null && state.binaryRefreshTimer !== undefined) {
+            clearTimeout(state.binaryRefreshTimer);
+            state.binaryRefreshTimer = null;
+        }
+    }
+
     async function submitBinaryActionImpl(action) {
-        if (state.busy) return;
+        if (state.busy || state.unityPlayActive || !canEditSelected()) return;
+        if (state.dirty && (action.kind === "choice" || Boolean(action.choiceId))) return;
+        cancelBinaryRefreshTimer();
         state.pendingBinary = action;
         localStorage.setItem(binaryStorageKey(), JSON.stringify(action));
         state.busy = state.chatBusy = true;
@@ -204,20 +242,28 @@ export function createSessionActions(ctx) {
         updateControls();
         try {
             const { kind, ...body } = action;
-            state.session = await api(`/api/sessions/${state.sessionId}/proposal-discovery/${kind === "cancel" ? "cancel" : "choices"}`,
+            state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}/proposal-discovery/${kind === "cancel" ? "cancel" : "choices"}`,
                 { method: "POST", body, timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS });
-            state.pendingBinary = null;
-            localStorage.removeItem(binaryStorageKey());
-            clearPendingMessage();
-            setProposalMode(false);
-            state.chatStatus = "idle";
+            clearBinaryPendingState();
         } catch (error) {
             state.chatError = error;
             state.chatStatus = "error";
-            try { state.session = await api(`/api/sessions/${state.sessionId}`); } catch (_) { /* Keep recoverable action. */ }
-            if (!error.retryable && error.code !== "BINARY_BUSY") {
-                state.pendingBinary = null;
-                localStorage.removeItem(binaryStorageKey());
+            try {
+                const latest = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+                state.session = latest;
+                error = recoverMessageFailure(error, latest, action);
+                state.chatError = error;
+                if (isBinaryActionCommitted(latest, action)) {
+                    clearBinaryPendingState();
+                } else if (!error?.retryable && error?.code !== "BINARY_BUSY") {
+                    state.pendingBinary = null;
+                    localStorage.removeItem(binaryStorageKey());
+                }
+            } catch (_) {
+                if (!error?.retryable && error?.code !== "BINARY_BUSY") {
+                    state.pendingBinary = null;
+                    localStorage.removeItem(binaryStorageKey());
+                }
             }
         } finally {
             stopChatTimer();
@@ -227,26 +273,96 @@ export function createSessionActions(ctx) {
         }
     }
 
+    async function refreshBinarySessionLightweight() {
+        const capturedSessionId = state.sessionId;
+        const latest = await api(`/api/sessions/${encodeURIComponent(capturedSessionId)}`);
+        if (state.sessionId !== capturedSessionId) return;
+        if (state.busy || state.chatBusy || state.questionFeedbackBusy.size > 0) {
+            scheduleBinaryRefresh();
+            return;
+        }
+        const previousVersionId = state.session?.currentVersionId;
+        state.session = latest;
+        if (state.pendingBinary && isBinaryActionCommitted(latest, state.pendingBinary)) {
+            clearBinaryPendingState();
+        } else if (!binaryFlowActive() || ["cancelled", "proposal_ready"].includes(latest.proposalFlowState?.status)) {
+            state.pendingBinary = null;
+            if (state.sessionId) localStorage.removeItem(binaryStorageKey());
+            if (state.chatStatus === "error") {
+                state.chatStatus = "idle";
+                state.chatError = null;
+            }
+        } else if (state.pendingBinary && state.chatError) {
+            state.chatError = recoverMessageFailure(state.chatError, latest, state.pendingBinary);
+        }
+        if (state.pendingMessage && (
+            ["cancelled", "proposal_ready"].includes(latest.proposalFlowState?.status)
+            || (latest.turns || []).some(turn => turn.role === "assistant"
+                && turn.versionId === state.pendingMessage.baseVersionId
+                && turn.requestId === state.pendingMessage.idempotencyKey)
+        )) {
+            if (!isCardActionPending(state.pendingMessage)) {
+                setProposalMode(false);
+                elements.messageInput.value = "";
+                localStorage.removeItem(composerKey());
+                updateCharacterCount();
+            }
+            clearPendingMessage();
+            state.chatStatus = "idle";
+            state.chatError = null;
+        }
+        if (previousVersionId && latest.currentVersionId && previousVersionId !== latest.currentVersionId && !findVersion(state.selectedVersionId)) {
+            state.selectedVersionId = latest.currentVersionId;
+        }
+        if (!state.dirty && state.selectedVersionId === latest.currentVersionId && previousVersionId !== latest.currentVersionId) {
+            resetDraftFromSelection();
+        }
+        render();
+        void ensureVisibleTranslations();
+    }
+
     function scheduleBinaryRefresh() {
-        if (!binaryFlowActive() || state.session.proposalFlowState.status !== "planning" || state.busy || state.binaryRefreshTimer) return;
+        const eligible = Boolean(
+            binaryFlowActive()
+            && state.session?.proposalFlowState?.status === "planning"
+            && state.session?.status === "active"
+            && !deadlineExpired()
+            && !document.hidden
+            && !state.busy
+        );
+        if (!eligible) {
+            cancelBinaryRefreshTimer();
+            return;
+        }
+        if (state.binaryRefreshTimer) return;
         state.binaryRefreshTimer = setTimeout(async () => {
             state.binaryRefreshTimer = null;
-            if (!binaryFlowActive() || state.busy) return;
-            try { await refreshSession(); } catch (_) { scheduleBinaryRefresh(); }
+            if (
+                !binaryFlowActive()
+                || state.session?.proposalFlowState?.status !== "planning"
+                || state.session?.status !== "active"
+                || deadlineExpired()
+                || document.hidden
+                || state.busy
+            ) return;
+            try { await refreshBinarySessionLightweight(); } catch (_) { scheduleBinaryRefresh(); }
         }, 4000);
     }
 
     async function retryPendingMessageImpl() {
         if (!state.pendingMessage || state.busy) return;
-        elements.messageInput.value = state.pendingMessage.content;
-        localStorage.setItem(composerKey(), state.pendingMessage.content);
-        updateCharacterCount();
+        if (!isCardActionPending(state.pendingMessage)) {
+            elements.messageInput.value = state.pendingMessage.content;
+            localStorage.setItem(composerKey(), state.pendingMessage.content);
+            updateCharacterCount();
+        }
         await submitPendingMessage();
     }
 
     async function submitPendingMessageImpl() {
         const pending = state.pendingMessage;
         if (!pending || state.busy) return;
+        const cardAction = isCardActionPending(pending);
 
         state.busy = true;
         state.chatBusy = true;
@@ -264,13 +380,15 @@ export function createSessionActions(ctx) {
                 body: pending,
                 timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS
             });
-            setProposalMode(false);
-            elements.messageInput.value = "";
-            localStorage.removeItem(composerKey());
+            if (!cardAction) {
+                setProposalMode(false);
+                elements.messageInput.value = "";
+                localStorage.removeItem(composerKey());
+                updateCharacterCount();
+            }
             clearPendingMessage();
             state.chatStatus = "idle";
             state.chatError = null;
-            updateCharacterCount();
             render();
         } catch (error) {
             if (error?.code === "PROPOSAL_STALE" && (!pending.action || pending.action === "none")) {
@@ -288,15 +406,13 @@ export function createSessionActions(ctx) {
                 [
                     "INVALID_CARD_SOURCE",
                     "PROPOSAL_STALE",
-                    "PROPOSAL_PRECONDITION_FAILED"
+                    "PROPOSAL_PRECONDITION_FAILED",
+                    "CHALLENGE_STALE"
                 ].includes(error?.code)
                 && pending.action
                 && pending.action !== "none"
             ) {
                 clearPendingMessage();
-                elements.messageInput.value = "";
-                localStorage.removeItem(composerKey());
-                updateCharacterCount();
                 try {
                     await refreshSession();
                 } catch (_refreshError) {
@@ -317,12 +433,14 @@ export function createSessionActions(ctx) {
                     if (latest.turns?.some(turn => turn.role === "assistant" && turn.versionId === pending.baseVersionId
                         && turn.requestId === pending.idempotencyKey)) {
                         clearPendingMessage();
-                        setProposalMode(false);
-                        elements.messageInput.value = "";
-                        localStorage.removeItem(composerKey());
+                        if (!cardAction) {
+                            setProposalMode(false);
+                            elements.messageInput.value = "";
+                            localStorage.removeItem(composerKey());
+                            updateCharacterCount();
+                        }
                         state.chatStatus = "idle";
                         state.chatError = null;
-                        updateCharacterCount();
                         render();
                         return;
                     }
@@ -335,9 +453,7 @@ export function createSessionActions(ctx) {
                 state.chatStatus = "error";
                 state.chatError = error;
             } else {
-                if (pending?.action && pending.action !== "none") {
-                    clearPendingMessage();
-                }
+                clearPendingMessage();
                 state.chatStatus = "error";
                 state.chatError = error;
             }
@@ -366,7 +482,7 @@ export function createSessionActions(ctx) {
                     body: saveBody
                 });
                 clearUnsavedMapDraft();
-                selectVersion(state.session.currentVersionId, false);
+                selectVersion(state.session.currentVersionId, false, { forceReset: true });
                 render();
                 await ensureAssessment(state.session.currentVersionId);
             } catch (error) {
@@ -388,7 +504,7 @@ export function createSessionActions(ctx) {
                 body: restoreBody
             });
             clearUnsavedMapDraft();
-            selectVersion(state.session.currentVersionId, false);
+            selectVersion(state.session.currentVersionId, false, { forceReset: true });
             render();
             await ensureAssessment(state.session.currentVersionId);
         });
@@ -404,7 +520,7 @@ export function createSessionActions(ctx) {
             });
             if (decision === "accept") {
                 clearUnsavedMapDraft();
-                selectVersion(state.session.currentVersionId, false);
+                selectVersion(state.session.currentVersionId, false, { forceReset: true });
                 render();
                 await ensureAssessment(state.session.currentVersionId);
             } else {
@@ -425,7 +541,9 @@ export function createSessionActions(ctx) {
         const playKey = uniqueId("play");
         await withBusy(async () => {
             localStorage.setItem(selectedStageKey(), version.versionId);
-            localStorage.setItem(composerKey(), elements.messageInput.value);
+            if (canEditSelected()) {
+                localStorage.setItem(composerKey(), elements.messageInput.value);
+            }
             const payload = await api(`/api/sessions/${state.sessionId}/versions/${version.versionId}/play-attempts`, {
                 method: "POST",
                 body: { idempotencyKey: playKey }
@@ -453,42 +571,86 @@ export function createSessionActions(ctx) {
         elements.finalizeModal.hidden = true;
         const targetVersionId = state.selectedVersionId;
         const targetIsCurrent = targetVersionId === state.session.currentVersionId;
-        const finalizeBody = { baseVersionId: targetVersionId, idempotencyKey: uniqueId("finalize"),
-            rows: deadlineExpired() && targetIsCurrent && state.dirty ? state.draftRows.map(row => row) : null };
+        const rows = deadlineExpired() && targetIsCurrent && state.dirty ? state.draftRows.map(row => row) : null;
+        const rowsSignature = rows ? rows.join("\n") : null;
+        if (
+            !state.pendingFinalize
+            || state.pendingFinalize.sessionId !== state.sessionId
+            || state.pendingFinalize.targetVersionId !== targetVersionId
+            || state.pendingFinalize.rowsSignature !== rowsSignature
+        ) {
+            state.pendingFinalize = {
+                sessionId: state.sessionId,
+                targetVersionId,
+                rowsSignature,
+                idempotencyKey: uniqueId("finalize")
+            };
+        }
+        const finalizeBody = {
+            baseVersionId: targetVersionId,
+            idempotencyKey: state.pendingFinalize.idempotencyKey,
+            rows
+        };
         await withBusy(async () => {
-            state.session = await api(`/api/sessions/${state.sessionId}/finalize`, {
-                method: "POST",
-                body: finalizeBody
-            });
-            clearUnsavedMapDraft();
-            render();
-            elements.intentionInput.focus();
+            state.validationError = null;
+            try {
+                state.session = await api(`/api/sessions/${state.sessionId}/finalize`, {
+                    method: "POST",
+                    body: finalizeBody
+                });
+                state.pendingFinalize = null;
+                clearUnsavedMapDraft();
+                render();
+                elements.intentionInput.focus();
+            } catch (error) {
+                if (isLevelValidationError(error)) {
+                    state.validationError = error;
+                    renderMap();
+                }
+                throw error;
+            }
         });
     }
 
     async function submitIntention(event) {
-        event.preventDefault();
+        event?.preventDefault?.();
         const content = elements.intentionInput.value.trim();
         if (!content) return showNotice(t("errorIntentRequired"));
-        const intentionKey = uniqueId("intention");
+        if (
+            !state.pendingIntention
+            || state.pendingIntention.sessionId !== state.sessionId
+            || state.pendingIntention.content !== content
+        ) {
+            state.pendingIntention = {
+                sessionId: state.sessionId,
+                content,
+                idempotencyKey: uniqueId("intention")
+            };
+        }
+        const intentionBody = {
+            content,
+            idempotencyKey: state.pendingIntention.idempotencyKey
+        };
         await withBusy(async () => {
             state.session = await api(`/api/sessions/${state.sessionId}/intention`, {
                 method: "POST",
-                body: { content, idempotencyKey: intentionKey }
+                body: intentionBody
             });
+            state.pendingIntention = null;
             clearUnsavedMapDraft();
             render();
         });
     }
 
     function selectVersion(versionId, shouldRender = true, options = {}) {
+        if (!findVersion(versionId)) return;
+        if (state.selectedVersionId === versionId && !options.forceReset) return;
         const preserveSameStageDraft = Boolean(
             options.preserveSameStageDraft
             && state.selectedVersionId === versionId
             && state.dirty
         );
-        if (!findVersion(versionId)) return;
-        if (state.selectedVersionId && state.selectedVersionId !== versionId) {
+        if (state.selectedVersionId && (state.selectedVersionId !== versionId || options.forceReset)) {
             setProposalMode(false);
             clearUnsavedMapDraft();
         }
@@ -525,6 +687,7 @@ export function createSessionActions(ctx) {
         cancelBinaryProposal,
         retryBinaryProposal,
         submitBinaryAction: submitBinaryActionImpl,
+        cancelBinaryRefreshTimer,
         scheduleBinaryRefresh,
         retryPendingMessage: retryPendingMessageImpl,
         submitPendingMessage: submitPendingMessageImpl,

@@ -112,7 +112,7 @@ def _dashboard_node_entry(entry_id, kind, text, occurred_at, *, label='', langua
     }
 
 
-def _dashboard_turn_kind(guidance, challenge_turn_ids):
+def _dashboard_turn_kind(guidance, challenge_turn_ids, turn_id=''):
     guidance = guidance or {}
     challenge_state = guidance.get('challengeState') or {}
     challenge_id = str(challenge_state.get('challengeId') or '').strip()
@@ -128,11 +128,12 @@ def _dashboard_turn_kind(guidance, challenge_turn_ids):
     if hypothesis_id and guidance.get('intentHypothesis'):
         return ('intent', 'intent:' + hypothesis_id, None)
     discovery = guidance.get('proposalDiscovery') or {}
-    topic_id = str(marker.get('proposalTopicId') or discovery.get('topicId') or '').strip()
+    question = guidance.get('proposalQuestion') or {}
+    topic_id = str(marker.get('proposalTopicId') or discovery.get('topicId') or question.get('topicId') or '').strip()
     if topic_id:
         return ('proposal', 'proposal:' + topic_id, None)
     if guidance.get('proposalOffer'):
-        return ('proposal', 'proposal:' + str(guidance.get('proposalId') or '').strip(), None)
+        return ('proposal', 'proposal:' + str(guidance.get('proposalId') or turn_id or '').strip(), None)
     return ('discussion', '', None)
 
 
@@ -140,8 +141,9 @@ def _dashboard_node_status(node_type, guidance, challenge_status=''):
     guidance = guidance or {}
     if node_type == 'proposal':
         marker = guidance.get('proposalDiscovery') or {}
-        status = str(marker.get('status') or 'in_progress')
-        count = int(marker.get('clarificationQuestionCount') or 0)
+        question = guidance.get('proposalQuestion') or {}
+        status = str(marker.get('status') or ('clarifying' if question else 'in_progress'))
+        count = int(marker.get('clarificationQuestionCount') or question.get('number') or 0)
         if status == 'clarifying' and count in {1, 2, 3}:
             return f'clarifying_{count}'
         if guidance.get('proposalOffer'):
@@ -477,7 +479,7 @@ def _dashboard_node_projection_for_turn(database, session, request_id):
     classified = []
     for row in rows:
         guidance = load_json(row['guidance_json']) or {}
-        node_type, node_id, parent_id = _dashboard_turn_kind(guidance, challenge_by_turn)
+        node_type, node_id, parent_id = _dashboard_turn_kind(guidance, challenge_by_turn, turn_id=row['id'])
         origin = _dashboard_challenge_proposal_origin(database, session['id'], row)
         if origin is not None:
             origin_guidance = load_json(origin['guidance_json']) or {}
@@ -495,10 +497,19 @@ def _dashboard_node_projection_for_turn(database, session, request_id):
             ).fetchone()
             source_marker = load_json(source['guidance_json']) if source else {}
             source_marker = source_marker or {}
-            topic_id = str((source_marker.get('proposalDiscovery') or {}).get('topicId') or '')
+            topic_id = str(
+                (source_marker.get('dashboardNode') or {}).get('proposalTopicId')
+                or (source_marker.get('proposalDiscovery') or {}).get('topicId')
+                or (source_marker.get('proposalQuestion') or {}).get('topicId')
+                or ''
+            ).strip()
+            if not topic_id and source_marker.get('proposalOffer'):
+                topic_id = str(source_marker.get('proposalId') or challenge['source_proposal_turn_id'] or '').strip()
             parent_id = 'proposal:' + topic_id if topic_id else None
         classified.append((row, guidance, node_type, node_id, parent_id))
-    current = next((item for item in classified if item[0]['id'] == assistant['id']))
+    current = next((item for item in classified if item[0]['id'] == assistant['id']), None)
+    if current is None:
+        return None
     row, guidance, node_type, node_id, parent_id = current
     if node_type == 'discussion':
         current_index = next((i for i, item in enumerate(classified) if item[0]['id'] == assistant['id']))

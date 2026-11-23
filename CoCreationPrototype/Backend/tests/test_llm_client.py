@@ -149,7 +149,7 @@ class FakeCompletions:
 
     async def create(self, **kwargs):
         schema_name = (((kwargs.get("response_format") or {}).get("json_schema") or {}).get("name"))
-        if schema_name != "cocreation_intent_candidate_review":
+        if schema_name not in {"cocreation_intent_candidate_review", "cocreation_intent_body_review"}:
             self.calls.append(kwargs)
         patch_spec = (json.loads(kwargs["messages"][-1]["content"])
                       if schema_name == "cocreation_component_patch" else None)
@@ -239,6 +239,17 @@ class FakeCompletions:
                     "issues": [] if body_valid and card_valid else ["Repair only the incomplete component."],
                     "reviewedActiveClaims": [],
                     "answeredQuestionIds": [],
+                }, ensure_ascii=False)),
+            )])
+        if schema_name == "cocreation_intent_body_review":
+            raw_input = json.loads(str((kwargs.get("messages") or [{}])[-1].get("content") or "{}"))
+            body_text = str(raw_input.get("body") or "").strip()
+            body_valid = body_text not in {"I understand the feedback.", "我理解你的反馈。"}
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=json.dumps({
+                    "bodyValid": body_valid,
+                    "issues": [] if body_valid else ["Repair only the incomplete component."],
                 }, ensure_ascii=False)),
             )])
         outcome = self.outcomes.pop(0)
@@ -1487,7 +1498,6 @@ class LLMClientTests(unittest.TestCase):
             [(item["text"], item["from"], item["to"]) for item in links],
             [
                 ("B1 -> (3,6)", {"row": 3, "column": 5}, {"row": 3, "column": 6}),
-                ("(3,6) -> T1", {"row": 3, "column": 6}, {"row": 3, "column": 7}),
             ],
         )
         self.assertEqual(
@@ -2204,12 +2214,11 @@ class LLMClientTests(unittest.TestCase):
 
         links = llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS)
 
-        self.assertEqual(len(links), 3)
+        self.assertEqual(len(links), 2)
         self.assertEqual(
             [(item["from"], item["to"]) for item in links],
             [
                 ({"row": 3, "column": 5}, {"row": 6, "column": 3}),
-                ({"row": 6, "column": 3}, {"row": 3, "column": 7}),
                 ({"row": 6, "column": 4}, {"row": 6, "column": 8}),
             ],
         )

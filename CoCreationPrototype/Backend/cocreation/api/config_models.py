@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -216,7 +217,7 @@ class MessageRequest(StrictModel):
     ] = 'none'
     sourceTurnId: str | None = None
     challengeId: str | None = None
-    challengeChoice: Literal['ai', 'user'] | None = None
+    challengeChoice: Literal['ai', 'user', 'retain_current'] | None = None
     exitChallenge: bool = False
 
 
@@ -509,6 +510,8 @@ def _validate_identifier(value, field_name):
 
 
 def _validate_metrics(payload):
+    if not math.isfinite(payload.durationSeconds):
+        raise ApiError(400, 'INVALID_METRICS', 'Play durationSeconds must be finite.')
     if (
         payload.durationSeconds < 0
         or payload.durationSeconds > 86400

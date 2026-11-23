@@ -202,9 +202,6 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
         if task == 'intent_body_repair':
             schema['properties'].pop('cardSentences')
             schema['required'] = ['bodyParagraphs']
-        elif task == 'intent_card_repair':
-            schema['properties'].pop('bodyParagraphs')
-            schema['required'] = ['cardSentences']
         name = 'cocreation_intent_component_repair'
     elif task == 'intent_feedback_review':
         schema = {'type': 'object', 'additionalProperties': False, 'properties': {'verdict': {'type': 'string', 'enum': ['compatible', 'conflict', 'unclear']}, 'explanation': {'type': ['string', 'null']}, 'supersedesHypothesisIds': {'type': 'array', 'items': {'type': 'string'}}, 'conflictingHypothesisIds': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['verdict', 'explanation', 'supersedesHypothesisIds', 'conflictingHypothesisIds']}
@@ -222,7 +219,7 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
         schema = {'type': 'object', 'additionalProperties': False, 'properties': {'translations': {'type': 'array', 'items': {'type': 'object'}}}, 'required': ['translations']}
         name = 'cocreation_translation'
     elif task == 'revision_plan':
-        schema = {'type': 'object', 'additionalProperties': False, 'properties': {'schemaVersion': {'type': ['integer', 'null']}, 'strategies': {'type': 'array', 'items': {'type': 'object'}}}, 'required': ['strategies']}
+        schema = {'type': 'object', 'additionalProperties': False, 'properties': {'strategies': {'type': 'array', 'items': {'type': 'object'}}}, 'required': ['strategies']}
         name = 'cocreation_revision_plan'
     elif task == 'operation_candidates':
         schema = {'type': 'object', 'additionalProperties': False, 'properties': {'candidates': {'type': 'array', 'items': {'type': 'object'}}}, 'required': ['candidates']}
@@ -230,9 +227,9 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
     else:
         stage_opening = task == 'stage_assessment'
         guidance_properties = {'move': {'type': 'string', 'enum': ['observe_stage'] if stage_opening else sorted(GUIDANCE_MOVES)}, 'intentHypothesis': {'type': ['string', 'null']}, 'intentConfidence': {'type': ['string', 'null'], 'enum': ['low', 'medium', 'high', None]}, 'followUpQuestion': {'type': ['string', 'null']}, 'proposalOffer': {'type': ['object', 'null']}, 'disagreement': {'type': ['object', 'null']}, 'uiCues': {'type': 'array', 'items': {'type': 'object'}}, 'coordinateLinks': {'type': 'array', 'items': {'type': 'object'}}, 'designContextPatch': {'type': ['object', 'null']}}
-        guidance_schema = {'type': 'object', 'additionalProperties': False, 'properties': guidance_properties, 'required': ['move', 'intentHypothesis', 'intentConfidence', 'followUpQuestion', 'proposalOffer', 'disagreement', 'uiCues', 'coordinateLinks']}
-        assessment_schema = {'type': ['object', 'null'], 'properties': {'solutionSummary': {'type': 'string'}, 'difficultyOpinion': {'type': 'string'}, 'features': {'type': 'array', 'items': {'type': 'string'}}, 'suggestions': {'type': 'array', 'items': {'type': 'string'}}, 'satisfactionQuestion': {'type': ['string', 'null']}}, 'additionalProperties': False}
-        schema = {'type': 'object', 'additionalProperties': False, 'properties': {'assistantMessage': {'type': 'string'}, 'contentBlocks': {'type': ['array', 'null'], 'items': {'type': 'object'}}, 'guidance': guidance_schema, 'assessment': assessment_schema, 'proposedRows': {'type': ['array', 'null'], 'items': {'type': 'string'}}, 'modificationSummary': {'type': 'string'}, 'designContextPatch': {'type': ['object', 'null']}}, 'required': ['assistantMessage', 'guidance', 'assessment', 'proposedRows', 'modificationSummary']}
+        guidance_schema = {'type': 'object', 'additionalProperties': False, 'properties': guidance_properties, 'required': ['move', 'intentHypothesis', 'intentConfidence', 'followUpQuestion', 'proposalOffer', 'disagreement', 'uiCues', 'coordinateLinks', 'designContextPatch']}
+        assessment_schema = {'type': ['object', 'null'], 'properties': {'solutionSummary': {'type': 'string'}, 'difficultyOpinion': {'type': 'string'}, 'features': {'type': 'array', 'items': {'type': 'string'}}, 'suggestions': {'type': 'array', 'items': {'type': 'string'}}, 'satisfactionQuestion': {'type': ['string', 'null']}}, 'required': ['solutionSummary', 'difficultyOpinion', 'features', 'suggestions', 'satisfactionQuestion'], 'additionalProperties': False}
+        schema = {'type': 'object', 'additionalProperties': False, 'properties': {'assistantMessage': {'type': 'string'}, 'contentBlocks': {'type': ['array', 'null'], 'items': {'type': 'object'}}, 'guidance': guidance_schema, 'assessment': assessment_schema, 'proposedRows': {'type': ['array', 'null'], 'items': {'type': 'string'}}, 'modificationSummary': {'type': 'string'}, 'designContextPatch': {'type': ['object', 'null']}}, 'required': ['assistantMessage', 'contentBlocks', 'guidance', 'assessment', 'proposedRows', 'modificationSummary', 'designContextPatch']}
         if stage_opening:
             schema['properties']['assessment'] = {'type': 'object', 'additionalProperties': False, 'properties': {'solutionSummary': {'type': 'string'}, 'difficultyOpinion': {'type': 'string'}, 'features': {'type': 'array', 'items': {'type': 'string'}}, 'suggestions': {'type': 'array', 'items': {'type': 'string'}}, 'satisfactionQuestion': {'type': ['string', 'null']}}, 'required': ['solutionSummary', 'difficultyOpinion', 'features', 'suggestions', 'satisfactionQuestion']}
         name = 'cocreation_stage_assessment' if task == 'stage_assessment' else 'cocreation_chat'
@@ -530,8 +527,8 @@ def _strip_unreferenced_current_map_claims(value):
     present-tense spatial relations while preserving future/hypothetical route
     discussion and ordinary design interpretation.
     """
-    current_fact = re.compile('(?:\\b(?:P|B\\d+|T\\d+)\\b.{0,36}?(?:\\b(?:is|are|at|in|on|located|occupies|sits)\\b|\\u4f4d\\u4e8e|\\u5728\\u7b2c|\\u5750\\u6807).{0,40}?[\\(\\uff08]\\s*\\d{1,2}\\s*[,\\uff0c]\\s*\\d{1,2}\\s*[\\)\\uff09]|[\\(\\uff08]\\s*\\d{1,2}\\s*[,\\uff0c]\\s*\\d{1,2}\\s*[\\)\\uff09].{0,28}?(?:\\b(?:is|are)\\b|\\u662f).{0,12}?\\b(?:P|B\\d+|T\\d+)\\b)', flags=re.IGNORECASE)
-    relation = re.compile('\\b(?:P|B\\d+|T\\d+)\\b.{0,42}?\\b(?:near|close\\s+to|adjacent\\s+to|beside|next\\s+to)\\b.{0,42}?\\b(?:P|B\\d+|T\\d+)\\b|(?:B\\d+|T\\d+|P).{0,24}?(?:\\u9760\\u8fd1|\\u76f8\\u90bb|\\u65c1\\u8fb9|\\u7d27\\u6328).{0,24}?(?:B\\d+|T\\d+|P)', flags=re.IGNORECASE)
+    current_fact = re.compile('(?:(?<![A-Za-z0-9_])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9_]).{0,36}?(?:\\b(?:is|are|at|in|on|located|occupies|sits)\\b|\\u4f4d\\u4e8e|\\u5728\\u7b2c|\\u5750\\u6807).{0,40}?[\\(\\uff08]\\s*\\d{1,2}\\s*[,\\uff0c]\\s*\\d{1,2}\\s*[\\)\\uff09]|[\\(\\uff08]\\s*\\d{1,2}\\s*[,\\uff0c]\\s*\\d{1,2}\\s*[\\)\\uff09].{0,28}?(?:\\b(?:is|are)\\b|\\u662f).{0,12}?(?<![A-Za-z0-9_])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9_]))', flags=re.IGNORECASE)
+    relation = re.compile('(?<![A-Za-z0-9_])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9_]).{0,42}?\\b(?:near|close\\s+to|adjacent\\s+to|beside|next\\s+to)\\b.{0,42}?(?<![A-Za-z0-9_])(?:P|B\\d+|T\\d+)(?![A-Za-z0-9_])|(?<![A-Za-z0-9_])(?:B\\d+|T\\d+|P)(?![A-Za-z0-9_]).{0,24}?(?:\\u9760\\u8fd1|\\u76f8\\u90bb|\\u65c1\\u8fb9|\\u7d27\\u6328).{0,24}?(?<![A-Za-z0-9_])(?:B\\d+|T\\d+|P)(?![A-Za-z0-9_])', flags=re.IGNORECASE)
     future = re.compile('(?:\\b(?:if|when|would|will|move|push|from|toward|through|via)\\b|\\u5982\\u679c|\\u82e5|\\u5c06|\\u4f1a|\\u79fb\\u52a8|\\u63a8\\u5230|\\u4ece.*(?:\\u5230|\\u5411))', flags=re.IGNORECASE)
     kept = []
     for sentence in _content_block_sentences(value):
