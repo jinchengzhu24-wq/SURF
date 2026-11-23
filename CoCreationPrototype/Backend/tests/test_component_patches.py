@@ -345,6 +345,227 @@ class ComponentIntegrationTests(unittest.TestCase):
         self.assertEqual(len(result["requirements"]), 2)
         self.assertEqual(tasks, ["revision_requirements", "revision_requirements_patch", "revision_requirement_review", "revision_requirement_review"])
 
+    def test_requirement_review_invalid_evidence_span_after_patch_retries_unlocked_full_review(self):
+        from cocreation.domain.design_requirements import validate_requirement_record
+        turns = [
+            {"id": "u1", "content": "I want to make the level easier"},
+            {"id": "u2", "content": "Selected A: Drain the upper-left water pool!"},
+        ]
+        choices = [{
+            "questionId": "q1",
+            "choiceId": "c1",
+            "question": "Which obstacle cluster should I reduce first: the water wall blocking the upper-left area?",
+            "note": "Opening the upper-left water cluster eases early movement.",
+            "label": "Drain the upper-left water pool!",
+            "letter": "A",
+            "promise": {"kind": "reduce_obstacles", "component": "water", "focus": {"row": 4, "column": 4, "radius": 2}, "corridor": None},
+            "sourceTurnId": "u2",
+            "displayLanguage": "en",
+        }]
+        initial = {
+            "requirements": [
+                {
+                    "component": "gameplay",
+                    "property": "experience",
+                    "relation": "seek",
+                    "strength": "goal",
+                    "entities": [],
+                    "value": None,
+                    "unit": "none",
+                    "priorityEvidenceSpan": "",
+                    "focused": False,
+                    "sourceTurnId": "u1",
+                    "evidenceSpan": "I want to make the level easier",
+                    "statement": "make the level easier",
+                },
+                {
+                    "component": "water",
+                    "property": "count",
+                    "relation": "decrease",
+                    "strength": "preference",
+                    "entities": [],
+                    "value": None,
+                    "unit": "none",
+                    "priorityEvidenceSpan": "",
+                    "focused": True,
+                    "sourceTurnId": "u2",
+                    "evidenceSpan": "Drain the upper-left water pool!",
+                    "statement": "drain upper-left water pool",
+                },
+            ],
+            "automaticBindings": [],
+            "exactTransitions": [],
+        }
+        patched_req2 = dict(initial["requirements"][1], strength="goal", focused=False)
+        patched_doc = {**initial, "requirements": [initial["requirements"][0], patched_req2]}
+        record = validate_requirement_record(initial, turns, self.snapshot)
+        req2_id = record["requirements"][1]["requirementId"]
+        patched_req2_id = validate_requirement_record(patched_doc, turns, self.snapshot)["requirements"][1]["requirementId"]
+        tasks = []
+        review_calls = 0
+
+        async def request(*args, **kwargs):
+            nonlocal review_calls
+            task = kwargs["task"]
+            tasks.append(task)
+            messages = args[3]
+            if task == "revision_requirements":
+                understanding = json.loads(messages[1]["content"])["proposalUnderstanding"]
+                self.assertNotIn("sufficient", understanding)
+                self.assertNotIn("nextQuestionDimension", understanding)
+                return completion(initial)
+            if task == "revision_requirements_patch":
+                spec = json.loads(messages[-1]["content"])
+                return completion(patch_fixture(spec, patched_doc))
+            if task == "revision_requirement_review_patch":
+                raise AssertionError("Invalid accepted=False review issues must unlock full review instead of patching issues.")
+            understanding = json.loads(messages[1]["content"])["proposalUnderstanding"]
+            self.assertNotIn("sufficient", understanding)
+            self.assertNotIn("nextQuestionDimension", understanding)
+            review_calls += 1
+            if review_calls == 1:
+                return completion({
+                    "accepted": False,
+                    "issues": [{
+                        "requirementIds": [req2_id],
+                        "kind": "meaning",
+                        "evidenceSpans": [turns[1]["content"]],
+                        "repairInstruction": "Use goal strength without focus.",
+                    }],
+                })
+            if review_calls == 2:
+                return completion({
+                    "accepted": False,
+                    "issues": [{
+                        "requirementIds": [patched_req2_id],
+                        "kind": "meaning",
+                        "evidenceSpans": ["water wall blocking the upper-left area"],
+                        "repairInstruction": "Fix water scope.",
+                    }],
+                })
+            self.assertIn("Requirement review issue lacks exact designer evidence", messages[-1]["content"])
+            self.assertIn("exact verbatim substring of designerTurns", messages[-1]["content"])
+            return completion({"accepted": True, "issues": []})
+
+        stage_context = {
+            "stageSnapshot": self.snapshot,
+            "requirementUserTurns": turns,
+            "binaryChoices": choices,
+            "proposalDiscovery": {
+                "topicId": "t1",
+                "understanding": {"aspect": "gameplay", "sufficient": False, "nextQuestionDimension": "mechanism"},
+                "answers": [],
+            },
+        }
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
+            result = llm._review_proposal_requirements("offline", "offline", stage_context, "r", time.monotonic() + 116)
+        self.assertEqual(len(result["requirements"]), 2)
+        self.assertEqual(tasks, [
+            "revision_requirements",
+            "revision_requirement_review",
+            "revision_requirements_patch",
+            "revision_requirement_review",
+            "revision_requirement_review",
+        ])
+
+    def test_requirement_review_second_semantic_rejection_after_patch_exhausts_without_extra_review(self):
+        from cocreation.domain.design_requirements import validate_requirement_record
+        turns = [
+            {"id": "u1", "content": "I want to make the level easier"},
+            {"id": "u2", "content": "Selected A: Drain the upper-left water pool!"},
+        ]
+        choices = [{
+            "questionId": "q1",
+            "choiceId": "c1",
+            "question": "Which area?",
+            "note": "",
+            "label": "Drain the upper-left water pool!",
+            "letter": "A",
+            "promise": {"kind": "reduce_obstacles", "component": "water", "focus": {"row": 4, "column": 4, "radius": 2}, "corridor": None},
+            "sourceTurnId": "u2",
+            "displayLanguage": "en",
+        }]
+        initial = {
+            "requirements": [
+                {
+                    "component": "gameplay",
+                    "property": "experience",
+                    "relation": "seek",
+                    "strength": "goal",
+                    "entities": [],
+                    "value": None,
+                    "unit": "none",
+                    "priorityEvidenceSpan": "",
+                    "focused": False,
+                    "sourceTurnId": "u1",
+                    "evidenceSpan": "I want to make the level easier",
+                    "statement": "make the level easier",
+                },
+                {
+                    "component": "water",
+                    "property": "count",
+                    "relation": "decrease",
+                    "strength": "preference",
+                    "entities": [],
+                    "value": None,
+                    "unit": "none",
+                    "priorityEvidenceSpan": "",
+                    "focused": True,
+                    "sourceTurnId": "u2",
+                    "evidenceSpan": "Drain the upper-left water pool!",
+                    "statement": "drain upper-left water pool",
+                },
+            ],
+            "automaticBindings": [],
+            "exactTransitions": [],
+        }
+        patched_req2 = dict(initial["requirements"][1], strength="goal", focused=False)
+        patched_doc = {**initial, "requirements": [initial["requirements"][0], patched_req2]}
+        record = validate_requirement_record(initial, turns, self.snapshot)
+        req2_id = record["requirements"][1]["requirementId"]
+        patched_req2_id = validate_requirement_record(patched_doc, turns, self.snapshot)["requirements"][1]["requirementId"]
+        tasks = []
+        review_calls = 0
+
+        async def request(*args, **kwargs):
+            nonlocal review_calls
+            task = kwargs["task"]
+            tasks.append(task)
+            if task == "revision_requirements":
+                return completion(initial)
+            if task == "revision_requirements_patch":
+                spec = json.loads(args[3][-1]["content"])
+                return completion(patch_fixture(spec, patched_doc))
+            review_calls += 1
+            return completion({
+                "accepted": False,
+                "issues": [{
+                    "requirementIds": [req2_id if review_calls == 1 else patched_req2_id],
+                    "kind": "meaning",
+                    "evidenceSpans": [turns[1]["content"]],
+                    "repairInstruction": "Still disagrees semantically.",
+                }],
+            })
+
+        with (
+            llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)),
+            self.assertRaises(llm.LLMServiceError) as caught,
+        ):
+            llm._review_proposal_requirements(
+                "offline",
+                "offline",
+                {"stageSnapshot": self.snapshot, "requirementUserTurns": turns, "binaryChoices": choices},
+                "r",
+                time.monotonic() + 116,
+            )
+        self.assertEqual(caught.exception.code, "REQUIREMENT_INTERPRETATION_INVALID")
+        self.assertEqual(tasks, [
+            "revision_requirements",
+            "revision_requirement_review",
+            "revision_requirements_patch",
+            "revision_requirement_review",
+        ])
+
     def test_candidate_missing_destination_is_patched_then_solved_and_frozen(self):
         strategy = {"effect": "reshape_water", "allowedOperators": ["add_water"], "preserve": ["boxes", "targets", "player", "outer_shell"],
                     "minimumChangedCells": 1, "maximumChangedCells": 2, "metricGoals": [], "requiredTransitions": [],
