@@ -164,6 +164,77 @@ class BinaryProofTests(unittest.TestCase):
         self.assertEqual(axis_err.exception.field, "branch-2")
         self.assertIn("measures length", str(axis_err.exception.__cause__))
 
+    def test_preflight_rejects_incompatible_cumulative_q2_branches_before_search(self):
+        stage_rows = [
+            "  ######### ",
+            " ##.......# ",
+            " #.ps.....##",
+            "##@@@@....t#",
+            "#.@@@@..@@.#",
+            "#...##..@@##",
+            "##..s...@@# ",
+            " #........# ",
+            " #t......## ",
+            " #########  ",
+        ]
+
+        def stage_validate(rows, deadline):
+            llm.validate_ai_edit_diff(stage_rows, rows)
+            return validate_and_solve(rows, deadline=deadline)
+
+        prior_promise = {"kind": "reduce_obstacles", "component": "water", "focus": {"row": 4, "column": 4, "radius": 2}, "corridor": None}
+        q2_topic = {
+            **topic(),
+            "questionCount": 1,
+            "choices": [{"questionId": "q1", "choiceId": "c1", "question": "Which water?", "note": "", "label": "Upper-left water!", "promise": prior_promise}],
+        }
+        q2_step = {
+            "action": "ask",
+            "question": "What else should we open?",
+            "note": "",
+            "initialRequirements": None,
+            "branches": [
+                {
+                    "label": "Drain right water!",
+                    "strategy": {
+                        "effect": "open_route",
+                        "focus": {"row": 6, "column": 9, "radius": 2},
+                        "operators": ["remove_water"],
+                        "preserve": ["outer_shell", "player", "boxes", "targets", "walls"],
+                        "editBudget": 4,
+                        "metricGoals": [],
+                    },
+                    "promise": {"kind": "reduce_obstacles", "component": "water", "focus": {"row": 6, "column": 9, "radius": 2}, "corridor": None},
+                },
+                {
+                    "label": "Remove central walls!",
+                    "strategy": {
+                        "effect": "adjust_internal_walls",
+                        "focus": {"row": 6, "column": 5, "radius": 1},
+                        "operators": ["remove_wall"],
+                        "preserve": ["outer_shell", "player", "boxes", "targets", "water"],
+                        "editBudget": 2,
+                        "metricGoals": [],
+                    },
+                    "promise": {"kind": "reduce_obstacles", "component": "internal_walls", "focus": {"row": 6, "column": 5, "radius": 1}, "corridor": None},
+                },
+            ],
+        }
+        with self.assertRaises(binary.BinaryError) as both_err:
+            binary.preflight(binary.parse_step(copy.deepcopy(q2_step), 1), q2_topic, stage_rows, {}, stage_validate, time.monotonic() + 116)
+        self.assertEqual(both_err.exception.code, "BINARY_CUMULATIVE_STRATEGY_INVALID")
+        self.assertEqual(both_err.exception.field, "branches")
+        self.assertIn("branch-1", both_err.exception.detail)
+        self.assertIn("branch-2", both_err.exception.detail)
+
+        one_fixed = copy.deepcopy(q2_step)
+        one_fixed["branches"][0]["strategy"]["focus"] = None
+        one_fixed["branches"][0]["strategy"]["editBudget"] = 6
+        with self.assertRaises(binary.BinaryError) as single_err:
+            binary.preflight(binary.parse_step(one_fixed, 1), q2_topic, stage_rows, {}, stage_validate, time.monotonic() + 116)
+        self.assertEqual(single_err.exception.code, "BINARY_CUMULATIVE_STRATEGY_INVALID")
+        self.assertEqual(single_err.exception.field, "branch-2")
+
 
 class BinaryWireTests(unittest.TestCase):
     def test_real_client_generation_and_review_formats(self):
@@ -336,6 +407,43 @@ class BinaryWireTests(unittest.TestCase):
         review = json.loads(wire.calls[1]["messages"][1]["content"])
         self.assertEqual(review["step"]["branches"], [])
         self.assertTrue(review["evidence"]["topic"]["selectedFeasibility"]["allSelectedActionsPassed"])
+
+    def test_q2_projection_strips_stale_sufficient_and_allows_plan_recovery_after_preflight_error(self):
+        wire = wire_tests.WireContracts(); wire.setUp()
+        current = topic()
+        current["questionCount"] = 1
+        current["requirements"] = step()["initialRequirements"]
+        current["understanding"] = {"aspect": "gameplay", "sufficient": False, "nextQuestionDimension": "mechanism"}
+        current["choices"] = [{
+            "question": "Which water?", "note": "", "label": "Open left!",
+            "promise": {"kind": "reduce_obstacles", "component": "water", "focus": {"row": 3, "column": 3, "radius": 1}, "corridor": None},
+        }]
+        current["selectedCandidate"] = {"promiseResults": [{"passed": True, "kind": "reduce_obstacles", "before": 2, "after": 1}]}
+        context = {"language": "en", "rows": ROWS, "stageContext": {"stageSnapshot": {"versionId": "v1"}}}
+
+        bad_q2 = step()
+        bad_q2["initialRequirements"] = None
+        bad_q2["branches"][0]["strategy"]["focus"] = {"row": 3, "column": 9, "radius": 1}
+        bad_q2["branches"][0]["promise"]["focus"] = {"row": 3, "column": 9, "radius": 1}
+        bad_q2["branches"][1]["strategy"]["preserve"] = ["outer_shell", "player", "boxes", "targets", "water"]
+        plan_step = {"action": "plan", "question": "", "note": "", "branches": [], "initialRequirements": None}
+
+        def handler(request, number):
+            if number == 1:
+                prompt_topic = json.loads(request["messages"][1]["content"])["topic"]
+                self.assertNotIn("sufficient", prompt_topic["understanding"])
+                self.assertNotIn("nextQuestionDimension", prompt_topic["understanding"])
+                return bad_q2
+            if number == 2:
+                self.assertEqual(request["response_format"]["json_schema"]["name"], "cocreation_binary_discovery")
+                return plan_step
+            return {"accepted": True, "issues": []}
+
+        with wire.provider(handler):
+            result, candidates = binary_model.generate(current, context, validate, None, "binary-q2-recover", time.monotonic() + 116)
+        self.assertEqual(result["action"], "plan")
+        self.assertEqual(candidates, [])
+        self.assertEqual(len(wire.calls), 3)
 
 
 class BinaryHTTPTests(SessionTestCase):

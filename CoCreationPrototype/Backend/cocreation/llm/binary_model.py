@@ -46,6 +46,15 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
     model = svc.config.model
     stage = context["stageContext"]
     projection = {key: topic.get(key) for key in ("initialRequest", "questionCount", "understanding")}
+    if topic.get("choices"):
+        projection["understanding"] = {
+            key: value
+            for key, value in (topic.get("understanding") or {}).items()
+            if key not in {"sufficient", "nextQuestionDimension"}
+        }
+        projection["mapStateNote"] = (
+            "No edits have been applied yet; selectedCandidate is only a hypothetical feasibility proof on the ORIGINAL Stage."
+        )
     projection["selectedChoices"] = [{**{key: choice[key] for key in ("question", "note", "label", "promise")},
         "selectionState": "explicit_interface_choice"} for choice in topic.get("choices", [])]
     if topic.get("selectedCandidate"):
@@ -61,14 +70,15 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
         "interface evidence, not an available option or an unanswered question. Do not ask it again or "
         "reinterpret the click. Implementable cells/amounts are implementation assumptions, not missing preferences. "
         "never ask to fill a quota. plan means the existing request/choices suffice, not that a map "
-        "has been changed. After a branch is selected and allSelectedActionsPassed is true, default "
-        "to plan unless a genuinely unresolved DESIGNER preference prevents faithful delivery. A simple "
-        "request plus a selected area/action usually suffices: do not ask for extra amounts, another area "
-        "or a different design dimension merely because questions remain. "
-        "has been changed. At three questions return plan or blocked, never ask. For ask, provide "
+        "has been changed. When topic.selectedChoices is non-empty and selectedFeasibility.allSelectedActionsPassed is true, "
+        "strongly prefer action='plan' (question='', note='', branches=[], initialRequirements=null). "
+        "A broad wish (e.g. 'make it easier' / '我想让关卡简单一些') plus ONE selected area/obstacle choice is ALREADY "
+        "sufficient to deliver a verified proposal—do NOT ask Q2 about adding a second unrelated obstacle area or extra "
+        "edit unless the designer's original request explicitly required multiple separate changes. "
+        "At three questions return plan or blocked, never ask. For ask, provide "
         "ONE short question, an optional ONE-sentence note explaining the tradeoff, and EXACTLY "
         "two materially different branches. Each label is a clear short action, lightly playful "
-        "when natural (e.g. 少一些水域！/拆掉几堵内墙！/少走几步！); no Markdown, letter prefix or long analysis. "
+        "when natural (e.g. 少一些水域！/拆掉几堵内墙！/打开中央区域！); no Markdown, letter prefix or long analysis. "
         "Question/note/labels must not repeat a full plan. Length is a preference, not a joke quota. "
         "Use location words rather than coordinate inventories when left/right or opening/central already "
         "identifies the choice. The optional note explains ONLY the key tradeoff. "
@@ -84,10 +94,17 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
         "Each branch needs one executable local strategy using the existing fields effect, focus "
         "(null or {row,column,radius:1..3}), operators, preserve, editBudget:1..12, metricGoals:[]. "
         "preserve uses only outer_shell/player/boxes/targets/water/walls/unrelated_areas. "
-        "For remove_water/add_water: preserve=['outer_shell','player','boxes','targets','walls'] (NEVER include 'water'). "
-        "For remove_wall/add_wall: preserve=['outer_shell','player','boxes','targets','water'] (NEVER include 'walls'). "
-        "When editing internal walls or water with a non-null focus, verify that the focus box actually encloses at least one "
-        "editable internal '#' wall (not outer boundary) or '@' water tile; otherwise use focus=null. "
+        "NEVER include 'water' in preserve when strategy.operators uses add_water/remove_water OR when any prior choice in topic.selectedChoices edited water. "
+        "NEVER include 'walls' in preserve when strategy.operators uses add_wall/remove_wall OR when any prior choice edited internal_walls. "
+        "For water-only edits (no prior wall choice): preserve=['outer_shell','player','boxes','targets','walls']. "
+        "For wall-only edits (no prior water choice): preserve=['outer_shell','player','boxes','targets','water']. "
+        "For CUMULATIVE branches combining prior water + new internal_walls (or vice versa): use effect='open_route', "
+        "focus=null, operators=['remove_water','remove_wall'], preserve=['outer_shell','player','boxes','targets']. "
+        "When editing with a non-null focus, verify it encloses editable tiles for EVERY active promise; otherwise use focus=null. "
+        "CRITICAL WHEN topic.selectedChoices IS NON-EMPTY: the Stage has NOT been modified yet. Every Q2/Q3 branch strategy "
+        "runs on the ORIGINAL Stage and MUST realize ALL prior selectedChoices promises PLUS the new branch promise together "
+        "(set strategy.focus=null whenever prior and new choices touch different areas, include ALL needed operators for prior+new choices, "
+        "and never preserve a component edited by any prior choice). "
         "effect open_route uses remove_wall/remove_water; "
         "reshape_water uses add_water/remove_water; adjust_internal_walls uses add_wall/remove_wall. "
         "Internal coordinates are implementation assumptions, not new user requirements. "
@@ -290,7 +307,19 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
             if getattr(error, "field", None) == "review" or attempt == 2:
                 break
             field = getattr(error, "field", "branches")
-            if isinstance(candidate, dict) and set(candidate) <= {"action", "question", "note", "branches", "initialRequirements"}:
+            has_prior_choices = bool(topic.get("choices"))
+            allow_plan_switch = (
+                has_prior_choices
+                and isinstance(candidate, dict)
+                and candidate.get("action") == "ask"
+                and (
+                    field in {"branch-1", "branch-2", "branches"}
+                    or getattr(error, "code", "")
+                    in {"BINARY_CUMULATIVE_STRATEGY_INVALID", "BINARY_PREFLIGHT_NOT_FOUND", "BINARY_CORRIDOR_INVALID"}
+                )
+            )
+            patch = None
+            if not allow_plan_switch and isinstance(candidate, dict) and set(candidate) <= {"action", "question", "note", "branches", "initialRequirements"}:
                 if field in {"branch-1", "branch-2"} and len(candidate.get("branches", [])) == 2:
                     patch = PatchRequest("clarification_question", candidate,
                         [Target(field, ("branches", int(field[-1]) - 1), (dict,))],
@@ -305,9 +334,16 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
                 + str(getattr(error, "code", "BINARY_CANDIDATE_INVALID")) + ". Keep the original permissions and choices. "
                 + ("Validator detail: " + detail_text + ". " if detail_text else "") +
                 "A failed search is not proof that a direction is impossible. Use the same binary schema."})
-            if field in {"branch-1", "branch-2"}:
+            if allow_plan_switch:
+                messages.append({"role": "system", "content": "If the existing request and topic.selectedChoices already suffice to build "
+                    "a verified proposal, prefer returning action='plan', question='', note='', branches=[], initialRequirements=null. "
+                    "Otherwise repair BOTH branches to satisfy ALL prior selectedChoices promises plus the new promise on the ORIGINAL "
+                    "Stage: set strategy.focus=null, include ALL required operators for prior+new choices, and never preserve any "
+                    "component edited by prior or new choices."})
+            elif field in {"branch-1", "branch-2"}:
                 messages.append({"role": "system", "content": "Keep the repaired branch consistent with the frozen question and note "
                     "(keep its intended component/direction when feasible rather than copying the other branch's component). "
+                    "Return ONLY the single branch object {label, strategy, promise} inside valueJson, never the outer {action, question, branches} envelope. "
                     "Check preserve strictly: remove_wall MUST NOT include 'walls'; remove_water MUST NOT include 'water'. "
                     "If widen_corridor failed, switch promise.kind to reduce_obstacles (corridor=null) on the same editable "
                     "component (internal_walls or water) with focus=null or a focus enclosing editable tiles of that component. "

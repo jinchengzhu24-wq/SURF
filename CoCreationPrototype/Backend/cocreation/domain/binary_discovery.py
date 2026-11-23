@@ -218,6 +218,58 @@ def _validate_corridor_baseline(rows, promise, branch_field):
         raise BinaryError("BINARY_CORRIDOR_INVALID", branch_field) from ValueError(message)
 
 
+def _validate_cumulative_strategy(rows, branch, prior_promises, branch_field):
+    strategy = branch["strategy"]
+    operators = set(strategy["operators"])
+    preserve = set(strategy["preserve"])
+    strategy_focus = strategy["focus"]
+    for promise in [*prior_promises, branch["promise"]]:
+        kind = promise["kind"]
+        component = promise["component"]
+        promise_focus = promise["focus"]
+        if kind == "reduce_obstacles":
+            if component == "water" and ("remove_water" not in operators or "water" in preserve):
+                raise BinaryError(
+                    "BINARY_CUMULATIVE_STRATEGY_INVALID",
+                    branch_field,
+                    detail=f"{branch_field}: water reduction requires operator 'remove_water' and must not preserve 'water'.",
+                )
+            if component == "internal_walls" and ("remove_wall" not in operators or "walls" in preserve):
+                raise BinaryError(
+                    "BINARY_CUMULATIVE_STRATEGY_INVALID",
+                    branch_field,
+                    detail=f"{branch_field}: internal_walls reduction requires operator 'remove_wall' and must not preserve 'walls'.",
+                )
+            if component == "obstacles" and not (
+                ("remove_water" in operators and "water" not in preserve)
+                or ("remove_wall" in operators and "walls" not in preserve)
+            ):
+                raise BinaryError(
+                    "BINARY_CUMULATIVE_STRATEGY_INVALID",
+                    branch_field,
+                    detail=f"{branch_field}: obstacle reduction requires an unpreserved remove_water or remove_wall operator.",
+                )
+        elif kind == "reshape_water" and (not {"add_water", "remove_water"}.issubset(operators) or "water" in preserve):
+            raise BinaryError(
+                "BINARY_CUMULATIVE_STRATEGY_INVALID",
+                branch_field,
+                detail=f"{branch_field}: reshape_water requires both add_water and remove_water without preserving 'water'.",
+            )
+        if strategy_focus is not None and kind == "reduce_obstacles":
+            tiles = {"@"} if component == "water" else {"#"} if component == "internal_walls" else {"#", "@"}
+            strategy_cells = {(y, x) for y, x, tile in _cells(rows, strategy_focus) if tile in tiles}
+            promise_cells = {(y, x) for y, x, tile in _cells(rows, promise_focus) if tile in tiles}
+            if not (strategy_cells & promise_cells):
+                raise BinaryError(
+                    "BINARY_CUMULATIVE_STRATEGY_INVALID",
+                    branch_field,
+                    detail=(
+                        f"{branch_field}: strategy.focus does not reach {component} tiles required by "
+                        "prior/current promise; use strategy.focus=null when combining multiple areas."
+                    ),
+                )
+
+
 def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validator=None, budget_seconds=20.0, clock=None):
     """At most twenty seconds total, fair per-branch shares, original base/edit budget."""
     if step["action"] != "ask":
@@ -231,10 +283,32 @@ def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validat
         solve_kwargs["clock"] = clock
     baseline = validate_and_solve(rows, **solve_kwargs)
     prior = [item["promise"] for item in topic.get("choices", [])]
+    static_errors = []
+    for index, branch in enumerate(step["branches"]):
+        branch_field = "branch-" + str(index + 1)
+        try:
+            _validate_corridor_baseline(rows, branch["promise"], branch_field)
+            _validate_cumulative_strategy(rows, branch, prior, branch_field)
+        except BinaryError as error:
+            static_errors.append(error)
+    if len(static_errors) == 1:
+        raise static_errors[0]
+    if len(static_errors) > 1:
+        code = (
+            "BINARY_CUMULATIVE_STRATEGY_INVALID"
+            if any(err.code == "BINARY_CUMULATIVE_STRATEGY_INVALID" for err in static_errors)
+            else static_errors[0].code
+        )
+        details = "; ".join(
+            part
+            for err in static_errors
+            for part in (err.detail, str(err.__cause__) if err.__cause__ else "")
+            if part
+        )[:450]
+        raise BinaryError(code, "branches", detail=details or None)
     caches = []
     for index, branch in enumerate(step["branches"]):
         branch_field = "branch-" + str(index + 1)
-        _validate_corridor_baseline(rows, branch["promise"], branch_field)
         now = monotonic()
         branch_deadline = now + max(0.0, preflight_deadline - now) / (2 - index)
         promises = [*prior, branch["promise"]]
