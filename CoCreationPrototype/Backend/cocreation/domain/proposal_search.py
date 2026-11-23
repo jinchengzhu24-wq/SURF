@@ -62,6 +62,8 @@ EFFECT_OPERATORS = {
     "change_box_order": {"move_box", "move_target", "add_wall", "remove_wall"},
 }
 OPERATOR_COMPONENT = {
+    "add_wall": "walls",
+    "remove_wall": "walls",
     "move_player": "player",
     "move_box": "boxes",
     "move_target": "targets",
@@ -781,10 +783,11 @@ def _generate_primitives(
                 True,
                 _focus_distance(strategy.focus, x, y),
             ))
+    effective_preserved = set(preserved_components or ()) | set(strategy.preserve)
     for operator in strategy.operators:
         if movement_requirement and operator != movement_requirement["operator"]:
             continue
-        if _operator_changes_preserved_component(operator, preserved_components):
+        if _operator_changes_preserved_component(operator, effective_preserved):
             continue
         if operator in {"add_wall", "add_water"}:
             after = "#" if operator == "add_wall" else "@"

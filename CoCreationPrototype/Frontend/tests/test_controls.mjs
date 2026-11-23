@@ -1552,3 +1552,52 @@ test("multiple createWorkbenchApp instances remain isolated without touching glo
     assert.equal(typeof globalThis.window, "undefined");
     assert.equal(typeof globalThis.document, "undefined");
 });
+
+test("binary retry hides stale failure while in flight and distinguishes saved request vs choices", () => {
+    const { app, state, elements } = loadApp();
+    state.session.turns = [];
+    state.session.proposalFlowState = {
+        active: true,
+        interactionMode: "binary_choice",
+        status: "retry_pending",
+        retryable: true,
+        clarificationQuestionCount: 0,
+        retryAction: {
+            kind: "start",
+            baseVersionId: "v1",
+            content: "Make it simpler",
+            requestProposal: true,
+            idempotencyKey: "k1",
+        },
+    };
+    state.chatStatus = "error";
+    state.chatError = { code: "BINARY_SEMANTIC_REJECTED", retryable: true };
+
+    app.renderChatRequestStatus();
+    app.updateControls();
+    assert.match(app.selectedReplyFailure().message, /已保存你的请求/);
+    assert.equal(elements.chatRetryButton.hidden, false);
+    assert.equal(elements.chatRetryButton.disabled, false);
+
+    state.busy = true;
+    state.chatBusy = true;
+    state.chatStatus = "waiting";
+    state.chatBusyVersionId = "v1";
+    app.renderChatRequestStatus();
+    app.updateControls();
+    assert.equal(app.selectedReplyFailure(), null);
+    assert.match(elements.chatControlHint.textContent, /正在准备修改方案/);
+    assert.equal(elements.replyFeedbackIcon.dataset.state, "thinking");
+    assert.equal(elements.chatRetryButton.hidden, true);
+    assert.equal(elements.chatRetryButton.disabled, true);
+
+    state.busy = false;
+    state.chatBusy = false;
+    state.chatStatus = "error";
+    state.session.proposalFlowState.clarificationQuestionCount = 1;
+    app.renderChatRequestStatus();
+    app.updateControls();
+    assert.match(app.selectedReplyFailure().message, /已保存你的选择/);
+    assert.equal(elements.chatRetryButton.hidden, false);
+    assert.equal(elements.chatRetryButton.disabled, false);
+});

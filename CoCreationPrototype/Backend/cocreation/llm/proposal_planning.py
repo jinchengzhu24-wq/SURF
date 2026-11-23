@@ -176,6 +176,27 @@ class HardObjectiveError(ValueError):
             message = f'metric goal {metric} cannot be verified'
         super().__init__(message)
 
+def _visible_interface_choices(choices):
+    """Project clicked buttons without leaking internal search focus/corridor coordinates."""
+    projected = []
+    for item in choices or []:
+        if not isinstance(item, dict):
+            continue
+        promise = item.get('promise') if isinstance(item.get('promise'), dict) else {}
+        entry = {
+            key: item[key]
+            for key in ('questionId', 'choiceId', 'question', 'note', 'label', 'letter', 'sourceTurnId', 'displayLanguage')
+            if key in item
+        }
+        if promise.get('kind') or promise.get('component'):
+            entry['action'] = {
+                key: promise[key]
+                for key in ('kind', 'component')
+                if promise.get(key) is not None
+            }
+        projected.append(entry)
+    return projected
+
 @proposal_phase('requirements', 'requirements', revalidates='requirements')
 def _review_proposal_requirements(api_key, base_url, stage_context, request_id, deadline):
     """Compile one topic's designer language, never assistant map assertions."""
@@ -208,24 +229,36 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         for raw in requirement_model_view(prior)['requirements']:
             if raw.get('evidenceSpan') and raw['evidenceSpan'] in sources.get(raw.get('sourceTurnId'), '') and (raw not in inherited):
                 inherited.append(raw)
-    messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Interpret this single authorized proposal topic into the supplied JSON schema. selectedInterfaceChoices are explicit clicks, not inferred agreement. Cover EACH sourceTurnId with its visible action meaning. Do not import hidden promise focus, coordinates or budgets as user constraints. Concrete button promises receive a separate strict execution check; keep the existing negotiable-goal policy for other goals. Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. Question text is linguistic context only, never evidence of a user requirement or current map fact. The current StageSnapshot is the only map authority. Ignore 'I do not know', 'either is fine' and other noncommittal answers without discarding earlier clear directions. Distinguish entity counts, entity positions, gameplay switching, push order, route length and timing. 'Increase switching between boxes' is gameplay/boxAlternations/increase, never box/count. 'Make the player spend longer' is gameplay/experience/seek, never player/count. 'Interrupt B1 early' is gameplay/timing/early with B1 as the explicit entity. An AI-proposed preference selected by the designer stays a preference or negotiable goal, not a new prohibition, fixed number, coordinate or mandatory route dependency. Clearly expressed directional goals are strength=goal, even if described as must; they may be partly achieved or deferred, but never reversed. Use invariant only for explicit prohibitions, fixed counts, unchanged positions/distribution, or explicitly fixed edit scope. Numeric values must come from user evidence, not B1/T2 labels; null means no number was stated. unit=delta means an explicitly stated change amount; absolute means an explicitly fixed value. Do not invent numeric thresholds. priorityEvidenceSpan is empty unless the user explicitly prioritized that goal; focused=true only for the current clearly named focus. Preserve all clear still-active directions. A later explicit correction can replace an earlier direction for the same property; an unclear reply cannot supersede it. Unspecified entities may be chosen from current snapshot labels within the water/internal-wall editing scope. automaticBindings accepts ONLY existing entity LABELS (P, B1, T1, etc.), never terrain names, cells, zones or invented IDs. It may be empty; terrain-only wishes do not require choosing an entity. editing scope. Record those choices only in automaticBindings, never as explicit requirements or confirmed design memory. Never replace a designer's explicit entity. statements must be short, understandable, and in the response language; avoid new map claims. Do not infer stronger requirements from assistant explanations or unconfirmed DesignContext hypotheses. Use the topic understanding to distinguish goals, edit scope, spatial focus and preservation. Recheck it against original designerTurns: it is a candidate interpretation, not extra evidence. A focus around an entity does not request relocating it. Visual composition is a valid goal without additional transport or gameplay objectives.  exactTransitions is empty unless the designer explicitly specified the exact coordinates and tile change. Never extract exact changes or coordinates from question text."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'answeredQuestions': discovery.get('answers') or [], 'selectedInterfaceChoices': stage_context.get('binaryChoices') or [], 'currentStageSnapshot': snapshot, 'responseLanguage': stage_context.get('responseLanguage', 'en'), 'editableComponents': ['water', 'internal_walls'], 'proposalUnderstanding': discovery.get('understanding') or {}, 'selectedDirection': proposal_options.planning_projection(discovery), 'inheritedVerifiedRequirements': inherited, 'requirementDefinitions': REQUIREMENT_DEFINITIONS, 'inheritanceRule': 'Retain unchanged verified meanings. Only exact later designer correction may supersede related items; recheck complete coverage, including inherited items, against all supplied evidence.'}, ensure_ascii=False)}]
+    visible_choices = _visible_interface_choices(stage_context.get('binaryChoices') or [])
+    messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Interpret this single authorized proposal topic into the supplied JSON schema. selectedInterfaceChoices are explicit clicks, not inferred agreement. Cover EACH sourceTurnId with its visible action meaning. Do not import hidden promise focus, coordinates or budgets as user constraints. Concrete button promises receive a separate strict execution check; keep the existing negotiable-goal policy for other goals. Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. Question text is linguistic context only, never evidence of a user requirement or current map fact. The current StageSnapshot is the only map authority. Ignore 'I do not know', 'either is fine' and other noncommittal answers without discarding earlier clear directions. Distinguish entity counts, entity positions, gameplay switching, push order, route length and timing. 'Increase switching between boxes' is gameplay/boxAlternations/increase, never box/count. 'Make the player spend longer' is gameplay/experience/seek, never player/count. 'Interrupt B1 early' is gameplay/timing/early with B1 as the explicit entity. An AI-proposed preference selected by the designer stays a preference or negotiable goal, not a new prohibition, fixed number, coordinate or mandatory route dependency. Clearly expressed directional goals are strength=goal, even if described as must; they may be partly achieved or deferred, but never reversed. Use invariant only for explicit prohibitions, fixed counts, unchanged positions/distribution, or explicitly fixed edit scope. Numeric values must come from user evidence, not B1/T2 labels; null means no number was stated. unit=delta means an explicitly stated change amount; absolute means an explicitly fixed value. Do not invent numeric thresholds. priorityEvidenceSpan is empty unless the user explicitly prioritized that goal; focused=true only for the current clearly named focus. Preserve all clear still-active directions. A later explicit correction can replace an earlier direction for the same property; an unclear reply cannot supersede it. Unspecified entities may be chosen from current snapshot labels within the water/internal-wall editing scope. automaticBindings accepts ONLY existing entity LABELS (P, B1, T1, etc.), never terrain names, cells, zones or invented IDs. It may be empty; terrain-only wishes do not require choosing an entity. editing scope. Record those choices only in automaticBindings, never as explicit requirements or confirmed design memory. Never replace a designer's explicit entity. statements must be short, understandable, and in the response language; avoid new map claims. Do not infer stronger requirements from assistant explanations or unconfirmed DesignContext hypotheses. Use the topic understanding to distinguish goals, edit scope, spatial focus and preservation. Recheck it against original designerTurns: it is a candidate interpretation, not extra evidence. A focus around an entity does not request relocating it. Visual composition is a valid goal without additional transport or gameplay objectives.  exactTransitions is empty unless the designer explicitly specified the exact coordinates and tile change. Never extract exact changes or coordinates from question text. Interface clicks (selectedInterfaceChoices) NEVER authorize exactTransitions; keep exactTransitions=[] unless the designer typed explicit row/column coordinates in a free-text turn. Preserve inherited verified meanings (such as gameplay/experience for a broad 'make it simpler' turn) alongside the concrete obstacle/route requirement for each clicked choice."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'answeredQuestions': discovery.get('answers') or [], 'selectedInterfaceChoices': visible_choices, 'currentStageSnapshot': snapshot, 'responseLanguage': stage_context.get('responseLanguage', 'en'), 'editableComponents': ['water', 'internal_walls'], 'proposalUnderstanding': discovery.get('understanding') or {}, 'selectedDirection': proposal_options.planning_projection(discovery), 'inheritedVerifiedRequirements': inherited, 'requirementDefinitions': REQUIREMENT_DEFINITIONS, 'inheritanceRule': 'Retain unchanged verified meanings. Only exact later designer correction may supersede related items; recheck complete coverage, including inherited items, against all supplied evidence.'}, ensure_ascii=False)}]
     last_issue = ''
     failure_details = {'task': 'revision_requirements', 'failureStage': 'compilation', 'failureKind': 'timeout'}
     locked = {}
     repair_request = None
     review_repair_request = None
+    retry_review_only = False
     verdict = {}
     payload = {}
+    compile_attempts = 0
+    review_attempts = 0
     attempt = 0
     svc = _current_service()
-    for attempt in range(1, 3):
+    while True:
+        reusing_compilation = review_repair_request is not None or retry_review_only
+        if not reusing_compilation and compile_attempts >= 2:
+            break
+        if reusing_compilation and review_attempts >= 2:
+            break
         remaining = svc.remaining_until(deadline)
         if remaining < 1:
             break
+        if not reusing_compilation:
+            compile_attempts += 1
+        attempt = max(compile_attempts, review_attempts + (1 if reusing_compilation else 0))
         phase = 'compilation'
         repair_issues = []
         try:
-            if review_repair_request is not None:
+            if review_repair_request is not None or retry_review_only:
                 pass
             elif repair_request is not None:
                 patched = asyncio.run(_request_component_patch(api_key, base_url, repair_request, messages, request_id, deadline, 'revision_requirements', max_tokens=3200))
@@ -255,12 +288,14 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 raise
             if any((raw_by_id.get(identity) != raw for identity, raw in locked.items())):
                 raise ValueError('A local repair changed a locked, previously valid requirement.')
-            review_messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Independently verify this interpretation against exact designer evidence. Return JSON accepted and structured issues. Each issue has requirementIds, kind (evidence/meaning/coverage/conflict), exact evidenceSpans from designerTurns, and repairInstruction. Use IDs from the interpretation; coverage issues can have an empty ID list. Identify all related conflicting requirements. Reject misread attributes, directions, units, invented priorities, invented exact transitions, missing prohibitions, or missing still-active goals. Entity mentions are not entity changes. Questions provide linguistic context only; a selected preference never confirms assistant-invented numerical/coordinate/mandatory dependency requirements. Do not judge feasibility here. Only explicit prohibitions/fixed values are invariants; clear directional wishes are negotiable goals. Automatic bindings can fill an unspecified goal but cannot replace an explicit binding. A short answer binds to its supplied question. Reject 'early' interpreted as a fixed push count."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'selectedInterfaceChoices': stage_context.get('binaryChoices') or [], 'answeredQuestions': discovery.get('answers') or [], 'interpretation': record, 'proposalUnderstanding': discovery.get('understanding') or {}}, ensure_ascii=False)}]
+            review_messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Independently verify this interpretation against exact designer evidence. Return JSON accepted and structured issues. Each issue has requirementIds, kind (evidence/meaning/coverage/conflict), exact evidenceSpans from designerTurns, and repairInstruction. Use IDs from the interpretation; coverage issues can have an empty ID list. Identify all related conflicting requirements. Reject misread attributes, directions, units, invented priorities, invented exact transitions, missing prohibitions, or missing still-active goals. Entity mentions are not entity changes. Questions provide linguistic context only; a selected preference never confirms assistant-invented numerical/coordinate/mandatory dependency requirements. Do not judge feasibility here. Only explicit prohibitions/fixed values are invariants; clear directional wishes are negotiable goals. Automatic bindings can fill an unspecified goal but cannot replace an explicit binding. A short answer binds to its supplied question. Reject 'early' interpreted as a fixed push count. Keep each repairInstruction to one concise sentence (under 25 words) and return at most 3 issues."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'selectedInterfaceChoices': visible_choices, 'answeredQuestions': discovery.get('answers') or [], 'interpretation': record, 'proposalUnderstanding': discovery.get('understanding') or {}}, ensure_ascii=False)}]
             review_messages[1]['content'] = json.dumps({**json.loads(review_messages[1]['content']), 'inheritedVerifiedRequirements': inherited, 'requirementDefinitions': REQUIREMENT_DEFINITIONS, 'inheritanceRule': 'Reject loss or reinterpretation of unchanged verified goals. Allow replacement only for exact later designer correction; qualitative appearance is not a numeric distribution claim.'}, ensure_ascii=False)
             remaining = svc.remaining_until(deadline)
-            if remaining <= 0:
-                raise asyncio.TimeoutError()
+            if remaining <= 0 or review_attempts >= 2:
+                break
             phase = 'review'
+            review_attempts += 1
+            attempt = max(compile_attempts, review_attempts)
             trace_proposal('requirements_review', 'requirement_review', 'started', attempt=attempt)
             verdict = {}
             if review_repair_request is not None:
@@ -312,18 +347,33 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             failure_details = {'task': 'revision_requirements', 'failureStage': phase, 'failureKind': failure_kind}
             _log_llm_event('llm_component_rejected', requestId=request_id, task='revision_requirements', attempt=attempt, component='requirements', failureCode='REQUIREMENT_INTERPRETATION_INVALID', issues=last_issue[:600], **{key: value for key, value in failure_details.items() if key != 'task'})
             trace_proposal('requirements_review' if phase == 'review' else 'requirements', 'requirements', 'revalidation_failed' if repair_request is not None or review_repair_request is not None else 'rejected', reason_code(exception), attempt=attempt)
-            if attempt >= 2:
-                trace_repair('requirements', 'exhausted')
-            messages.append({'role': 'user', 'content': json.dumps({'repairIssue': last_issue, 'structuredIssues': repair_issues, 'failureDetails': failure_details, 'lockedRequirements': list(locked.values()), 'instruction': 'Repair only the server-listed targets. Locked requirements must remain unchanged. Recheck complete coverage after merging.'}, ensure_ascii=False)})
             review_repair_request = None
+            retry_review_only = False
+            repair_request = None
             if phase == 'review':
                 reviewed_parts, technical_fields = _requirement_review_components(verdict, record, turns)
                 if technical_fields:
-                    review_repair_request = PatchRequest('requirement_review', reviewed_parts, [Target(field, (field,), (bool,) if field == 'accepted' else (list,)) for field in technical_fields], {'compiled_requirements': record, 'snapshot': snapshot, **{f"user:{turn['id']}": turn for turn in turns}})
+                    if reviewed_parts:
+                        review_repair_request = PatchRequest('requirement_review', reviewed_parts, [Target(field, (field,), (bool,) if field == 'accepted' else (list,)) for field in technical_fields], {'compiled_requirements': record, 'snapshot': snapshot, **{f"user:{turn['id']}": turn for turn in turns}})
+                    else:
+                        retry_review_only = True
             if review_repair_request is not None and failure_details['failureKind'] == 'interpretation':
                 failure_details['failureKind'] = 'review_validation'
-            if review_repair_request is None:
-                repair_request = _requirements_patch_request(payload, locked, turns, snapshot)
+            next_reuses_compilation = review_repair_request is not None or retry_review_only
+            exhausted = (
+                (phase == 'review' and review_attempts >= 2)
+                or (next_reuses_compilation and review_attempts >= 2)
+                or (not next_reuses_compilation and compile_attempts >= 2)
+            )
+            if exhausted:
+                trace_repair('requirements', 'exhausted')
+                break
+            if not next_reuses_compilation:
+                if phase == 'compilation' and (failure_kind in {'timeout', 'truncated_json', 'invalid_json'} or not isinstance(payload, dict) or not payload):
+                    repair_request = None
+                else:
+                    messages.append({'role': 'user', 'content': json.dumps({'repairIssue': last_issue, 'structuredIssues': repair_issues, 'failureDetails': failure_details, 'lockedRequirements': list(locked.values()), 'instruction': 'Repair only the server-listed targets. Locked requirements must remain unchanged. Recheck complete coverage after merging.'}, ensure_ascii=False)})
+                    repair_request = _requirements_patch_request(payload, locked, turns, snapshot)
     error = LLMServiceError('REQUIREMENT_INTERPRETATION_INVALID', 'The design requirements could not be interpreted reliably. Retry this message.', request_id, True, attempt, 502)
     error.details = failure_details
     raise error

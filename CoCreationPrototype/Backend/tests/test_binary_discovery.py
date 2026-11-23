@@ -115,6 +115,55 @@ class BinaryProofTests(unittest.TestCase):
         valid["requirements"][0]["value"] = 3
         with self.assertRaises(ValueError): binary.require_choice_coverage(valid, [choice])
 
+    def test_preflight_rejects_wall_or_lengthwise_widen_corridor_before_search(self):
+        stage_rows = [
+            "  ######### ",
+            "  #....s.t# ",
+            "  #....##.##",
+            " ##@@@@#...#",
+            " #.@@@@#...#",
+            " #.@@@@...##",
+            "##.@@@@p..# ",
+            "#......s..# ",
+            "##.t.....## ",
+            " #########  ",
+        ]
+
+        def stage_validate(rows, deadline):
+            llm.validate_ai_edit_diff(stage_rows, rows)
+            return validate_and_solve(rows, deadline=deadline)
+
+        wall_step = step()
+        wall_step["branches"][1]["strategy"] = {
+            "effect": "open_route",
+            "focus": {"row": 3, "column": 8, "radius": 1},
+            "operators": ["remove_wall"],
+            "preserve": ["outer_shell", "player", "boxes", "targets", "water"],
+            "editBudget": 2,
+            "metricGoals": [],
+        }
+        wall_step["branches"][1]["promise"] = {
+            "kind": "widen_corridor",
+            "component": "internal_walls",
+            "focus": {"row": 3, "column": 8, "radius": 1},
+            "corridor": {"row": 3, "column": 9, "axis": "horizontal"},
+        }
+        with self.assertRaises(binary.BinaryError) as wall_err:
+            binary.preflight(binary.parse_step(wall_step, 0), topic(), stage_rows, {}, stage_validate, time.monotonic() + 116)
+        self.assertEqual(wall_err.exception.code, "BINARY_CORRIDOR_INVALID")
+        self.assertEqual(wall_err.exception.field, "branch-2")
+        self.assertIn("not a walkable floor cell", str(wall_err.exception.__cause__))
+
+        axis_step = copy.deepcopy(wall_step)
+        axis_step["branches"][1]["strategy"]["focus"] = {"row": 6, "column": 8, "radius": 2}
+        axis_step["branches"][1]["promise"]["focus"] = {"row": 6, "column": 8, "radius": 2}
+        axis_step["branches"][1]["promise"]["corridor"] = {"row": 6, "column": 8, "axis": "vertical"}
+        with self.assertRaises(binary.BinaryError) as axis_err:
+            binary.preflight(binary.parse_step(axis_step, 0), topic(), stage_rows, {}, stage_validate, time.monotonic() + 116)
+        self.assertEqual(axis_err.exception.code, "BINARY_CORRIDOR_INVALID")
+        self.assertEqual(axis_err.exception.field, "branch-2")
+        self.assertIn("measures length", str(axis_err.exception.__cause__))
+
 
 class BinaryWireTests(unittest.TestCase):
     def test_real_client_generation_and_review_formats(self):
@@ -152,11 +201,110 @@ class BinaryWireTests(unittest.TestCase):
     def test_true_semantic_rejection_cannot_be_repaired_into_acceptance(self):
         wire = wire_tests.WireContracts(); wire.setUp()
         context = {"language": "en", "rows": ROWS, "stageContext": {"stageSnapshot": {"versionId": "v1"}}}
-        with wire.provider(lambda call, number: step() if number == 1 else {"accepted": False, "issues": ["Meaning differs"]}):
-            with self.assertRaises(llm.LLMServiceError) as caught:
-                binary_model.generate(topic(), context, validate, None, "binary-reject", time.monotonic() + 116)
+        from cocreation.domain.proposal_diagnostics import CURRENT_PROPOSAL_DIAGNOSTIC, ProposalDiagnostic
+        diag = ProposalDiagnostic({"requestId": "binary-reject"})
+        token = CURRENT_PROPOSAL_DIAGNOSTIC.set(diag)
+        try:
+            with wire.provider(lambda call, number: step() if number == 1 else {"accepted": False, "issues": ["LABEL_PROMISE_MISMATCH", "BAD_WITH_1_DIGIT"]}):
+                with self.assertRaises(llm.LLMServiceError) as caught:
+                    binary_model.generate(topic(), context, validate, None, "binary-reject", time.monotonic() + 116)
+        finally:
+            CURRENT_PROPOSAL_DIAGNOSTIC.reset(token)
         self.assertEqual(caught.exception.code, "BINARY_SEMANTIC_REJECTED")
+        self.assertEqual(caught.exception.details.get("issues"), ["LABEL_PROMISE_MISMATCH", "BAD_WITH_1_DIGIT"])
         self.assertEqual(len(wire.calls), 2)
+        review_steps = [s for s in diag.snapshot()["steps"] if s["stage"] == "binary_review"]
+        self.assertEqual(len(review_steps), 1)
+        self.assertEqual(review_steps[0]["status"], "rejected")
+        self.assertEqual(review_steps[0]["issueCount"], 2)
+        self.assertEqual(review_steps[0]["issues"], [{"fieldPath": "review", "reasonCode": "LABEL_PROMISE_MISMATCH", "sourceKind": "server"}])
+
+    def test_branch_patch_receives_consistency_guidance_after_corridor_error(self):
+        wire = wire_tests.WireContracts(); wire.setUp()
+        from patch_fixtures import patch_fixture
+        context = {"language": "en", "rows": ROWS, "stageContext": {"stageSnapshot": {"versionId": "v1"}}}
+        patch_messages = []
+
+        def handler(request, number):
+            if number == 1:
+                bad = step()
+                bad["branches"][1]["promise"] = {
+                    "kind": "widen_corridor",
+                    "component": "internal_walls",
+                    "focus": {"row": 1, "column": 1, "radius": 1},
+                    "corridor": {"row": 1, "column": 1, "axis": "horizontal"},
+                }
+                return bad
+            if number == 2:
+                patch_messages.extend(request["messages"])
+                specification = json.loads(request["messages"][-1]["content"])
+                self.assertEqual(specification["targets"], ["branch-2"])
+                return patch_fixture(specification, step())
+            return {"accepted": True, "issues": []}
+
+        with wire.provider(handler):
+            result, _ = binary_model.generate(topic(), context, validate, None, "binary-corridor-patch", time.monotonic() + 116)
+        self.assertEqual(result["action"], "ask")
+        self.assertEqual(len(wire.calls), 3)
+        system_prompt_text = "\n".join(m["content"] for m in patch_messages if m["role"] == "system")
+        self.assertIn("BINARY_CORRIDOR_INVALID", system_prompt_text)
+        self.assertIn("not a walkable floor cell", system_prompt_text)
+        self.assertIn("Keep the repaired branch consistent with the frozen question and note", system_prompt_text)
+
+    def test_review_empty_or_truncated_verdict_retries_full_review_without_empty_patch(self):
+        wire = wire_tests.WireContracts(); wire.setUp()
+        context = {"language": "en", "rows": ROWS, "stageContext": {"stageSnapshot": {"versionId": "v1"}}}
+
+        def handler(request, number):
+            if number == 1:
+                return step()
+            if number == 2:
+                return ({"accepted": True}, "length")
+            self.assertEqual(request["response_format"]["json_schema"]["name"], "cocreation_binary_review")
+            return {"accepted": True, "issues": []}
+
+        with wire.provider(handler):
+            result, _ = binary_model.generate(topic(), context, validate, None, "binary-review-retry", time.monotonic() + 116)
+        self.assertEqual(result["action"], "ask")
+        self.assertEqual(len(wire.calls), 3)
+
+    def test_review_partial_verdict_repairs_missing_field_with_component_patch(self):
+        wire = wire_tests.WireContracts(); wire.setUp()
+        from patch_fixtures import patch_fixture
+        context = {"language": "en", "rows": ROWS, "stageContext": {"stageSnapshot": {"versionId": "v1"}}}
+
+        def handler(request, number):
+            if number == 1:
+                return step()
+            if number == 2:
+                return ({"accepted": True}, "stop")
+            self.assertEqual(request["response_format"]["json_schema"]["name"], "cocreation_component_patch")
+            specification = json.loads(request["messages"][-1]["content"])
+            self.assertEqual(specification["targets"], ["issues"])
+            return patch_fixture(specification, {"accepted": True, "issues": []})
+
+        with wire.provider(handler):
+            result, _ = binary_model.generate(topic(), context, validate, None, "binary-review-patch", time.monotonic() + 116)
+        self.assertEqual(result["action"], "ask")
+        self.assertEqual(len(wire.calls), 3)
+
+    def test_truncated_binary_response_retries_full_generation_without_unbound_field(self):
+        wire = wire_tests.WireContracts(); wire.setUp()
+        context = {"language": "en", "rows": ROWS, "stageContext": {"stageSnapshot": {"versionId": "v1"}}}
+
+        def handler(request, number):
+            if number == 1:
+                return (step(), "length")
+            if number == 2:
+                self.assertEqual(request["response_format"]["json_schema"]["name"], "cocreation_binary_discovery")
+                return step()
+            self.assertEqual(request["response_format"]["json_schema"]["name"], "cocreation_binary_review")
+            return {"accepted": True, "issues": []}
+
+        with wire.provider(handler):
+            result, _ = binary_model.generate(topic(), context, validate, None, "binary-truncated-retry", time.monotonic() + 116)
+        self.assertEqual(result["action"], "ask")
+        self.assertEqual(len(wire.calls), 3)
 
     def test_translation_preserves_whole_group_and_ids(self):
         group = {"questionId": "q", "topicId": "topic", "baseVersionId": "v", "question": "Which side?", "note": "",
@@ -265,6 +413,10 @@ class BinaryHTTPTests(SessionTestCase):
         state = self.start(); payload = self.choice(state)
         def planner(**kwargs):
             stage = kwargs["stage_context"]
+            cached = stage.get("verifiedRequirementCache") or []
+            self.assertEqual(len(cached), 1)
+            self.assertEqual(cached[0]["baseVersionId"], self.version)
+            self.assertEqual(cached[0]["record"].get("interpretationVersion"), 2)
             with self.services.connect() as db:
                 current = binary.current_topic(db, self.session_id, self.version)
             cache = current["selectedCandidate"]

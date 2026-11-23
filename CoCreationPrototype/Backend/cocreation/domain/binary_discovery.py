@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import re
 import time
 
 from cocreation.domain.design_requirements import requirement_response_schema
@@ -16,8 +17,8 @@ ACTIVE = {"clarifying", "planning", "retry_pending", "revision_needed"}
 
 
 class BinaryError(ValueError):
-    def __init__(self, code, field="branches", retryable=True):
-        self.code, self.field, self.retryable = code, field, retryable
+    def __init__(self, code, field="branches", retryable=True, detail=None):
+        self.code, self.field, self.retryable, self.detail = code, field, retryable, detail
         super().__init__(code)
 
 
@@ -190,6 +191,33 @@ def check_promises(base, candidate, promises, baseline=None, validation=None):
     return outcomes
 
 
+def _validate_corridor_baseline(rows, promise, branch_field):
+    if promise.get("kind") != "widen_corridor":
+        return
+    c = promise["corridor"]
+    row, col, axis = c["row"], c["column"], c["axis"]
+    tile = rows[row - 1][col - 1]
+    if tile not in WALKABLE_TILES:
+        raise BinaryError("BINARY_CORRIDOR_INVALID", branch_field) from ValueError(
+            f"corridor ({row},{col}) is {tile!r}, not a walkable floor cell; pick a walkable cell inside the corridor or use reduce_obstacles."
+        )
+    before = _span(rows, row, col, axis)
+    other_axis = "horizontal" if axis == "vertical" else "vertical"
+    along = _span(rows, row, col, other_axis)
+    if not (before > 0 and along >= 3 and before < along):
+        if before >= 3 and along < before:
+            message = (
+                f"corridor ({row},{col}) axis={axis!r} measures length {before} instead of narrow width {along}; "
+                f"use axis={other_axis!r} across the width, or use reduce_obstacles."
+            )
+        else:
+            message = (
+                f"corridor ({row},{col}) is not a narrow corridor (span({axis})={before}, perpendicular={along}); "
+                "pick a narrow walkable corridor cell or use reduce_obstacles."
+            )
+        raise BinaryError("BINARY_CORRIDOR_INVALID", branch_field) from ValueError(message)
+
+
 def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validator=None, budget_seconds=20.0, clock=None):
     """At most twenty seconds total, fair per-branch shares, original base/edit budget."""
     if step["action"] != "ask":
@@ -205,6 +233,8 @@ def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validat
     prior = [item["promise"] for item in topic.get("choices", [])]
     caches = []
     for index, branch in enumerate(step["branches"]):
+        branch_field = "branch-" + str(index + 1)
+        _validate_corridor_baseline(rows, branch["promise"], branch_field)
         now = monotonic()
         branch_deadline = now + max(0.0, preflight_deadline - now) / (2 - index)
         promises = [*prior, branch["promise"]]
@@ -239,7 +269,14 @@ def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validat
                 found = search_revision_plan(rows, plan, validate, **search_kwargs)
             except ValueError as error:
                 code = "BINARY_PREFLIGHT_BUDGET" if monotonic() >= branch_deadline else "BINARY_PREFLIGHT_NOT_FOUND"
-                raise BinaryError(code, "branch-" + str(index + 1)) from error
+                reasons = (getattr(error, "diagnostics", None) or {}).get("failureReasons") or {}
+                safe_reasons = [
+                    f"{key}={reasons[key]}"
+                    for key in sorted(reasons)
+                    if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(key)) and isinstance(reasons[key], int)
+                ][:5]
+                detail = ("search failure reasons: " + ", ".join(safe_reasons)) if safe_reasons else None
+                raise BinaryError(code, branch_field, detail=detail) from error
             result = (list(found.rows), found.validation)
         candidate, validation = result
         caches.append({"rows": list(candidate), "strategy": branch["strategy"], "promise": branch["promise"],

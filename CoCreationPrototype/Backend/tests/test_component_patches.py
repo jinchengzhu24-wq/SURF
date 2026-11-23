@@ -227,6 +227,124 @@ class ComponentIntegrationTests(unittest.TestCase):
         self.assertEqual(len(result["requirements"]), 1)
         self.assertEqual(tasks, ["revision_requirements", "revision_requirement_review", "revision_requirement_review_patch"])
 
+    def test_requirement_review_timeout_retries_full_review_without_empty_patch(self):
+        from test_reply_reliability import requirement, TURNS
+        raw = {"requirements": [requirement()], "automaticBindings": [], "exactTransitions": []}
+        tasks = []
+        review_calls = 0
+
+        async def request(*args, **kwargs):
+            nonlocal review_calls
+            tasks.append(kwargs["task"])
+            if kwargs["task"] == "revision_requirements":
+                return completion(raw)
+            if kwargs["task"] == "revision_requirement_review":
+                review_calls += 1
+                if review_calls == 1:
+                    raise asyncio.TimeoutError()
+                return completion({"accepted": True, "issues": []})
+            raise AssertionError(f"Unexpected task after empty review verdict: {kwargs['task']}")
+
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
+            result = llm._review_proposal_requirements("offline", "offline",
+                {"stageSnapshot": self.snapshot, "requirementUserTurns": TURNS}, "r", time.monotonic() + 116)
+        self.assertEqual(len(result["requirements"]), 1)
+        self.assertEqual(tasks, ["revision_requirements", "revision_requirement_review", "revision_requirement_review"])
+
+    def test_requirement_compilation_timeout_retries_full_compilation_without_empty_patch(self):
+        from test_reply_reliability import requirement, TURNS
+        raw = {"requirements": [requirement()], "automaticBindings": [], "exactTransitions": []}
+        tasks = []
+        compile_calls = 0
+
+        async def request(*args, **kwargs):
+            nonlocal compile_calls
+            tasks.append(kwargs["task"])
+            if kwargs["task"] == "revision_requirements":
+                compile_calls += 1
+                if compile_calls == 1:
+                    raise asyncio.TimeoutError()
+                return completion(raw)
+            if kwargs["task"] == "revision_requirement_review":
+                return completion({"accepted": True, "issues": []})
+            raise AssertionError(f"Unexpected task after empty compilation: {kwargs['task']}")
+
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
+            result = llm._review_proposal_requirements("offline", "offline",
+                {"stageSnapshot": self.snapshot, "requirementUserTurns": TURNS}, "r", time.monotonic() + 116)
+        self.assertEqual(len(result["requirements"]), 1)
+        self.assertEqual(tasks, ["revision_requirements", "revision_requirements", "revision_requirement_review"])
+
+    def test_requirement_review_gets_second_attempt_after_compilation_patch_and_strips_hidden_focus(self):
+        from test_reply_reliability import requirement, TURNS
+        choice_turn = {"id": "u2", "content": "Selected A: Drain the center water!"}
+        turns = [TURNS[0], choice_turn]
+        choices = [{
+            "questionId": "q1",
+            "choiceId": "c1",
+            "question": "Which area?",
+            "note": "",
+            "label": "Drain the center water!",
+            "letter": "A",
+            "promise": {"kind": "reduce_obstacles", "component": "water", "focus": {"row": 6, "column": 5, "radius": 2}, "corridor": None},
+            "sourceTurnId": "u2",
+            "displayLanguage": "en",
+        }]
+        bad_initial = {
+            "requirements": [
+                requirement(0),
+                {
+                    "component": "water",
+                    "property": "count",
+                    "relation": "decrease",
+                    "strength": "goal",
+                    "entities": [],
+                    "value": None,
+                    "unit": "none",
+                    "priorityEvidenceSpan": "",
+                    "focused": True,
+                    "sourceTurnId": "u2",
+                    "evidenceSpan": choice_turn["content"],
+                    "statement": "Reduce water in the center",
+                },
+            ],
+            "automaticBindings": [],
+            "exactTransitions": [{"row": 6, "column": 5, "from": "@", "to": ".", "sourceTurnId": "u2", "evidenceSpan": choice_turn["content"]}],
+        }
+        tasks = []
+        review_calls = 0
+
+        async def request(*args, **kwargs):
+            nonlocal review_calls
+            tasks.append(kwargs["task"])
+            messages = args[3]
+            if kwargs["task"] == "revision_requirements":
+                user_payload = json.loads(messages[1]["content"])
+                self.assertNotIn("focus", json.dumps(user_payload["selectedInterfaceChoices"]))
+                self.assertNotIn("corridor", json.dumps(user_payload["selectedInterfaceChoices"]))
+                self.assertEqual(user_payload["selectedInterfaceChoices"][0]["action"], {"kind": "reduce_obstacles", "component": "water"})
+                return completion(bad_initial)
+            if kwargs["task"] == "revision_requirements_patch":
+                spec = json.loads(messages[-1]["content"])
+                return completion(patch_fixture(spec, {"exactTransitions": [], "additionalRequirements": []}))
+            user_payload = json.loads(messages[1]["content"])
+            self.assertNotIn("focus", json.dumps(user_payload["selectedInterfaceChoices"]))
+            review_calls += 1
+            if review_calls == 1:
+                raise asyncio.TimeoutError()
+            return completion({"accepted": True, "issues": []})
+
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
+            result = llm._review_proposal_requirements(
+                "offline",
+                "offline",
+                {"stageSnapshot": self.snapshot, "requirementUserTurns": turns, "binaryChoices": choices},
+                "r",
+                time.monotonic() + 116,
+            )
+        self.assertEqual(len(result["requirements"]), 2)
+        self.assertEqual(tasks, ["revision_requirements", "revision_requirements_patch", "revision_requirement_review", "revision_requirement_review"])
+
     def test_candidate_missing_destination_is_patched_then_solved_and_frozen(self):
         strategy = {"effect": "reshape_water", "allowedOperators": ["add_water"], "preserve": ["boxes", "targets", "player", "outer_shell"],
                     "minimumChangedCells": 1, "maximumChangedCells": 2, "metricGoals": [], "requiredTransitions": [],

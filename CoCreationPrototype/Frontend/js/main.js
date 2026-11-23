@@ -633,10 +633,24 @@ export function createWorkbenchApp(deps = {}) {
     }
 
     function selectedReplyFailure() {
+        if (state.chatStatus === "waiting" && state.chatBusy && state.chatBusyVersionId === state.selectedVersionId) {
+            return null;
+        }
         if (binaryFlowActive() && (state.session.proposalFlowState.retryable || state.pendingBinary && state.chatStatus === "error")) {
-            return { error: state.chatError, message: state.language === "zh-CN"
-                ? "本次方案尚未完成，已保存你的选择。可以重试或取消。"
-                : "Your choices are saved. Retry or cancel this proposal.", retryAction: retryBinaryProposal };
+            const hasChoices = (state.session?.proposalFlowState?.clarificationQuestionCount || 0) > 0
+                || Boolean(state.session?.proposalFlowState?.pendingQuestion?.selectedChoiceId)
+                || state.pendingBinary?.kind === "choice";
+            return {
+                error: state.chatError,
+                message: state.language === "zh-CN"
+                    ? (hasChoices
+                        ? "本次方案尚未完成，已保存你的选择。可以重试或取消。"
+                        : "本次方案尚未完成，已保存你的请求。可以重试或取消。")
+                    : (hasChoices
+                        ? "Your choices are saved. Retry or cancel this proposal."
+                        : "Your proposal request is saved. Retry or cancel this proposal."),
+                retryAction: retryBinaryProposal,
+            };
         }
         if (canEditSelected() && state.chatStatus === "error"
             && (!state.pendingMessage || state.pendingMessage.baseVersionId === state.selectedVersionId)) {
@@ -674,6 +688,7 @@ export function createWorkbenchApp(deps = {}) {
         elements.chatRequestStatus.hidden = !message;
         elements.chatRequestStatus.className = `chat-request-status composer-feedback${failure?.error ? " error" : ""}`;
         elements.chatRetryButton.hidden = !failure?.retryAction;
+        elements.chatRetryButton.disabled = state.busy || !failure?.retryAction;
         elements.chatRetryButton.textContent = t("retry");
         renderTechnicalDetails(elements.chatTechnicalDetails, failure?.error || null);
     }

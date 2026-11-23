@@ -377,6 +377,41 @@ class ProposalSearchTests(unittest.TestCase):
         self.assertTrue(raised.exception.diagnostics["deadlineReached"])
         self.assertEqual(raised.exception.diagnostics["constructedCandidates"], 0)
 
+    def test_preserve_walls_blocks_wall_editing_operators(self):
+        for operator, effect in (("remove_wall", "open_route"), ("add_wall", "narrow_route")):
+            with self.subTest(operator=operator):
+                with self.assertRaisesRegex(RevisionPlanError, "preserves every component"):
+                    parse_revision_plan({
+                        "strategies": [{
+                            "effect": effect,
+                            "focus": None,
+                            "operators": [operator],
+                            "preserve": ["outer_shell", "player", "boxes", "targets", "walls"],
+                            "editBudget": 2,
+                            "metricGoals": [],
+                        }]
+                    })
+
+        mixed = parse_revision_plan({
+            "strategies": [{
+                "effect": "open_route",
+                "focus": None,
+                "operators": ["remove_water", "remove_wall"],
+                "preserve": ["outer_shell", "player", "boxes", "targets", "walls", "unrelated_areas"],
+                "editBudget": 2,
+                "metricGoals": [],
+            }]
+        })
+        self.assertEqual(mixed.strategies[0].operators, ("remove_water",))
+        rows_with_both = [*BASE_ROWS[:2], "#.@.#......#", *BASE_ROWS[3:]]
+        result = search_revision_plan(
+            rows_with_both,
+            mixed,
+            validate_and_solve,
+            baseline_metrics=validate_and_solve(rows_with_both).as_dict(),
+        )
+        self.assertEqual(result.operators, ("remove_water",))
+
 
 if __name__ == "__main__":
     unittest.main()

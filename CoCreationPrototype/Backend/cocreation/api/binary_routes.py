@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from cocreation.domain import binary_discovery as binary
 from cocreation.domain.design_requirements import (
+    INTERPRETATION_VERSION,
     evaluate_requirements,
     preflight_requirements,
     protected_change_requested,
@@ -559,6 +560,13 @@ def _finalize(services: CoCreationServices, topic, context, validator, request, 
     stage.setdefault("_reliabilityState", {})
     stage["binaryChoices"] = topic["choices"]
     stage["binaryPromises"] = [c["promise"] for c in topic["choices"]]
+    if isinstance(topic.get("requirements"), dict):
+        cached_initial = dict(topic["requirements"])
+        cached_initial.setdefault("interpretationVersion", INTERPRETATION_VERSION)
+        stage["verifiedRequirementCache"] = [
+            *(stage.get("verifiedRequirementCache") or []),
+            {"baseVersionId": topic["versionId"], "record": cached_initial},
+        ]
     try:
         execution = services.llm.generate_revision_search_proposal_sync(
             conversation=[{"role": "user", "content": t["content"]} for t in topic["userTurns"]],

@@ -6,6 +6,7 @@ import re
 
 import cocreation.domain.binary_discovery as binary
 from cocreation.domain.design_requirements import REQUIREMENT_SEMANTICS, validate_requirement_record
+from cocreation.domain.proposal_diagnostics import trace_proposal
 from cocreation.domain.proposal_search import ProposalSearchExhausted
 from cocreation.reliability.component_patches import PatchRequest, Target
 from cocreation.reliability.reply_reliability import parse_json_object
@@ -67,7 +68,7 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
         "has been changed. At three questions return plan or blocked, never ask. For ask, provide "
         "ONE short question, an optional ONE-sentence note explaining the tradeoff, and EXACTLY "
         "two materially different branches. Each label is a clear short action, lightly playful "
-        "when natural (e.g. 少一些障碍！/通道宽一点！); no Markdown, letter prefix or long analysis. "
+        "when natural (e.g. 少一些水域！/拆掉几堵内墙！/少走几步！); no Markdown, letter prefix or long analysis. "
         "Question/note/labels must not repeat a full plan. Length is a preference, not a joke quota. "
         "Use location words rather than coordinate inventories when left/right or opening/central already "
         "identifies the choice. The optional note explains ONLY the key tradeoff. "
@@ -82,8 +83,12 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
         "Use the current StageSnapshot as the only map authority, never invent play evidence. "
         "Each branch needs one executable local strategy using the existing fields effect, focus "
         "(null or {row,column,radius:1..3}), operators, preserve, editBudget:1..12, metricGoals:[]. "
-        "preserve uses only outer_shell/player/boxes/targets/water/walls/unrelated_areas; never preserve "
-        "water while requesting its removal. effect open_route uses remove_wall/remove_water; "
+        "preserve uses only outer_shell/player/boxes/targets/water/walls/unrelated_areas. "
+        "For remove_water/add_water: preserve=['outer_shell','player','boxes','targets','walls'] (NEVER include 'water'). "
+        "For remove_wall/add_wall: preserve=['outer_shell','player','boxes','targets','water'] (NEVER include 'walls'). "
+        "When editing internal walls or water with a non-null focus, verify that the focus box actually encloses at least one "
+        "editable internal '#' wall (not outer boundary) or '@' water tile; otherwise use focus=null. "
+        "effect open_route uses remove_wall/remove_water; "
         "reshape_water uses add_water/remove_water; adjust_internal_walls uses add_wall/remove_wall. "
         "Internal coordinates are implementation assumptions, not new user requirements. "
         "Every later strategy must permit the CUMULATIVE patch from the ORIGINAL Stage: use focus=null "
@@ -95,6 +100,13 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
         "widen_corridor (strictly wider WALKABLE cross-section at an existing narrow corridor; give "
         "corridor={row,column,axis:horizontal|vertical} across its WIDTH); shorter_solution (strictly "
         "fewer BFS minimum moves); reshape_water (different water positions with unchanged count). "
+        "DEFAULT to reduce_obstacles (component=water with operators=['remove_water'], component=internal_walls with "
+        "operators=['remove_wall'], or component=obstacles) whenever a branch removes water or internal walls to open space "
+        "or ease a passage; use focus=null unless a specific radius clearly encloses editable tiles of that component. "
+        "Avoid widen_corridor unless the designer explicitly asks to widen one specific narrow corridor AND you verify a walkable "
+        "cell ('.','p','s','t', NEVER '#' or '@') whose narrow width (horizontal axis for a vertical corridor, vertical axis "
+        "for a horizontal corridor; width < perpendicular length >=3) is directly bordered on that same row/column by an "
+        "editable tile allowed by operators and inside focus. "
         "promise={kind,component:water|internal_walls|obstacles,focus,corridor}; corridor is null except "
         "for widening. Do not promise aesthetic quality, player difficulty, compulsory routes or "
         "guaranteed experience. Such effects are tentative, while the concrete action must be testable. "
@@ -114,7 +126,8 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
         "For 'make it simpler', use component=gameplay/property=experience/relation=seek/strength=goal. "
         "For 'less water', use component=water/property=count/relation=decrease/strength=goal. "
         "Without a stated number use value=null, unit=none, priorityEvidenceSpan='', entities=[] unless "
-        "the designer named a fixed entity. sourceTurnId is the EXACT supplied designer turn id. "
+        "the designer named a fixed entity. Set priorityEvidenceSpan='' unless the designer explicitly prioritized "
+        "one goal over another (e.g. 'most importantly'/'优先'). sourceTurnId is the EXACT supplied designer turn id. "
         "When verifiedInitialRequirements exists, initialRequirements must be null and that record stays locked. "
         "The independent reviewer will verify requirement coverage and meanings together with the branches. " + REQUIREMENT_SEMANTICS)
     system += (" EXACT JSON PROTOCOL, also when the provider falls back to json_object: root contains ONLY "
@@ -175,37 +188,44 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
                         for x, (a, b) in enumerate(zip(left, right)) if a != b]}
                     for cache in caches]}
             review_messages = [{"role": "system", "content": (
-                "Independently review binary discovery against exact designer evidence and selected choices. "
-                "Return accepted:boolean and issues:string[]. Use short issue CODES only, no analysis or rewritten prose. "
-                "For action=ask, verify one new unresolved preference; both labels must describe their actual different strategies and validated diffs, "
-                "and every promise is visible in the label/note. Reject hidden permissions, goals, quantities, "
-                "locks, invented map facts, unsupported guarantees or previously settled questions. "
-                "Only water/internal walls may change; referents never authorize protected edits. "
-                "Implementation coordinates/budgets are hypothetical choices, not new user constraints. "
-                "plan is valid only when existing evidence suffices; blocked must not claim infeasibility "
-                "from missing evidence. Length, humor and sentence counts are advisory, not rejection reasons. "
-                "Preflight diff facts are hypothetical validated candidates, never the current map. "
-                "Do not rewrite the candidate or reinterpret a button click.")},
+                "Independently review this binary discovery step against exact initialDesignerTurns and topic.selectedChoices. "
+                "Return JSON {accepted:boolean, issues:string[]} using ONLY short uppercase issue CODES from this list when a concrete violation exists, "
+                "otherwise return accepted=true and issues=[]. "
+                "Allowed codes: ALREADY_SETTLED_CHOICE, DUPLICATE_OR_IDENTICAL_DIRECTIONS, QUESTION_BRANCH_MISMATCH, LABEL_PROMISE_MISMATCH, "
+                "PROTECTED_EDIT, UNSUPPORTED_EXPERIENCE_GUARANTEE, INITIAL_REQ_MISSING_STATED_RULE, INITIAL_REQ_INVENTED_LOCK, "
+                "INITIAL_REQ_WRONG_EVIDENCE, PLAN_NOT_READY, BLOCKED_UNJUSTIFIED. "
+                "WHAT IS VALID (DO NOT REJECT FOR THESE): "
+                "(1) For a broad initial request such as 'make it simpler' / '我想让关卡简单一些', a single initialRequirement with "
+                "component=gameplay, property=experience, relation=seek, strength=goal, value=null, unit=none is VALID and complete. "
+                "Do NOT require fixed/invariant rules in initialRequirementInterpretation unless the designer explicitly stated a preservation or fixed rule in initialDesignerTurns; "
+                "platform protections (outer_shell, player, boxes, targets) are enforced by the server and do NOT belong in initialRequirementInterpretation. "
+                "(2) For action=ask, proposing two concrete editable water/internal_walls directions to clarify a broad request is the PURPOSE of binary discovery—NOT hidden permission or ungrounded scope. "
+                "(3) strategy.focus, strategy.editBudget, strategy.preserve, promise.focus, and validatedBranchDiffs are server-checked HYPOTHETICAL feasibility witnesses (often a minimal 1-cell proof), "
+                "NOT numeric locks, NOT user constraints, and labels do not need to state coordinates or cell counts. "
+                "(4) A brief note describing spatial/layout differences (e.g. opening water area vs widening wall corridor) is valid as long as it does not guarantee subjective human difficulty/fun or compulsory routes. "
+                "(5) Length, tone, and sentence counts are advisory, never rejection reasons. "
+                "WHAT TO REJECT: "
+                "For action=ask: reject ONLY if a branch repeats topic.selectedChoices, both branches represent the same direction, "
+                "question/note clearly contradicts a branch's actual component/action, a label promises an edit to one component/action while its strategy/promise/diff changes a different component/action, "
+                "a branch edits protected entities (player/boxes/targets/outer_shell), or visible text makes an unsupported guarantee of player difficulty/compulsory route. "
+                "For initialRequirementInterpretation (covering ONLY initialDesignerTurns): reject ONLY if it omits a rule/goal explicitly stated by the designer, "
+                "invents a numeric value/lock/invariant not stated in initialDesignerTurns (check value/unit/strength ONLY inside initialRequirementInterpretation, NEVER strategy.editBudget), "
+                "misstates component/relation/evidence, or copies branch suggestions into initialRequirementInterpretation. "
+                "CONDITIONAL PROTOCOL: the question, two labels/strategies/diffs and new-preference rules apply ONLY to action=ask. "
+                "For action=plan or blocked, empty question and branches=[] are REQUIRED and legitimate. "
+                "For plan, judge readiness from initial evidence, explicit selections and selectedFeasibility; blocked cannot invent infeasibility. "
+                + REQUIREMENT_SEMANTICS)},
                 {"role": "user", "content": json.dumps(review_input, ensure_ascii=False)}]
-            review_messages[0]["content"] += (" Verify every initial requirement against exact initialDesignerTurns: "
-                "reject missing fixed rules or active goals, invented numeric locks, wrong component/relation/evidence, "
-                "or branch suggestions treated as designer requirements. The initial record covers ONLY the initial "
-                "designer turn and stays locked later; selected interface actions are checked separately, then compiled "
-                "by the final requirements pipeline. Do not demand that later choices be inserted into this initial record. "
-                "CONDITIONAL PROTOCOL: the question, two labels/strategies/diffs and new-preference rules apply ONLY "
-                "to action=ask. For action=plan or blocked, empty question and branches=[] are REQUIRED and legitimate; "
-                "do not reject them for having no question/options. For plan, judge readiness from initial evidence, "
-                "the explicit selections and selectedFeasibility. An already selected feasible action answering a simple "
-                "request can proceed without another preference. blocked cannot invent infeasibility. " + REQUIREMENT_SEMANTICS)
-            review_deadline = min(deadline - 20.0, svc.clock.monotonic() + 10.0)
-            remaining = min(8.0, review_deadline - svc.clock.monotonic())
+            review_deadline = min(deadline - 20.0, svc.clock.monotonic() + 24.0)
+            remaining = min(12.0, review_deadline - svc.clock.monotonic())
             if remaining <= 0:
                 raise TimeoutError()
             try:
                 response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model,
                     review_messages, 1000, remaining, task="proposal_clarification_review",
                     response_format_override=binary.review_format()), timeout=remaining))
-                verdict = parse_json_object(response.choices[0].message.content) if response.choices[0].finish_reason != "length" else {}
+                verdict = (parse_json_object(response.choices[0].message.content)
+                    if getattr(response, "choices", None) and response.choices[0].finish_reason != "length" else {})
             except (ValueError, TimeoutError, APIConnectionError, APIStatusError):
                 verdict = {}
             if not isinstance(verdict, dict) or set(verdict) - {"accepted", "issues"}:
@@ -214,13 +234,26 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
                 (type(verdict[key]) is bool if key == "accepted" else isinstance(verdict[key], list)
                  and all(isinstance(x, str) for x in verdict[key]))}
             if set(valid) != {"accepted", "issues"}:
-                repair = PatchRequest("clarification_review", valid,
-                    [Target(key, (key,), (bool,) if key == "accepted" else (list,))
-                        for key in ("accepted", "issues") if key not in valid], {"review_source": review_input})
+                retry_remaining = min(12.0, review_deadline - svc.clock.monotonic())
+                if retry_remaining <= 0:
+                    raise binary.BinaryError("BINARY_REVIEW_INVALID", "review")
                 try:
-                    verdict = asyncio.run(_request_component_patch(api_key, base_url, repair, review_messages,
-                        request_id, review_deadline, "proposal_clarification_review", max_tokens=1000, timeout_limit=2.0))
-                    if (type(verdict["accepted"]) is not bool or not isinstance(verdict["issues"], list)
+                    if valid:
+                        repair = PatchRequest("clarification_review", valid,
+                            [Target(key, (key,), (bool,) if key == "accepted" else (list,))
+                                for key in ("accepted", "issues") if key not in valid], {"review_source": review_input})
+                        verdict = asyncio.run(_request_component_patch(api_key, base_url, repair, review_messages,
+                            request_id, review_deadline, "proposal_clarification_review", max_tokens=1000,
+                            timeout_limit=retry_remaining))
+                    else:
+                        retry_response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model,
+                            review_messages, 1000, retry_remaining, task="proposal_clarification_review",
+                            response_format_override=binary.review_format()), timeout=retry_remaining))
+                        if not getattr(retry_response, "choices", None) or retry_response.choices[0].finish_reason == "length":
+                            raise ValueError()
+                        verdict = parse_json_object(retry_response.choices[0].message.content)
+                    if (not isinstance(verdict, dict) or set(verdict) != {"accepted", "issues"}
+                            or type(verdict["accepted"]) is not bool or not isinstance(verdict["issues"], list)
                             or any(not isinstance(x, str) for x in verdict["issues"])):
                         raise ValueError()
                 except (ValueError, TimeoutError, APIConnectionError, APIStatusError):
@@ -228,6 +261,19 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
             if verdict["accepted"] is not True or verdict["issues"]:
                 error = binary.BinaryError("BINARY_SEMANTIC_REJECTED", "review")
                 error.issue_codes = [x for x in verdict["issues"] if re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", x)][:8]
+                trace_proposal(
+                    "binary_review",
+                    "review",
+                    "rejected",
+                    "BINARY_SEMANTIC_REJECTED",
+                    attempt=attempt,
+                    issues=[
+                        {"fieldPath": "review", "reasonCode": code, "sourceKind": "server"}
+                        for code in error.issue_codes
+                        if re.fullmatch(r"[A-Z_]{1,80}", code)
+                    ],
+                    issueCount=len(error.issue_codes),
+                )
                 raise error
             return step, caches
         except LLMServiceError:
@@ -243,8 +289,8 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
             last_error = error
             if getattr(error, "field", None) == "review" or attempt == 2:
                 break
+            field = getattr(error, "field", "branches")
             if isinstance(candidate, dict) and set(candidate) <= {"action", "question", "note", "branches", "initialRequirements"}:
-                field = getattr(error, "field", "branches")
                 if field in {"branch-1", "branch-2"} and len(candidate.get("branches", [])) == 2:
                     patch = PatchRequest("clarification_question", candidate,
                         [Target(field, ("branches", int(field[-1]) - 1), (dict,))],
@@ -253,10 +299,20 @@ def _generate_with_service(svc, topic, context, validator, strategy_validator, r
                     patch = PatchRequest("clarification_question", candidate,
                         [Target(field, (field,), (list,) if field == "branches" else (dict, type(None)) if field == "initialRequirements" else (str,))],
                         {"snapshot": stage["stageSnapshot"], "topic": evidence["topic"]})
+            detail_parts = [str(part).strip() for part in (getattr(error, "detail", None), error.__cause__) if part]
+            detail_text = "; ".join(detail_parts)[:300]
             messages.append({"role": "system", "content": "Correct only this technical component: "
                 + str(getattr(error, "code", "BINARY_CANDIDATE_INVALID")) + ". Keep the original permissions and choices. "
-                + ("Validator detail: " + str(error.__cause__)[:300] + ". " if error.__cause__ else "") +
+                + ("Validator detail: " + detail_text + ". " if detail_text else "") +
                 "A failed search is not proof that a direction is impossible. Use the same binary schema."})
+            if field in {"branch-1", "branch-2"}:
+                messages.append({"role": "system", "content": "Keep the repaired branch consistent with the frozen question and note "
+                    "(keep its intended component/direction when feasible rather than copying the other branch's component). "
+                    "Check preserve strictly: remove_wall MUST NOT include 'walls'; remove_water MUST NOT include 'water'. "
+                    "If widen_corridor failed, switch promise.kind to reduce_obstacles (corridor=null) on the same editable "
+                    "component (internal_walls or water) with focus=null or a focus enclosing editable tiles of that component. "
+                    "Keep its label and promise materially distinct from the other frozen branch, and never preserve a "
+                    "component edited by its operators."})
             if getattr(error, "code", "") == "BINARY_ALREADY_SELECTED_DIRECTION":
                 messages.append({"role": "system", "content": "The proposed question repeats an already selected action. "
                     "Reassess readiness: if the existing request and selection suffice, return action=plan, question='', "
