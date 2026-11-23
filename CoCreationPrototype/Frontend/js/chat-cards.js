@@ -1,6 +1,6 @@
-import { GUIDANCE_CUE_LABELS, LLM_REQUEST_TIMEOUT_MS, REQUEST_COPY } from "./i18n.js?v=binary-discovery-20261118-esm";
-import { tileName } from "./map-editor.js?v=binary-discovery-20261118-esm";
-import { setButtonDisabled } from "./state-storage.js?v=binary-discovery-20261118-esm";
+import { GUIDANCE_CUE_LABELS, LLM_REQUEST_TIMEOUT_MS, REQUEST_COPY } from "./i18n.js?v=binary-discovery-20261123-v2-esm";
+import { tileName } from "./map-editor.js?v=binary-discovery-20261123-v2-esm";
+import { setButtonDisabled } from "./state-storage.js?v=binary-discovery-20261123-v2-esm";
 
 export function isInternalProposalFailureCue(cue) {
     if (!cue || cue.type !== "clarification") return false;

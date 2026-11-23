@@ -1,4 +1,4 @@
-import { LLM_REQUEST_TIMEOUT_MS, MESSAGE_REQUEST_TIMEOUT_MS } from "./i18n.js?v=binary-discovery-20261118-esm";
+import { LLM_REQUEST_TIMEOUT_MS, MESSAGE_REQUEST_TIMEOUT_MS } from "./i18n.js?v=binary-discovery-20261123-v2-esm";
 
 export function retryDelay(attempt) {
     return Math.min(60000, 2000 * (2 ** Math.min(Math.max(0, attempt), 5)));

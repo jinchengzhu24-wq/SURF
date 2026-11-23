@@ -8,7 +8,7 @@ import {
     chineseApiErrors,
     translations,
     validationTileNames,
-} from "./i18n.js?v=binary-discovery-20261118-esm";
+} from "./i18n.js?v=binary-discovery-20261123-v2-esm";
 
 export function createInitialState() {
     return {

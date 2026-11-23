@@ -26,7 +26,7 @@ import {
     safeReplyDiagnostic,
     translations,
     validationTileNames,
-} from "./i18n.js?v=binary-discovery-20261118-esm";
+} from "./i18n.js?v=binary-discovery-20261123-v2-esm";
 import {
     ELEMENT_IDS,
     createElements,
@@ -36,8 +36,8 @@ import {
     recoverMessageFailure,
     setButtonDisabled,
     validApiPayload,
-} from "./state-storage.js?v=binary-discovery-20261118-esm";
-import { createUnityBridge } from "./unity-bridge.js?v=binary-discovery-20261118-esm";
+} from "./state-storage.js?v=binary-discovery-20261123-v2-esm";
+import { createUnityBridge } from "./unity-bridge.js?v=binary-discovery-20261123-v2-esm";
 import {
     buildEntityLabels,
     createMapEditor,
@@ -46,7 +46,7 @@ import {
     tileClass,
     tileLabel,
     tileName,
-} from "./map-editor.js?v=binary-discovery-20261118-esm";
+} from "./map-editor.js?v=binary-discovery-20261123-v2-esm";
 import {
     assistantBodyWithoutCues,
     createChatCards,
@@ -54,8 +54,8 @@ import {
     formatCoordinatePoint,
     isInternalProposalFailureCue,
     normalizedCoordinatePoint,
-} from "./chat-cards.js?v=binary-discovery-20261118-esm";
-import { createSessionActions, retryDelay } from "./session-actions.js?v=binary-discovery-20261118-esm";
+} from "./chat-cards.js?v=binary-discovery-20261123-v2-esm";
+import { createSessionActions, retryDelay } from "./session-actions.js?v=binary-discovery-20261123-v2-esm";
 
 export {
     COMPONENT_RECOVERY_TIMEOUT_MS,

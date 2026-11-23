@@ -893,12 +893,16 @@ Object.assign(translations["zh-CN"], {
 Object.assign(GUIDANCE_CUE_LABELS.en, {
     revision: "REVISION · How about these changes?", intent: "TENTATIVE INTENT · Am I getting your idea?",
     warning: "WARNING · Something to watch for", tradeoff: "WARNING · Something to watch for",
-    question: "LET’S DISCUSS · Let’s talk this through"
+    question: "LET’S DISCUSS · Let’s talk this through",
+    manual_edit: "MANUAL EDIT · Try tweaking it yourself",
+    clarification: "NEEDS CLARIFICATION · Tell me a bit more"
 });
 Object.assign(GUIDANCE_CUE_LABELS["zh-CN"], {
     revision: "REVISION · 要不要试试这样改？", intent: "TENTATIVE INTENT · 我这样理解，对吗？",
     warning: "WARNING · 这里留意一下", tradeoff: "WARNING · 这里留意一下",
-    question: "LET’S DISCUSS · 这里，咱们聊聊"
+    question: "LET’S DISCUSS · 这里，咱们聊聊",
+    manual_edit: "MANUAL EDIT · 也可以自己动手改改",
+    clarification: "NEEDS CLARIFICATION · 这里再明确一下"
 });
 
 // Help and status labels stay beside the controls they explain.

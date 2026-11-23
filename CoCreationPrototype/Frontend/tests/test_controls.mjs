@@ -1601,3 +1601,26 @@ test("binary retry hides stale failure while in flight and distinguishes saved r
     assert.equal(elements.chatRetryButton.hidden, false);
     assert.equal(elements.chatRetryButton.disabled, false);
 });
+
+test("manual_edit and clarification cards match the unified PREFIX · subtitle format in both languages", () => {
+    const { app, state } = loadApp();
+    state.language = "en";
+    assert.equal(
+        app.createGuidanceCue("manual_edit", "Try editing around row 4.").children[0].textContent,
+        "MANUAL EDIT · Try tweaking it yourself",
+    );
+    assert.equal(
+        app.createGuidanceCue("clarification", "Clarify area?").children[0].textContent,
+        "NEEDS CLARIFICATION · Tell me a bit more",
+    );
+
+    state.language = "zh-CN";
+    assert.equal(
+        app.createGuidanceCue("manual_edit", "试试调整第 4 行周边区域。").children[0].textContent,
+        "MANUAL EDIT · 也可以自己动手改改",
+    );
+    assert.equal(
+        app.createGuidanceCue("clarification", "请先明确方向").children[0].textContent,
+        "NEEDS CLARIFICATION · 这里再明确一下",
+    );
+});

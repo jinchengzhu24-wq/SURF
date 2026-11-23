@@ -4,8 +4,8 @@ import {
     DRAFT_REGENERATION_POLL_TIMEOUT_MS,
     DRAFT_REGENERATION_PROTOCOL_VERSION,
     UNITY_PLAY_BRIDGE_TIMEOUT_MS,
-} from "./i18n.js?v=binary-discovery-20261118-esm";
-import { buildEntityLabels, tileClass, tileLabel } from "./map-editor.js?v=binary-discovery-20261118-esm";
+} from "./i18n.js?v=binary-discovery-20261123-v2-esm";
+import { buildEntityLabels, tileClass, tileLabel } from "./map-editor.js?v=binary-discovery-20261123-v2-esm";
 
 export function createUnityBridge(ctx) {
     const { state, elements, window, document, setTimeout, clearTimeout, clearInterval, ports } = ctx;
