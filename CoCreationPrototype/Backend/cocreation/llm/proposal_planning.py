@@ -104,7 +104,7 @@ from cocreation.domain.revision_workflow import (
     validate_semantic_constraints,
 )
 
-from .config_and_runtime import BACKEND_REQUEST_TIMEOUT_SECONDS, EmptyModelResponse, KIMI_MODEL, LLMExecutionResult, LLMServiceError, MIN_RETRY_BUDGET_SECONDS, PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_CANDIDATE_LIMIT, PROPOSAL_GENERATION_ATTEMPTS, PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_OPERATION_LIMIT, PROPOSAL_OPERATION_MAX_TOKENS, PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, PROPOSAL_PLAN_MAX_TOKENS, PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, PROPOSAL_REQUEST_TIMEOUT_SECONDS, PROPOSAL_SEARCH_DEADLINE_SECONDS, REVISION_CONTRACT_SCHEMA_VERSION, REVISION_MAX_CHANGED_CELLS, REVISION_MIN_CHANGED_CELLS, _active_clock, _content_block_sentences, _current_service, _empty_response_diagnostics, _first_declarative_sentence, _is_human_edit_stage_opening, _is_stage_one, _latest_role_content, _latest_user_confirms_revision, _latest_user_explicitly_agrees, _latest_user_explicitly_rejects, _log_llm_event, _provider_error_fields, _request_completion, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _solve_stage, _unified_model_attempts, _user_states_first_person_view, _visible_reply_style, classify_exception
+from .config_and_runtime import BACKEND_REQUEST_TIMEOUT_SECONDS, EmptyModelResponse, KIMI_MODEL, LLMExecutionResult, LLMServiceError, MIN_RETRY_BUDGET_SECONDS, PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_CANDIDATE_LIMIT, PROPOSAL_GENERATION_ATTEMPTS, PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_OPERATION_LIMIT, PROPOSAL_OPERATION_MAX_TOKENS, PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, PROPOSAL_PLAN_MAX_TOKENS, PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, PROPOSAL_REQUEST_TIMEOUT_SECONDS, PROPOSAL_SEARCH_DEADLINE_SECONDS, REVISION_CONTRACT_SCHEMA_VERSION, REVISION_MAX_CHANGED_CELLS, REVISION_MIN_CHANGED_CELLS, _active_clock, _content_block_sentences, _current_service, _empty_response_diagnostics, _first_declarative_sentence, _is_human_edit_stage_opening, _is_stage_one, _latest_role_content, _latest_user_confirms_revision, _latest_user_explicitly_agrees, _latest_user_explicitly_rejects, _log_llm_event, _provider_error_fields, _request_completion, _request_component_patch, _request_deadline, _require_first_choice, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _solve_stage, _unified_model_attempts, _user_states_first_person_view, _visible_reply_style, classify_exception
 from .intent_and_review import _contextual_manual_edit, _cue_repeats_current_evidence, _deterministic_play_warning, _natural_intent_candidate, _replace_echoed_intent_hypothesis, _user_explicitly_off_topic, _user_explicitly_states_design_stance, _user_reframes_difficulty_judgment, _warning_has_strong_evidence
 from .snapshot_grounding import _assert_visible_output_language, _guidance_reuses_visible_sentence, _guidance_text_matches, _llm_solver_evidence, _map_grounding_contract, _proposal_card_is_meta_language, _proposal_clarification_route_evidence, _remove_proposal_text_from_body, _sanitize_visible_model_text, _stage_snapshot_for_prompt, _strip_invalid_grounding_sentences
 
@@ -275,9 +275,10 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 payload['requirements'] += patched.get('additionalRequirements', [])
             else:
                 response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 3200, min(20.0, remaining), task='revision_requirements'), timeout=min(20.0, remaining)))
-                if getattr(response.choices[0], 'finish_reason', None) == 'length':
+                choice = _require_first_choice(response)
+                if getattr(choice, 'finish_reason', None) == 'length':
                     raise ValueError('Requirements JSON was truncated.')
-                payload = parse_json_object(response.choices[0].message.content)
+                payload = parse_json_object(choice.message.content)
             valid_items, component_issues = validate_requirement_components(payload, turns, snapshot)
             if component_issues:
                 repair_issues = component_issues
@@ -313,9 +314,10 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request, review_messages, request_id, deadline, 'revision_requirement_review', max_tokens=1600, timeout_limit=min(12.0, remaining)))
             else:
                 reviewed = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, review_messages, 1600, min(12.0, remaining), task='revision_requirement_review'), timeout=min(12.0, remaining)))
-                if getattr(reviewed.choices[0], 'finish_reason', None) == 'length':
+                choice = _require_first_choice(reviewed)
+                if getattr(choice, 'finish_reason', None) == 'length':
                     raise ValueError('Independent requirements review JSON was truncated.')
-                verdict = parse_json_object(reviewed.choices[0].message.content)
+                verdict = parse_json_object(choice.message.content)
             if set(verdict) != {'accepted', 'issues'} or not isinstance(verdict['accepted'], bool) or (not isinstance(verdict['issues'], list)):
                 raise ValueError('Invalid independent evidence review envelope.')
             if verdict['accepted'] is not True or verdict['issues']:
@@ -459,7 +461,7 @@ def _generate_verified_proposal_failure_analysis(api_key, base_url, context, row
     try:
         timeout = min(12.0, svc.remaining_until(deadline))
         response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, prompt, 700, timeout, task='proposal_failure_analysis'), timeout=timeout))
-        choice = response.choices[0]
+        choice = _require_first_choice(response)
         if getattr(choice, 'finish_reason', None) == 'length':
             raise ValueError('Failure analysis was truncated.')
         payload = parse_json_object(choice.message.content)

@@ -418,6 +418,14 @@ class EmptyModelResponse(ValueError):
 class LowQualityModelResponse(ValueError):
     pass
 
+
+def _require_first_choice(response):
+    """Validate that a completion payload includes at least one choice."""
+    choices = getattr(response, 'choices', None)
+    if not choices:
+        raise EmptyModelResponse('The model returned an empty response.')
+    return choices[0]
+
 def _visible_reply_style(mode='conversation'):
     """Expression guidance for visible prose only, never semantic/execution tasks."""
     common = "Visible expression: speak as a warm, equal design peer with an independent view. Answer the latest contribution first, then give only the reasoning it needs. State each judgment once; do not paraphrase it later or append a default summary. Use everyday words and natural first-person observations when useful, without requiring a map analysis, route explanation, personal reflection and follow-up in every reply. A simple difficulty question needs a judgment and its strongest reason; a complex question may need depth. Write plain text for the existing interface, without Markdown emphasis markers or headings. When it helps explain this exchange, light metaphor, gentle personification or self-directed wit is welcome. Humor is optional: no joke quota, stock catchphrase, forced punchline or theatrical persona. Never mock the designer's ability, trivialize a disagreement, or invent player reactions or personal play experience. Keep verified facts, subjective predictions, tentative intentions, suggestions and server-confirmed actions distinct. Figurative wording must not add unsupported positions, routes, reachability, mandatory paths or success claims; humor never exempts a claim from evidence checks. Be clear about uncertainty without adding a disclaimer to every sentence. Use the length, paragraphing and order the actual question needs; a short complete answer is welcome. Preserve useful design reasoning, relevant verified route explanation and your own grounded perspective when relevant, without padding, a minimum length or a fixed rhetorical template. Apply this voice only to visible prose, never machine-only fields, evidence quotes or semantic decisions. Keep cards, warnings and action/status explanations precise and plain. During disagreement, stay warm and restrained; do not joke about the user's position. "

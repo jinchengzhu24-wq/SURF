@@ -1061,6 +1061,45 @@ class AuditProposalPlanningTests(unittest.TestCase):
         self.assertNotEqual(raised_budget.exception.code, "DETERMINISTIC_SEARCH_EXHAUSTED")
         self.assertTrue(raised_budget.exception.retryable)
 
+    def test_require_first_choice_and_malformed_plain_intent_decision_guards(self):
+        with self.assertRaises(config_and_runtime.EmptyModelResponse):
+            config_and_runtime._require_first_choice(SimpleNamespace(choices=[]))
+
+        self.assertIsNone(
+            intent_and_review._extract_plain_intent_decision("<GUIDANCE>INTENT_DECISION: {malformed</GUIDANCE>")
+        )
+
+        clock = FakeClock()
+        empty_response = SimpleNamespace(choices=[])
+        failure_context = {
+            "_reliabilityState": {"verifiedRequirements": {"record": {"requirements": [], "automaticBindings": [], "exactTransitions": []}}},
+            "requirementUserTurns": [{"id": "u1", "content": "Adjust water"}],
+            "stageSnapshot": build_stage_snapshot(AUDIT_ROWS),
+        }
+        failure = LLMServiceError("PROPOSAL_SEARCH_EXHAUSTED", "Exhausted.", "req-empty-fa", False, 1, 422)
+        with llm_scope(completion_requester=RecordedAsyncCall(return_value=empty_response), clock=clock):
+            analyzed = proposal_planning._generate_verified_proposal_failure_analysis(
+                "fake",
+                "fake",
+                failure_context,
+                AUDIT_ROWS,
+                "en",
+                "req-empty-fa",
+                clock.monotonic() + 20.0,
+                failure,
+            )
+            with self.assertRaises(config_and_runtime.EmptyModelResponse):
+                asyncio.run(
+                    intent_and_review._request_engagement_decision(
+                        {"latestUserMessage": "Let us talk"},
+                        "fake",
+                        "fake",
+                        5.0,
+                        "human_edit_engagement_recovery",
+                    )
+                )
+        self.assertIsNone(analyzed)
+
 
 if __name__ == "__main__":
     unittest.main()

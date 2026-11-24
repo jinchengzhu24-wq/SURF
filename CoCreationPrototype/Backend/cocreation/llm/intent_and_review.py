@@ -104,7 +104,7 @@ from cocreation.domain.revision_workflow import (
     validate_semantic_constraints,
 )
 
-from .config_and_runtime import DISAGREEMENT_RESOLUTIONS, DISAGREEMENT_STATUSES, DISAGREEMENT_SUBJECTS, EmptyModelResponse, INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS, INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS, INTENT_REVIEW_VERSION, KIMI_MODEL, LLMServiceError, LowQualityModelResponse, MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS, MANUAL_EDIT_DIRECTION_KINDS, MANUAL_EDIT_EFFECT_EVIDENCE_KINDS, MIN_RETRY_BUDGET_SECONDS, QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS, _clean_text, _content_block_sentences, _current_service, _dialogue_background_prompt, _latest_role_content, _log_llm_event, _request_completion, _request_component_patch, _request_deadline, _safe_validation_reason, _visible_reply_style, classify_exception
+from .config_and_runtime import DISAGREEMENT_RESOLUTIONS, DISAGREEMENT_STATUSES, DISAGREEMENT_SUBJECTS, EmptyModelResponse, INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS, INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS, INTENT_REVIEW_VERSION, KIMI_MODEL, LLMServiceError, LowQualityModelResponse, MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS, MANUAL_EDIT_DIRECTION_KINDS, MANUAL_EDIT_EFFECT_EVIDENCE_KINDS, MIN_RETRY_BUDGET_SECONDS, QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS, _clean_text, _content_block_sentences, _current_service, _dialogue_background_prompt, _latest_role_content, _log_llm_event, _request_completion, _request_component_patch, _request_deadline, _require_first_choice, _safe_validation_reason, _visible_reply_style, classify_exception
 from .snapshot_grounding import _assert_visible_output_language, _guidance_reuses_visible_sentence, _guidance_text_matches, _intent_sentence_count, _normalize_response_paragraphs, _normalize_single_level_language, _validate_map_grounding_texts
 
 
@@ -824,7 +824,7 @@ async def _review_intent_candidate_async(*, api_key, base_url, user_text, body, 
         messages = [{'role': 'system', 'content': 'Independently review ONLY the changed BODY against exact user evidence and LOCKED CLAIMS. Return JSON bodyValid and concise issues. Reject irrelevant prose, invented user purposes, claim contradictions or unfinished prose; length, sentence count and stylistic depth are advisory. Reject design suggestions to relocate/reconfigure boxes, targets, player start or outer shell; only water/internal walls may be edited. Normal pushing during play is not a design edit. Map facts are checked by the server. Do not generate or reclassify intent, a card, question progress, permission or state. The locked semantic result remains authoritative.'}, {'role': 'user', 'content': json.dumps({'userEvidence': user_text, 'body': body, 'lockedClaims': locked_review['claims']}, ensure_ascii=False)}]
         trace_reply('body_review', 'started', modelCalls=1)
         response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 900, timeout, task='intent_candidate_review', response_format_override=schema), timeout=timeout)
-        choice = response.choices[0]
+        choice = _require_first_choice(response)
         if str(getattr(choice, 'finish_reason', '')) == 'length':
             raise ValueError('Body review was truncated.')
         verdict = parse_json_object(choice.message.content)
@@ -850,7 +850,7 @@ async def _review_intent_candidate_async(*, api_key, base_url, user_text, body, 
     if remaining <= 0:
         raise asyncio.TimeoutError()
     response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS, min(30.0, remaining), task='intent_candidate_review'), timeout=min(30.0, remaining))
-    choice = response.choices[0]
+    choice = _require_first_choice(response)
     if str(getattr(choice, 'finish_reason', '') or '') == 'length':
         raise ValueError('The intent candidate review reached its output limit.')
     payload = parse_json_object(choice.message.content)
@@ -964,7 +964,7 @@ async def _repair_intent_components_async(*, api_key, base_url, user_text, body,
         serialized_facts = json.dumps(map_facts, ensure_ascii=False, separators=(',', ':')) if isinstance(map_facts, (dict, list)) else str(map_facts or '')
         messages = [{'role': 'system', 'content': 'Repair ONLY the rejected body, preserving locked claims and exact user evidence. Only water/internal walls may be edited; never propose rearranging boxes/targets/player/shell. Normal Sokoban pushes during play may be discussed. Return JSON with only bodyParagraphs, a non-empty array of complete paragraphs. Fix the specified relevance or semantic defect; add no user purpose, authorization, state success or map changes. Use the supplied Stage facts only. Keep concise natural prose without a fixed sentence count. Write in ' + ('Simplified Chinese.' if language == 'zh-CN' else 'English.') + '\n\n' + _visible_reply_style('repair') + '\nLOCKED CLAIMS:\n' + json.dumps(claims, ensure_ascii=False) + '\n\nAUTHORITATIVE STAGE FACTS:\n' + serialized_facts[:8000] + '\n\nCURRENT BODY:\n' + str(body or '')[:5000] + '\n\nCURRENT CARD:\n' + str(card_text or '')[:1200] + '\n\nREVIEW ISSUES:\n' + json.dumps(issues or [], ensure_ascii=False) + '\nREPAIR BODY: yes\nREPAIR CARD: no' + discussion_background}, {'role': 'user', 'content': str(user_text or '')[:2000]}]
         response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task='intent_body_repair'), timeout=timeout)
-        choice = response.choices[0]
+        choice = _require_first_choice(response)
         if str(getattr(choice, 'finish_reason', '')) == 'length':
             raise ValueError('Intent body repair was truncated.')
         payload = parse_json_object(choice.message.content)
@@ -980,7 +980,7 @@ async def _repair_intent_components_async(*, api_key, base_url, user_text, body,
             raise asyncio.TimeoutError()
         messages = [{'role': 'system', 'content': 'Repair only the tentative intent card. Return JSON with only cardText. Keep every locked claim and exact user evidence, remain tentative and explicitly correctable; add no purpose, certainty, permission or state conclusion. Use Simplified Chinese.' if language == 'zh-CN' else 'Repair only the tentative intent card. Return JSON with only cardText. Keep every locked claim and exact user evidence, remain tentative and explicitly correctable; add no purpose, certainty, permission or state conclusion. Use English.'}, {'role': 'user', 'content': json.dumps({'userEvidence': user_text, 'lockedClaims': claims, 'currentCard': card_text, 'stageFacts': map_facts, 'issues': issues, 'discussionBackground': discussion_background}, ensure_ascii=False)}]
         response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task='intent_card_repair'), timeout=timeout)
-        choice = response.choices[0]
+        choice = _require_first_choice(response)
         if str(getattr(choice, 'finish_reason', '')) == 'length':
             raise ValueError('Intent card repair was truncated.')
         payload = parse_json_object(choice.message.content)
@@ -1041,9 +1041,10 @@ def _engagement_source(latest_user, stage_context):
 async def _request_engagement_decision(source, api_key, base_url, timeout, task):
     svc = _current_service()
     response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, [{'role': 'system', 'content': 'Judge only human-edit discussion engagement. Return JSON decision engage/unchanged/unclear and evidenceSpan. Engage means the source designer explicitly agrees to discuss, explain, adjust or re-edit, not consensus, map acceptance or permission. Bind short answers to the original assistant question, whose suggestions are not designer consent. Use unchanged for unrelated/negative wording, unclear for genuine ambiguity. Engage needs an exact substring of latestUserMessage/originalUserMessage. Empty evidence is allowed otherwise. In delayed replay also check every subsequent USER message: a withdrawal, correction or replacement invalidates earlier engagement. Only original source consent may engage, not later consent. Map evidence uses only currentStageSnapshot. Never repair ambiguity into agreement.'}, {'role': 'user', 'content': json.dumps(source, ensure_ascii=False)}], 250, timeout, task=task), timeout=timeout)
-    if str(getattr(response.choices[0], 'finish_reason', '')) == 'length':
+    choice = _require_first_choice(response)
+    if str(getattr(choice, 'finish_reason', '')) == 'length':
         raise ValueError('Engagement decision was truncated.')
-    return validate_engagement(parse_json_object(response.choices[0].message.content), source.get('latestUserMessage', source.get('originalUserMessage', '')))
+    return validate_engagement(parse_json_object(choice.message.content), source.get('latestUserMessage', source.get('originalUserMessage', '')))
 
 def recover_human_edit_engagement(source, request_id, deadline):
     svc = _current_service()
@@ -1127,7 +1128,11 @@ def _extract_plain_intent_decision(content):
     match = re.search('(?:^|\\|\\|)\\s*INTENT_DECISION\\s*:\\s*(\\{.*?\\})\\s*(?=\\|\\||$)', block, re.DOTALL)
     if not match:
         return None
-    return _validate_intent_decision(json.loads(match.group(1)), None)
+    try:
+        parsed = json.loads(match.group(1))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return _validate_intent_decision(parsed, None)
 
 def _normalize_reviewed_claim(raw_claim, user_text, *, require_evidence=True):
     if not isinstance(raw_claim, dict):

@@ -1298,6 +1298,48 @@ class BinaryPolicyAndIdempotencyHttpTests(SessionTestCase):
         self.assertTrue(seen_deadlines)
         self.assertGreater(seen_deadlines[0], started_mono + 5.0)
 
+    def test_message_send_workflow_modular_structure_and_concise_route_delegation(self):
+        import inspect
+        from cocreation.api import message_send_workflow, routes_messages_and_proposals
+
+        for symbol in (
+            "_MessageRequestContext",
+            "_PreflightState",
+            "_RoutedMessageState",
+            "_preflight_message_request",
+            "_resolve_turn_understanding_or_binary",
+            "_commit_user_turn_and_route",
+            "_prepare_question_and_challenge_context",
+            "_resolve_challenge_continuation",
+            "_prepare_revision_context_and_evidence",
+            "_generate_message_execution",
+            "_finalize_execution_guidance_and_intent",
+            "_commit_assistant_turn_and_sync",
+            "run_send_message_pipeline",
+        ):
+            self.assertTrue(hasattr(message_send_workflow, symbol), f"Missing workflow symbol: {symbol}")
+
+        wrapper_lines = inspect.getsource(routes_messages_and_proposals._send_message_locked_impl).splitlines()
+        self.assertLessEqual(len(wrapper_lines), 25)
+        self.assertIn("run_send_message_pipeline", "\n".join(wrapper_lines))
+
+        # Verify ordinary message commit and idempotent replay still round-trip cleanly through HTTP /messages.
+        with self.using_dependencies(
+            settings={"binary_discovery_enabled": False},
+            llm_handlers={"generate_chat_reply": LLMExecutionResult("Layout looks clear.", 1, "wf-ok", model="mock")},
+        ):
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={"baseVersionId": self.version, "content": "How does this layout play?", "idempotencyKey": "wf-replay-1"},
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            replay = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={"baseVersionId": self.version, "content": "How does this layout play?", "idempotencyKey": "wf-replay-1"},
+            )
+            self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(len(replay.json()["turns"]), len(first.json()["turns"]))
+
 
 if __name__ == "__main__":
     unittest.main()
