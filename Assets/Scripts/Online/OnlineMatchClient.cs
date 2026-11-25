@@ -18,6 +18,13 @@ public class OnlineMatchClient : MonoBehaviour
     private readonly List<UnityWebRequest> activeRequests =
         new List<UnityWebRequest>();
 
+    public long LastHttpStatusCode { get; private set; }
+
+    public static bool IsTerminalClientError(long statusCode)
+    {
+        return statusCode >= 400 && statusCode < 500 && statusCode != 408 && statusCode != 429;
+    }
+
     public IEnumerator CreateRoom(
         Action<OnlineRoomState> onSuccess,
         Action<string> onFailure)
@@ -163,10 +170,12 @@ public class OnlineMatchClient : MonoBehaviour
     {
         if (requiresIdentity && !OnlineMatchContext.HasMatch)
         {
+            LastHttpStatusCode = 0;
             onFailure?.Invoke("No active online room.");
             yield break;
         }
 
+        LastHttpStatusCode = 0;
         string url = PublicEndpointResolver.ResolveBackendBaseUrl(backendBaseUrl)
             + path;
         using (UnityWebRequest request = new UnityWebRequest(url, method))
@@ -192,6 +201,7 @@ public class OnlineMatchClient : MonoBehaviour
             activeRequests.Add(request);
             yield return request.SendWebRequest();
             activeRequests.Remove(request);
+            LastHttpStatusCode = request.responseCode;
 
             if (request.result != UnityWebRequest.Result.Success)
             {
@@ -278,6 +288,7 @@ public class OnlineMatchClient : MonoBehaviour
             if (activeRequests[i] != null)
             {
                 activeRequests[i].Abort();
+                activeRequests[i].Dispose();
             }
         }
 

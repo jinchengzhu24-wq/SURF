@@ -60,6 +60,7 @@ public class LevelManager : MonoBehaviour
 
     private bool isCompletingLevel;
     private bool externalRestartBlocked;
+    private bool externalCompletionSuppressed;
     private bool usesExternalInitialLoadingTransition;
     private bool completionTransitionHandled;
 
@@ -138,6 +139,11 @@ public class LevelManager : MonoBehaviour
     public void SetExternalRestartAllowed(bool allowed)
     {
         externalRestartBlocked = !allowed;
+    }
+
+    public void SetExternalCompletionSuppressed(bool suppressed)
+    {
+        externalCompletionSuppressed = suppressed;
     }
 
     private IEnumerator InitialLLMLoadingTransition()
@@ -356,7 +362,7 @@ public class LevelManager : MonoBehaviour
 
     public void BoxReachTarget()
     {
-        if (isCompletingLevel)
+        if (isCompletingLevel || externalCompletionSuppressed)
         {
             return;
         }
@@ -378,6 +384,7 @@ public class LevelManager : MonoBehaviour
     {
         boxCount = FindObjectsOfType<Box>().Length;
         reachedCount = 0;
+        externalCompletionSuppressed = false;
 
         if (!isCompletingLevel)
         {

@@ -493,13 +493,18 @@ public sealed class CoCreationEntryController : MonoBehaviour
                     break;
                 }
 
-                if (succeeded && request.responseCode == 422)
+                if (succeeded && (request.responseCode == 422 || request.responseCode == 400 || request.responseCode == 404))
                 {
                     NotifyBrowserRegenerationReturn(requestId, "failed");
                     CoCreationDraftContext.ClearRegeneration();
                     processingRegeneration = false;
                     SetButtonState(true, "RETURN TO CO-CREATION LAB");
-                    SetStatus("The server rejected the generated map during validation. The previous draft was preserved.", ErrorStatusColor);
+                    SetStatus(
+                        request.responseCode == 422
+                            ? "The server rejected the generated map during validation. The previous draft was preserved."
+                            : "The regeneration request is no longer active on the server. The previous draft was preserved.",
+                        ErrorStatusColor
+                    );
                     RestartSessionCompletionTracking();
                     yield break;
                 }
@@ -618,6 +623,19 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 RestartSessionCompletionTracking();
                 yield break;
             }
+            if (request.result == UnityWebRequest.Result.Success && response != null && remote == null)
+            {
+                NotifyBrowserRegenerationReturn(requestId, "failed");
+                CoCreationDraftContext.ClearRegeneration();
+                processingRegeneration = false;
+                SetButtonState(true, "RETURN TO CO-CREATION LAB");
+                SetStatus(
+                    "The session has already moved past draft regeneration. The previous draft was preserved.",
+                    ErrorStatusColor
+                );
+                RestartSessionCompletionTracking();
+                yield break;
+            }
         }
 
         processingRegeneration = false;
@@ -651,9 +669,26 @@ public sealed class CoCreationEntryController : MonoBehaviour
         // distinguish a missing hand-off from an intentionally blank answer.
         if (string.IsNullOrWhiteSpace(normalizedDesignerIntention))
         {
-            ApplyFailure(
-                "The final design intention was not received. Return to the co-creation lab and submit it before continuing."
-            );
+            if (string.IsNullOrWhiteSpace(launchUrl)
+                && !string.IsNullOrWhiteSpace(CoCreationDraftContext.SessionId)
+                && TryBuildResumeLabUrl(CoCreationDraftContext.SessionId, out string resumedUrl))
+            {
+                launchUrl = resumedUrl;
+            }
+            if (!string.IsNullOrWhiteSpace(launchUrl))
+            {
+                SetButtonState(true, "RETURN TO CO-CREATION LAB");
+                SetStatus(
+                    "The final design intention was not received. Return to the co-creation lab and submit it before continuing.",
+                    ErrorStatusColor
+                );
+            }
+            else
+            {
+                ApplyFailure(
+                    "The final design intention was not received. Return to the co-creation lab and submit it before continuing."
+                );
+            }
             Debug.LogWarning(
                 "CoCreationEntryController: Completed session did not include a designer intention."
             );

@@ -1685,9 +1685,12 @@ def _proposal_feasibility_profile(snapshot, rows, design_context=None, baseline_
             if (baseline_validation or {}).get(key) is not None
         },
         'confirmedPreserveItems': [
-            item.get('statement')
-            for item in (design_context or {}).get('constraints') or []
-            if isinstance(item, dict) and item.get('status') == 'confirmed'
+            item.get('constraint')
+            for item in (design_context or {}).get('designConstraints') or []
+            if isinstance(item, dict)
+            and item.get('status') == 'active'
+            and item.get('authority') in {'explicit', 'confirmed'}
+            and str(item.get('constraint') or '').strip()
         ][:8],
     }
 

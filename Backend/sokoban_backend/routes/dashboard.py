@@ -284,7 +284,7 @@ def get_level_records_legacy(
     )
 
 
-@router.post("/rename-round")
+@router.post("/rename-round", dependencies=[Depends(require_delete_password)])
 def rename_round(
     request: RenameRoundRequest,
     container: AppContainer = Depends(get_container),
@@ -325,7 +325,7 @@ def rename_round(
     }
 
 
-@router.post("/rename-level-run")
+@router.post("/rename-level-run", dependencies=[Depends(require_delete_password)])
 def rename_level_run(
     request: RenameLevelRunRequest,
     container: AppContainer = Depends(get_container),
@@ -640,7 +640,9 @@ def delete_idea_records(
         paired_survey_session_ids = {
             normalize_survey_identifier(record.get("sessionId"))
             for record in survey_records
-            if normalize_creative_idea_identifier(record.get("creativeIdeaId")) == idea_id
+            if normalize_creative_idea_identifier(
+                record.get("creativeIdeaId") or record.get("ideaId")
+            ) == idea_id
             and normalize_survey_identifier(record.get("sessionId"))
         }
 
@@ -650,7 +652,7 @@ def delete_idea_records(
         ]
         remaining_idea_records = [
             record for record in idea_records
-            if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
+            if normalize_creative_idea_identifier(record.get("ideaId") or record.get("id")) != idea_id
         ]
         remaining_choice_records = [
             record for record in choice_records
@@ -664,12 +666,20 @@ def delete_idea_records(
             record for record in journey_records
             if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
         ]
-        remaining_survey_records = [
-            record for record in survey_records
-            if normalize_creative_idea_identifier(record.get("creativeIdeaId")) != idea_id
-            and normalize_survey_identifier(record.get("sessionId"))
-            not in paired_survey_session_ids
-        ]
+        remaining_survey_records = []
+        for record in survey_records:
+            survey_idea_id = normalize_creative_idea_identifier(
+                record.get("creativeIdeaId") or record.get("ideaId")
+            )
+            if survey_idea_id == idea_id:
+                continue
+            if (
+                not survey_idea_id
+                and normalize_survey_identifier(record.get("sessionId"))
+                in paired_survey_session_ids
+            ):
+                continue
+            remaining_survey_records.append(record)
 
         deleted_level_event_count = len(level_records) - len(remaining_level_records)
         deleted_idea_count = len(idea_records) - len(remaining_idea_records)

@@ -48,6 +48,10 @@ ASCII_PUNCTUATION_TRANSLATION = str.maketrans({
 _DEFAULT_STREAM = object()
 
 
+def _reject_non_finite_json_constant(constant: str) -> Any:
+    raise ValueError(f"Non-finite JSON constant is not allowed: {constant}")
+
+
 def new_request_id(value: object = "") -> str:
     candidate = "".join(
         character
@@ -555,7 +559,9 @@ class LLMGateway:
                     raise ValueError("Model returned no completion choices.")
                 message = getattr(choices[0], "message", None)
                 content = str(getattr(message, "content", None) or "")
-                parsed = normalize_ascii_punctuation(json.loads(content))
+                parsed = normalize_ascii_punctuation(
+                    json.loads(content, parse_constant=_reject_non_finite_json_constant)
+                )
                 if not isinstance(parsed, (dict, list)):
                     raise ValueError("Model JSON root must be an object or array.")
                 validate_english_only_payload(parsed)

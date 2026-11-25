@@ -657,14 +657,71 @@ def search_revision_plan(
             preserved_components,
             entity_bindings,
         )
+        effective_required = (
+            tuple(required_transitions)
+            if required_transitions is not None
+            else strategy.required_transitions
+        )
+        shell = _connected_outer_shell(base_rows)
+        allowed_operators = set(strategy.operators)
+        effective_preserved = set(preserved_components or ()) | set(strategy.preserve)
+        required_primitives = [
+            item
+            for item in (
+                _required_transition_primitive(
+                    base_rows,
+                    transition,
+                    allowed_operators,
+                    effective_preserved,
+                    shell,
+                )
+                for transition in effective_required
+            )
+            if item is not None
+        ]
+        required_positions = {
+            (column - 1, row - 1)
+            for row, column, _before, _after in effective_required
+        }
+        prioritized_primitives = [
+            item for item in primitives
+            if item.positions and item.positions <= required_positions
+        ]
+        other_primitives = [
+            item for item in primitives
+            if not (item.positions and item.positions <= required_positions)
+        ]
+        candidate_primitives = []
+        seen_primitive_keys = set()
+        for item in (*required_primitives, *prioritized_primitives, *other_primitives):
+            key = (item.operator, item.changes)
+            if key in seen_primitive_keys:
+                continue
+            seen_primitive_keys.add(key)
+            candidate_primitives.append(item)
+            if len(candidate_primitives) >= PRIMITIVE_LIMIT:
+                break
+        max_depth = min(
+            strategy.edit_budget,
+            max(BEAM_DEPTH, len(effective_required)),
+        )
         beam = []
-        for primitive in primitives[:PRIMITIVE_LIMIT]:
+        exact_state = None
+        if effective_required and len(required_primitives) == len(effective_required):
+            exact_state = _state_from_primitives(
+                base_rows,
+                tuple(required_primitives),
+                strategy.edit_budget,
+            )
+        for primitive in candidate_primitives:
             state = _state_from_primitives(base_rows, (primitive,), strategy.edit_budget)
             if state is not None:
                 beam.append(state)
         beam = _select_beam(beam)
+        if exact_state is not None and all(item.rows != exact_state.rows for item in beam):
+            beam = [exact_state, *beam[:BEAM_WIDTH - 1]]
 
-        for depth in range(1, BEAM_DEPTH + 1):
+        for depth in range(1, max_depth + 1):
             if not beam:
                 break
             next_states = []
@@ -690,22 +747,18 @@ def search_revision_plan(
                         baseline_metrics,
                         diagnostics,
                         verified,
-                        required_transitions=(
-                            tuple(required_transitions)
-                            if required_transitions is not None
-                            else strategy.required_transitions
-                        ),
+                        required_transitions=effective_required,
                         deadline=deadline,
                         clock=clock,
                     )
                     if diagnostics["deadlineReached"] or len(verified) >= maximum_valid_candidates:
                         break
-                if depth < BEAM_DEPTH:
+                if depth < max_depth:
                     used_positions = frozenset().union(*(
                         primitive.positions for primitive in state.primitives
                     ))
                     last_key = _primitive_key(state.primitives[-1])
-                    for primitive in primitives[:PRIMITIVE_LIMIT]:
+                    for primitive in candidate_primitives:
                         if _primitive_key(primitive) <= last_key or primitive.positions & used_positions:
                             continue
                         expanded = _state_from_primitives(
@@ -990,6 +1043,43 @@ def _focus_distance(focus, x, y):
     if focus is None:
         return 0
     return abs((focus.column - 1) - x) + abs((focus.row - 1) - y)
+
+
+_REQUIRED_TRANSITION_OPERATOR = {
+    (".", "#"): ("add_wall", ("add_wall",)),
+    ("#", "."): ("remove_wall", ("remove_wall",)),
+    (".", "@"): ("add_water", ("add_water",)),
+    ("@", "."): ("remove_water", ("remove_water",)),
+    ("@", "#"): ("water_to_wall", ("remove_water", "add_wall")),
+    ("#", "@"): ("wall_to_water", ("remove_wall", "add_water")),
+}
+
+
+def _required_transition_primitive(
+    base_rows,
+    transition,
+    allowed_operators,
+    effective_preserved,
+    shell,
+):
+    row, column, before, after = transition
+    x = column - 1
+    y = row - 1
+    if not (0 <= y < len(base_rows) and 0 <= x < len(base_rows[y])):
+        return None
+    if base_rows[y][x] != before:
+        return None
+    if before == "#" and (x, y) in shell:
+        return None
+    mapped = _REQUIRED_TRANSITION_OPERATOR.get((before, after))
+    if mapped is None:
+        return None
+    op_name, required_ops = mapped
+    if not set(required_ops).issubset(allowed_operators):
+        return None
+    if any(_operator_changes_preserved_component(op, effective_preserved) for op in required_ops):
+        return None
+    return Primitive(op_name, ((x, y, before, after),), True, 0)
 
 
 def _state_from_primitives(base_rows, primitives, edit_budget):

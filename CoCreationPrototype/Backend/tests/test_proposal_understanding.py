@@ -312,6 +312,27 @@ class ProposalUnderstandingTests(unittest.TestCase):
         self.assertIn(first["body"], result.assistant_message)
         self.assertIn(second["question"], result.assistant_message)
 
+    def test_turn_understanding_and_review_use_25s_18s_caps_bounded_by_deadline(self):
+        answer = "Around the first destination"
+        interpretation = topic(focus=[item(answer, entities=["T1"])])
+        bad = understanding(answer, interpretation, "targets", "change", ["revision_request"])
+        good = understanding(answer, interpretation, "targets")
+        _, call = self.classify(answer, [bad, review_fixture(bad, good)])
+        self.assertEqual([x.kwargs["task"] for x in call.call_args_list], ["turn_understanding", "turn_understanding_review"])
+        self.assertEqual(call.call_args_list[0].args[5], 25.0)
+        self.assertEqual(call.call_args_list[1].args[5], 18.0)
+
+        short_call = RecordedAsyncCall(side_effect=[response(good)])
+        with llm_scope(completion_requester=short_call):
+            llm.classify_turn_understanding(
+                [{"role": "user", "content": answer}],
+                self.snapshot,
+                "offline-short-deadline",
+                proposal_context=self.context,
+                _deadline=time.monotonic() + 10.0,
+            )
+        self.assertLessEqual(short_call.call_args_list[0].args[5], 10.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from ..services.blueprint_planner import (
     validate_client_level_plan_inputs,
     validate_ha_revision_contract,
     validate_human_adjustment_clarity_payload,
+    validate_plan,
 )
 
 
@@ -75,6 +76,21 @@ def expand_creative_idea(
     return execution.value
 
 
+def _validate_previous_plan_or_400(previous_plan):
+    try:
+        validate_plan(
+            previous_plan,
+            {
+                "noWater": previous_plan.get("minWaterAreas") == 0
+                and previous_plan.get("maxWaterAreas") == 0,
+                "noInternalWalls": previous_plan.get("minWallObstacleBlocks") == 0
+                and previous_plan.get("maxWallObstacleBlocks") == 0,
+            },
+        )
+    except (TypeError, ValueError) as exception:
+        raise HTTPException(status_code=400, detail=str(exception)) from exception
+
+
 @router.post("/generate-ha-revision-plans")
 def generate_ha_revision_plans(
     payload: HARevisionPlanRequest,
@@ -91,6 +107,8 @@ def generate_ha_revision_plans(
 
     if not isinstance(previous_plan, dict) or not previous_plan:
         raise HTTPException(status_code=400, detail="previousLevelPlan is required")
+
+    _validate_previous_plan_or_400(previous_plan)
 
     data["adjustmentText"] = adjustment_text
 
@@ -129,8 +147,16 @@ def revise_ha_revision_plan(
     if not isinstance(previous_plan, dict) or not previous_plan:
         raise HTTPException(status_code=400, detail="previousLevelPlan is required")
 
+    _validate_previous_plan_or_400(previous_plan)
+
     if not isinstance(original_option, dict) or not original_option:
         raise HTTPException(status_code=400, detail="originalOption is required")
+
+    if not str(original_option.get("id") or "").strip():
+        raise HTTPException(status_code=400, detail="original HA option id is required")
+
+    if not str(original_option.get("title") or "").strip():
+        raise HTTPException(status_code=400, detail="original HA option title is required")
 
     try:
         validate_ha_revision_contract(

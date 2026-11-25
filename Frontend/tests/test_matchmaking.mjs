@@ -680,4 +680,106 @@ test("Dashboard access query gate opens password verification before fetching re
     assert.equal(fetchCount, 0);
     assert.equal(byId.get("deleteDialog").open, true);
     assert.equal(byId.get("deleteDialogTitle").textContent, "Dashboard access required");
+
+    // Cancel + Refresh must keep the dashboard locked with 0 fetches and re-open the password gate
+    byId.get("deleteDialogCancel").dispatch("click");
+    assert.equal(byId.get("deleteDialog").open, false);
+    assert.match(byId.get("statusLine").textContent, /password required/i);
+    byId.get("refreshButton").dispatch("click");
+    assert.equal(fetchCount, 0);
+    assert.equal(byId.get("deleteDialog").open, true);
+});
+
+test("Study Dashboard multi-idea same-session separation, finalizeJourney sort, statCompleted, and file:// safe unlock", async () => {
+    const journeys = buildIdeaJourneys({
+        creativeIdeas: [
+            { ideaId: "idea-2", sessionId: "shared-s", ideaText: "Newer idea", timestamp: "2026-11-25T10:05:00Z" },
+            { ideaId: "idea-1", sessionId: "shared-s", ideaText: "First idea", timestamp: "2026-11-25T10:00:00Z" }
+        ],
+        creativeExpansionChoices: [],
+        levels: [
+            {
+                levelRunId: "run-1",
+                start: { source: "pc", sceneName: "Custom_Level", sessionId: "shared-s", creativeIdeaId: "idea-1", timestamp: "2026-11-25T10:01:00Z" },
+                end: { completed: true, serverReceivedAt: "2026-11-25T10:01:20Z" }
+            },
+            {
+                levelRunId: "run-2",
+                start: { source: "pc", sceneName: "Custom_Level", sessionId: "shared-s", creativeIdeaId: "idea-1", timestamp: "2026-11-25T10:02:00Z" },
+                end: null
+            }
+        ],
+        surveyResponses: [],
+        haPlanEvents: [],
+        journeyEvents: []
+    });
+    assert.equal(journeys.length, 2);
+    const j1 = journeys.find(item => item.ideaId === "idea-1");
+    assert.equal(j1.ideaText, "First idea");
+    assert.equal(j1.status, "anomaly");
+
+    // Inspector should render serverReceivedAt instead of "Missing end record" when end.timestamp is absent
+    const { document, byId } = createFakeDom();
+    const inspector = buildStudyTimelineStages(j1);
+    assert.equal(inspector[0].type, "creative");
+    const collectText = node => {
+        if (!node) return "";
+        if (typeof node === "string") return node;
+        return [node.textContent || "", ...(node.children || []).map(collectText)].join(" ");
+    };
+    const studyWindow = createFakeWindow({
+        href: "file:///D:/Sokoban_AI_Demo/Frontend/train.html?access=1",
+        origin: "null",
+        protocol: "file:",
+        pathname: "/D:/Sokoban_AI_Demo/Frontend/train.html",
+        search: "?access=1"
+    });
+    studyWindow.window.history = {
+        replaceState() {
+            throw new Error("SecurityError in file://");
+        }
+    };
+    const studyDashboard = createStudyDashboard({
+        window: studyWindow.window,
+        document,
+        fetch: async (url, init = {}) => {
+            if (String(url).endsWith("/verify-dashboard-password")) {
+                return { ok: true, status: 200, async json() { return { status: "ok" }; } };
+            }
+            return {
+                ok: true,
+                status: 200,
+                async json() {
+                    return {
+                        creativeIdeas: [{ ideaId: "idea-1", sessionId: "s-1", ideaText: "Oldest", timestamp: "2026-11-25T10:00:00Z" }],
+                        levels: [
+                            { levelRunId: "r-ok", start: { source: "pc", sceneName: "Custom_Level", sessionId: "s-1", creativeIdeaId: "idea-1", timestamp: "2026-11-25T10:01:00Z" }, end: { completed: true, serverReceivedAt: "2026-11-25T10:01:30Z" } },
+                            { levelRunId: "r-miss", start: { source: "pc", sceneName: "Custom_Level", sessionId: "s-1", creativeIdeaId: "idea-1", timestamp: "2026-11-25T10:02:00Z" }, end: null }
+                        ],
+                        surveyResponses: [],
+                        creativeExpansionChoices: [],
+                        haPlanEvents: [],
+                        journeyEvents: []
+                    };
+                }
+            };
+        }
+    });
+    await studyDashboard.init();
+    byId.get("deletePasswordInput").value = "pw123";
+    await byId.get("deleteDialogForm").dispatch("submit");
+    // Wait a tick for async submitDeleteDialog
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(byId.get("deleteDialog").open, false);
+    // statCompleted must align with status === "completed" (0 here because journey is anomaly)
+    assert.equal(String(byId.get("statCompleted").textContent), "0");
+    // Render inspector detail and check serverReceivedAt fallback
+    studyDashboard.selectJourney(studyDashboard.state.journeys[0].key);
+    const okStage = buildStudyTimelineStages(studyDashboard.state.journeys[0]).find(
+        stage => stage.level && stage.level.levelRunId === "r-ok"
+    );
+    studyDashboard.renderInspector(okStage);
+    const inspectorText = collectText(byId.get("inspectorBody"));
+    assert.doesNotMatch(inspectorText, /Missing end record/);
+    assert.match(inspectorText, /Ended/);
 });

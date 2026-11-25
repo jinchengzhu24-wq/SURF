@@ -171,6 +171,10 @@ public class OnlineLevelController : MonoBehaviour
         {
             yield return levelManager.FadeToBlackForExternalInitialLoad();
         }
+        if (leaving)
+        {
+            yield break;
+        }
 
         levelLoader.levelData = levelData;
         levelLoader.LoadLevel();
@@ -180,6 +184,10 @@ public class OnlineLevelController : MonoBehaviour
             yield return levelManager.FadeFromBlackAfterExternalInitialLoad(
                 false
             );
+        }
+        if (leaving)
+        {
+            yield break;
         }
 
         runMoveCount = 0;
@@ -206,6 +214,10 @@ public class OnlineLevelController : MonoBehaviour
             Mathf.Max(0f, Time.realtimeSinceStartup - runStartedAt) * 100f
         ) / 100f;
 
+        if (leaveButton != null)
+        {
+            leaveButton.interactable = false;
+        }
         if (levelManager != null)
         {
             levelManager.SetExternalRestartAllowed(false);
@@ -224,8 +236,13 @@ public class OnlineLevelController : MonoBehaviour
         runDurationSeconds = ChallengeTimeLimitSeconds;
         UpdateCountdownText(0f);
 
+        if (leaveButton != null)
+        {
+            leaveButton.interactable = false;
+        }
         if (levelManager != null)
         {
+            levelManager.SetExternalCompletionSuppressed(true);
             levelManager.SetExternalPlayerInputEnabled(false);
             levelManager.SetExternalRestartAllowed(false);
         }
@@ -264,6 +281,10 @@ public class OnlineLevelController : MonoBehaviour
         {
             return;
         }
+        if (leaveButton != null)
+        {
+            leaveButton.interactable = false;
+        }
         SetPanelVisible(completePanel, true);
         SetPanelVisible(statusPanel, false);
 
@@ -301,7 +322,9 @@ public class OnlineLevelController : MonoBehaviour
                 },
                 error => SetText(
                     ActiveHintText,
-                    "RESULT SUBMISSION FAILED. RETRYING..."
+                    OnlineMatchClient.IsTerminalClientError(client.LastHttpStatusCode)
+                        ? "THIS MATCH WAS CANCELLED OR CLOSED.\nSELECT LEAVE TO RETURN TO LOBBY."
+                        : "RESULT SUBMISSION FAILED. RETRYING..."
                 )
             );
 
@@ -328,6 +351,15 @@ public class OnlineLevelController : MonoBehaviour
                     resultLeaveButton.interactable = true;
                 }
 
+                yield break;
+            }
+
+            if (OnlineMatchClient.IsTerminalClientError(client.LastHttpStatusCode))
+            {
+                if (leaveButton != null)
+                {
+                    leaveButton.interactable = true;
+                }
                 yield break;
             }
 

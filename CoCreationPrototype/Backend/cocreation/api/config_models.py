@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from cocreation.clock import iso_time, parse_time
 from cocreation.domain.level_validation import (
@@ -142,6 +142,12 @@ class LegacyChatRequest(StrictModel):
     messages: list[ChatMessage]
 
 
+def _reject_bool_number(value):
+    if isinstance(value, bool):
+        raise ValueError('Boolean value is not allowed for a numeric field.')
+    return value
+
+
 class CreateSessionRequest(StrictModel):
     rows: list[str]
     initialDraftMethod: Literal['partial_completion', 'description_generation']
@@ -149,6 +155,11 @@ class CreateSessionRequest(StrictModel):
     idempotencyKey: str
     matchId: str | None = None
     playerNumber: int | None = None
+
+    @field_validator('playerNumber', mode='before')
+    @classmethod
+    def reject_bool_player_number(cls, value):
+        return _reject_bool_number(value)
 
 
 class DemoSessionRequest(StrictModel):
@@ -292,6 +303,19 @@ class PlayMetricsRequest(StrictModel):
     restartCount: int = 0
     minimumMoves: int = -1
     minimumPushes: int = -1
+
+    @field_validator(
+        'durationSeconds',
+        'moveCount',
+        'pushCount',
+        'restartCount',
+        'minimumMoves',
+        'minimumPushes',
+        mode='before',
+    )
+    @classmethod
+    def reject_bool_metrics(cls, value):
+        return _reject_bool_number(value)
 
 
 def _online_sync_api_error(error, *, rejected_code, unavailable_code, saved_item):
@@ -516,7 +540,14 @@ def _validate_metrics(payload):
         payload.durationSeconds < 0
         or payload.durationSeconds > 86400
         or min(payload.moveCount, payload.pushCount, payload.restartCount) < 0
-        or max(payload.moveCount, payload.pushCount, payload.restartCount) > 1000000
+        or max(
+            payload.moveCount,
+            payload.pushCount,
+            payload.restartCount,
+            payload.minimumMoves,
+            payload.minimumPushes,
+        ) > 1000000
+        or min(payload.minimumMoves, payload.minimumPushes) < -1
         or payload.pushCount > payload.moveCount
     ):
         raise ApiError(400, 'INVALID_PLAY_METRICS', 'Play metrics are invalid.')

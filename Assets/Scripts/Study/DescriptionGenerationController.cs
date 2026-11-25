@@ -65,6 +65,9 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     private int questionIndex;
     private bool summaryReady;
     private bool requestInFlight;
+    private bool draftAttempted;
+    private int lockedDifficultyIndex = -1;
+    private int lockedLayoutIndex = -1;
 
     private sealed class Question
     {
@@ -478,10 +481,11 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private void SetControlsInteractable(bool interactable)
     {
-        previousDifficultyButton.interactable = interactable;
-        nextDifficultyButton.interactable = interactable;
-        previousLayoutButton.interactable = interactable;
-        nextLayoutButton.interactable = interactable;
+        bool allowAdjustments = interactable && !draftAttempted;
+        previousDifficultyButton.interactable = allowAdjustments;
+        nextDifficultyButton.interactable = allowAdjustments;
+        previousLayoutButton.interactable = allowAdjustments;
+        nextLayoutButton.interactable = allowAdjustments;
         confirmButton.interactable = interactable && summaryReady && !requestInFlight;
     }
 
@@ -513,8 +517,22 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     private void SaveAndContinue()
     {
         if (!summaryReady || requestInFlight) return;
-        int difficultyIndex = displayedDifficulty == DifficultyPresets.Length ? UnityEngine.Random.Range(0, DifficultyPresets.Length) : displayedDifficulty;
-        int layoutIndex = displayedLayout == LayoutPresets.Length ? UnityEngine.Random.Range(0, LayoutPresets.Length) : displayedLayout;
+        if (!draftAttempted)
+        {
+            lockedDifficultyIndex = displayedDifficulty == DifficultyPresets.Length
+                ? UnityEngine.Random.Range(0, DifficultyPresets.Length)
+                : displayedDifficulty;
+            lockedLayoutIndex = displayedLayout == LayoutPresets.Length
+                ? UnityEngine.Random.Range(0, LayoutPresets.Length)
+                : displayedLayout;
+            draftAttempted = true;
+        }
+        int difficultyIndex = lockedDifficultyIndex >= 0 && lockedDifficultyIndex < DifficultyPresets.Length
+            ? lockedDifficultyIndex
+            : 1;
+        int layoutIndex = lockedLayoutIndex >= 0 && lockedLayoutIndex < LayoutPresets.Length
+            ? lockedLayoutIndex
+            : 1;
         DifficultyPresets[difficultyIndex].Apply(settings.preferences);
         LayoutPresets[layoutIndex].Apply(settings.preferences);
         settings.finalDifficulty = DifficultyPresets[difficultyIndex].label;
@@ -568,6 +586,11 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         }
 
         requestInFlight = false;
+        if (string.IsNullOrWhiteSpace(nextSceneName) || !Application.CanStreamedLevelBeLoaded(nextSceneName))
+        {
+            ShowDraftRecordFailure("The DG result scene is unavailable.");
+            yield break;
+        }
         // The neutral answers only inform this one recommendation.  The persisted
         // context (and the 8000 Draft record) contains confirmed settings only.
         settings.firstMovePreference = string.Empty;
@@ -575,12 +598,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         settings.spacePreference = string.Empty;
         settings.routeRhythmPreference = string.Empty;
         DescriptionGenerationContext.Save(settings);
-        if (!string.IsNullOrWhiteSpace(nextSceneName) && Application.CanStreamedLevelBeLoaded(nextSceneName))
-        {
-            SceneManager.LoadScene(nextSceneName);
-            yield break;
-        }
-        ShowDraftRecordFailure("The DG result scene is unavailable.");
+        SceneManager.LoadScene(nextSceneName);
     }
 
     private void ShowDraftRecordFailure(string message)

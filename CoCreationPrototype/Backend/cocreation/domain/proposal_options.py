@@ -165,11 +165,13 @@ def parse_envelope(payload, discovery, snapshot):
     compared = payload.get("comparedOptions")
     discriminator = payload.get("discriminant")
     if (not isinstance(compared, list) or any(not isinstance(item, str) for item in compared)
-            or len(set(compared)) != len(compared) or not isinstance(discriminator, str) or len(discriminator) > 240):
+            or not isinstance(discriminator, str) or len(discriminator) > 240):
         invalid("question", "OPTION_QUESTION_INVALID")
     aliases = {str(index + 1): item["id"] for index, item in enumerate(options)}
     ids = {item["id"] for item in options}
     compared = [aliases.get(item, item) for item in compared]
+    if len(set(compared)) != len(compared):
+        invalid("question", "OPTION_QUESTION_INVALID")
     question = payload.get("question")
     if len(options) >= 2:
         if len(compared) < 2 or not set(compared) <= ids or not discriminator.strip() or not isinstance(question, str) or not question.strip():

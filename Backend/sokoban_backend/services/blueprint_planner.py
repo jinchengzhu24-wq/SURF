@@ -413,6 +413,16 @@ def normalize_generation_preferences(raw_preferences):
                     "generationPreferences.corridorWidth must be 0 when "
                     "corridorPlacement is none"
                 )
+            if normalized.get("corridorPriority") == "required":
+                raise ValueError(
+                    "generationPreferences.corridorPriority cannot be required when "
+                    "corridorPlacement is none"
+                )
+            if normalized.get("corridorRole") == "required_box_route":
+                raise ValueError(
+                    "generationPreferences.corridorRole cannot be required_box_route when "
+                    "corridorPlacement is none"
+                )
 
             normalized["corridorWidth"] = 0
             normalized.setdefault("corridorOrientation", "any")
@@ -503,16 +513,17 @@ def apply_selected_ha_plan(
             generation_preferences,
         )
         effective_constraints = dict(feature_constraints or {})
+        prefs = generation_preferences or {}
 
         if (
-            candidate.get("minWaterAreas") == 0
-            and candidate.get("maxWaterAreas") == 0
+            prefs.get("minWaterAreas") == 0
+            and prefs.get("maxWaterAreas") == 0
         ):
             effective_constraints["noWater"] = True
 
         if (
-            candidate.get("minWallObstacleBlocks") == 0
-            and candidate.get("maxWallObstacleBlocks") == 0
+            prefs.get("minWallObstacleBlocks") == 0
+            and prefs.get("maxWallObstacleBlocks") == 0
         ):
             effective_constraints["noInternalWalls"] = True
 
@@ -1140,6 +1151,8 @@ class BlueprintPlannerService:
                 generation_preferences["minWallObstacleBlocks"] == 0
                 and generation_preferences["maxWallObstacleBlocks"] == 0
             )
+        elif generation_preferences.get("corridorPlacement") not in (None, "", "none"):
+            feature_constraints["noInternalWalls"] = False
 
         variation_seed = int(self.clock.now() * 1000)
 

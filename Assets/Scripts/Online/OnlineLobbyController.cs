@@ -242,6 +242,14 @@ public class OnlineLobbyController : MonoBehaviour
                 error =>
                 {
                     completed = true;
+                    if (client.LastHttpStatusCode == 404)
+                    {
+                        OnlineMatchContext.Clear();
+                        ShowGeneratedCode("");
+                        SetStatus("The room expired or was removed. Create or join a new room.");
+                        SetRoomActionsInteractable(true);
+                        return;
+                    }
                     SetStatus("Connection error: " + error);
                 }
             );

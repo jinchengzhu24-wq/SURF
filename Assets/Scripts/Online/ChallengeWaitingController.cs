@@ -69,19 +69,42 @@ public class ChallengeWaitingController : MonoBehaviour
 
     private IEnumerator SynchronizeChallenge()
     {
+        bool waitingStatusInitialized = false;
         while (!leaving && !transitioning && OnlineMatchContext.HasMatch)
         {
-            OnlinePlayerState currentPlayer = OnlineMatchContext.RoomState
+            OnlineRoomState currentRoom = OnlineMatchContext.RoomState;
+            if (currentRoom != null && currentRoom.status == "cancelled")
+            {
+                UpdateFromState(currentRoom);
+                yield break;
+            }
+
+            OnlinePlayerState currentPlayer = currentRoom
                 ?.FindPlayer(OnlineMatchContext.PlayerNumber);
 
             if (currentPlayer == null || !currentPlayer.challengeSubmitted)
             {
+                waitingStatusInitialized = false;
                 yield return SubmitChallenge();
+                if (OnlineMatchClient.IsTerminalClientError(client.LastHttpStatusCode))
+                {
+                    yield return RefreshRoom();
+                    yield break;
+                }
             }
             else
             {
-                SetStatus("WAITING FOR OPPONENT TO FINISH CREATING...");
+                if (!waitingStatusInitialized)
+                {
+                    SetStatus("WAITING FOR OPPONENT TO FINISH CREATING...");
+                    waitingStatusInitialized = true;
+                }
                 yield return RefreshRoom();
+                if (OnlineMatchClient.IsTerminalClientError(client.LastHttpStatusCode)
+                    || (OnlineMatchContext.RoomState != null && OnlineMatchContext.RoomState.status == "cancelled"))
+                {
+                    yield break;
+                }
             }
 
             if (!leaving && !transitioning)

@@ -101,4 +101,12 @@ test("webgl template preserves dashboard modal recovery, lobby lock, origin gati
   assert.match(templateHtml, /sokoban:cocreation-show-lab[\s\S]*ReceiveBrowserReturnToLab/);
   assert.match(templateHtml, /window\.SokobanSetLobbyJoinInteractable = function/);
   assert.match(jslib, /SokobanLobbySetJoinInteractable:\s*function/);
+
+  // New system-testing remediations on WebGL template
+  assert.match(templateHtml, /function exitCanvasFullscreenIfNeeded\(\)/);
+  assert.match(templateHtml, /id="cocreation-return-unity"/);
+  assert.match(templateHtml, /expiresAt:\s*Date\.now\(\)\s*\+\s*30000/);
+  assert.doesNotMatch(templateHtml, /id="sokoban-lobby-join-room-code"[^>]*maxlength="6"/);
+  assert.match(templateHtml, /replace\(\/\^\\s\*ROOM\[:\\s-\]\+\/, ""\)/);
+  assert.match(templateHtml, /!coCreationHost\.classList\.contains\("parked"\)/);
 });

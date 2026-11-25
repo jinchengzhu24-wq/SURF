@@ -438,6 +438,13 @@ export function createWorkbenchApp(deps = {}) {
         const status = state.session.status;
         elements.finalActions.hidden = status !== "active";
         elements.intentionForm.hidden = status !== "awaiting_intention";
+        const unsyncedIntention = status === "awaiting_intention" ? state.session.intention?.content : "";
+        if (unsyncedIntention && !elements.intentionInput.value.trim()) {
+            elements.intentionInput.value = unsyncedIntention;
+        }
+        if ("readOnly" in elements.intentionInput || elements.intentionInput.tagName === "TEXTAREA") {
+            elements.intentionInput.readOnly = Boolean(unsyncedIntention);
+        }
         elements.completeCard.hidden = status !== "completed";
         // A completed session always offers the return action.  Some local or
         // legacy sessions do not carry online-room metadata, but they may still

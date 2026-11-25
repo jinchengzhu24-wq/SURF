@@ -142,7 +142,7 @@
       #sokoban-lobby-native-overlay {
         position: absolute;
         inset: 0;
-        z-index: 20;
+        z-index: 150;
         pointer-events: none;
       }
       #sokoban-lobby-native-overlay input {
@@ -227,7 +227,6 @@
                 id="sokoban-lobby-join-room-code"
                 type="text"
                 inputmode="text"
-                maxlength="6"
                 autocomplete="off"
                 autocapitalize="characters"
                 spellcheck="false"
@@ -289,6 +288,7 @@
           <p>The embedded workspace did not respond. The Unity session is still available.</p>
           <div class="cocreation-host-actions">
             <button id="cocreation-retry" type="button">RETRY</button>
+            <button id="cocreation-return-unity" type="button">RETURN TO UNITY</button>
           </div>
         </div>
       </div>
@@ -337,6 +337,7 @@
       var coCreationHostLoading = document.querySelector("#cocreation-host-loading");
       var coCreationHostError = document.querySelector("#cocreation-host-error");
       var coCreationRetry = document.querySelector("#cocreation-retry");
+      var coCreationReturnUnity = document.querySelector("#cocreation-return-unity");
       var lobbyReferenceWidth = 1920;
       var lobbyReferenceHeight = 1080;
       var lobbyOverlayVisible = false;
@@ -444,6 +445,21 @@
       var coCreationHostTimer = 0;
       var coCreationHostStartedAt = 0;
       var coCreationHostReloadSequence = 0;
+      var coCreationNavigationToken = 0;
+      var coCreationHandshakeTimeoutMs = 12000;
+      var coCreationOuterLoadTimeoutMs = 20000;
+
+      function exitCanvasFullscreenIfNeeded() {
+        var fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+        if (fullscreenElement === canvas && typeof document.exitFullscreen === "function") {
+          try {
+            var exitResult = document.exitFullscreen();
+            if (exitResult && typeof exitResult.catch === "function") {
+              exitResult.catch(function () {});
+            }
+          } catch (_error) {}
+        }
+      }
 
       function isEmbeddedCoCreationSource(source) {
         return !!coCreationFrame && source === coCreationFrame.contentWindow;
@@ -470,15 +486,16 @@
         coCreationHostTimer = 0;
       }
 
-      function startCoCreationHostHandshake() {
+      function startCoCreationHostHandshake(timeoutMs) {
         stopCoCreationHostHandshake();
         coCreationHostStartedAt = Date.now();
+        var activeTimeoutMs = timeoutMs || coCreationHandshakeTimeoutMs;
         coCreationHostTimer = window.setInterval(function () {
           if (coCreationHostReady) {
             stopCoCreationHostHandshake();
             return;
           }
-          if (Date.now() - coCreationHostStartedAt >= 5000) {
+          if (Date.now() - coCreationHostStartedAt >= activeTimeoutMs) {
             stopCoCreationHostHandshake();
             coCreationHostLoading.hidden = true;
             coCreationHostError.hidden = false;
@@ -491,6 +508,7 @@
 
       function showCoCreationHost() {
         if (!coCreationHost) return;
+        exitCanvasFullscreenIfNeeded();
         coCreationHost.hidden = false;
         coCreationHost.classList.remove("parked");
         coCreationHost.setAttribute("aria-hidden", "false");
@@ -502,13 +520,18 @@
         }
       }
 
-      function bindCoCreationFrame(frame) {
+      function bindCoCreationFrame(frame, navToken) {
         frame.addEventListener("load", function () {
           if (frame !== coCreationFrame || !coCreationSessionId) return;
-          coCreationHostReady = false;
+          if (navToken && navToken !== coCreationNavigationToken) return;
+          if (coCreationHostReady) {
+            coCreationHostLoading.hidden = true;
+            coCreationHostError.hidden = true;
+            return;
+          }
           coCreationHostLoading.hidden = false;
           coCreationHostError.hidden = true;
-          startCoCreationHostHandshake();
+          startCoCreationHostHandshake(coCreationHandshakeTimeoutMs);
         });
       }
 
@@ -531,6 +554,11 @@
         try {
           var targetUrl = new URL(value, window.location.href);
           targetUrl.searchParams.delete("workspaceReload");
+          var hashParams = new URLSearchParams(String(targetUrl.hash || "").replace(/^#/, ""));
+          var sessionParam = hashParams.get("session");
+          if (sessionParam) {
+            return targetUrl.origin + targetUrl.pathname + "#session=" + sessionParam;
+          }
           return targetUrl.href;
         } catch (_error) {
           return "";
@@ -540,22 +568,25 @@
       function reloadCoCreationFrame(forceReload) {
         if (!coCreationHostUrl || !coCreationHost || !coCreationFrame) return;
         stopCoCreationHostHandshake();
+        coCreationNavigationToken += 1;
+        var navToken = coCreationNavigationToken;
         preparedDraftRegeneration = null;
         coCreationHostReady = false;
         coCreationHostLoading.hidden = false;
         coCreationHostError.hidden = true;
         var replacement = coCreationFrame.cloneNode(false);
         replacement.removeAttribute("src");
-        bindCoCreationFrame(replacement);
+        bindCoCreationFrame(replacement, navToken);
         coCreationFrame.replaceWith(replacement);
         coCreationFrame = replacement;
         coCreationLabWindow = replacement.contentWindow;
         replacement.src = buildCoCreationFrameUrl(forceReload).href;
-        startCoCreationHostHandshake();
+        startCoCreationHostHandshake(coCreationOuterLoadTimeoutMs);
       }
 
       function parkCoCreationHost() {
         if (!coCreationHost || coCreationHost.hidden) return;
+        stopCoCreationHostHandshake();
         coCreationHost.classList.add("parked");
         coCreationHost.setAttribute("aria-hidden", "true");
         canvas.focus();
@@ -590,17 +621,33 @@
         showCoCreationHost();
 
         if (sessionChanged
-          || canonicalCoCreationFrameUrl(coCreationFrame.src) !== coCreationHostUrl) {
+          || canonicalCoCreationFrameUrl(coCreationFrame.src) !== canonicalCoCreationFrameUrl(coCreationHostUrl)) {
           reloadCoCreationFrame(false);
         } else {
-          startCoCreationHostHandshake();
+          startCoCreationHostHandshake(coCreationHandshakeTimeoutMs);
         }
       };
 
-      bindCoCreationFrame(coCreationFrame);
+      bindCoCreationFrame(coCreationFrame, coCreationNavigationToken);
 
       coCreationRetry.addEventListener("click", function () {
         reloadCoCreationFrame(true);
+      });
+      if (coCreationReturnUnity) {
+        coCreationReturnUnity.addEventListener("click", function () {
+          parkCoCreationHost();
+        });
+      }
+      window.addEventListener("keydown", function (event) {
+        if (event.key === "Escape"
+          && coCreationHost
+          && !coCreationHost.hidden
+          && !coCreationHost.classList.contains("parked")
+          && coCreationHostError
+          && !coCreationHostError.hidden) {
+          event.preventDefault();
+          parkCoCreationHost();
+        }
       });
 
       window.addEventListener("message", function (event) {
@@ -619,7 +666,9 @@
         stopCoCreationHostHandshake();
         coCreationHostLoading.hidden = true;
         coCreationHostError.hidden = true;
-        showCoCreationHost();
+        if (coCreationHost && !coCreationHost.hidden && !coCreationHost.classList.contains("parked")) {
+          showCoCreationHost();
+        }
       });
 
       window.addEventListener("message", function (event) {
@@ -694,7 +743,7 @@
             sessionId: message.sessionId,
             source: event.source,
             origin: event.origin,
-            expiresAt: Date.now() + 10000
+            expiresAt: Date.now() + 30000
           };
           coCreationLabWindow = event.source;
           coCreationLabOrigin = event.origin;
@@ -829,8 +878,9 @@
       };
 
       function normalizeLobbyRoomCode(value) {
-        return (value || "")
+        return String(value || "")
           .toUpperCase()
+          .replace(/^\s*ROOM[:\s-]+/, "")
           .replace(/[^A-Z0-9]/g, "")
           .slice(0, 6);
       }
@@ -879,6 +929,9 @@
 
       window.SokobanSetLobbyOverlayVisible = function (visible) {
         lobbyOverlayVisible = !!visible;
+        if (lobbyOverlayVisible) {
+          exitCanvasFullscreenIfNeeded();
+        }
         if (lobbyNativeOverlay) {
           lobbyNativeOverlay.hidden = !lobbyOverlayVisible;
         }
@@ -907,7 +960,10 @@
 
       window.SokobanSetLobbyJoinCode = function (value) {
         if (!lobbyJoinRoomCode) return;
-        lobbyJoinRoomCode.value = normalizeLobbyRoomCode(value);
+        var normalized = normalizeLobbyRoomCode(value);
+        if (lobbyJoinRoomCode.value !== normalized) {
+          lobbyJoinRoomCode.value = normalized;
+        }
       };
 
       window.SokobanSetLobbyJoinInteractable = function (interactable) {
@@ -961,9 +1017,6 @@
         }
 
         var targetInModal = dashboardAccessModal.contains(event.target);
-        if (!targetInModal && event.key !== "Tab") {
-          return;
-        }
 
         if (event.type === "keypress" || event.type === "keyup") {
           event.stopImmediatePropagation();
@@ -978,7 +1031,14 @@
 
         if (event.key === "Escape") {
           event.preventDefault();
-          closeDashboardAccessGate();
+          if (typeof closeDashboardAccessGate === "function") {
+            closeDashboardAccessGate();
+          }
+          return;
+        }
+
+        if (!targetInModal && event.key !== "Tab") {
+          event.preventDefault();
           return;
         }
 
@@ -1059,6 +1119,7 @@
       });
 
       window.SokobanOpenDashboardGate = function (url) {
+        exitCanvasFullscreenIfNeeded();
         dashboardAccessTarget = url || dashboardAccessTarget;
         dashboardAccessSubmit.disabled = false;
         dashboardAccessCancel.disabled = false;

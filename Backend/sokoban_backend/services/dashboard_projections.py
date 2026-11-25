@@ -1,4 +1,6 @@
 import html
+import json
+import math
 
 from ..config import Clock, STUDY_LOG_DIR, StudyLogPaths
 from ..storage.jsonl_store import (
@@ -12,6 +14,24 @@ from ..storage.jsonl_store import (
 )
 
 _DEFAULT_PATHS = StudyLogPaths(STUDY_LOG_DIR)
+
+
+def _is_finite_number(value):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _is_int_not_bool(value):
+    return not isinstance(value, bool) and isinstance(value, int)
+
+
+def _safe_hashable_id(value):
+    if value is None or isinstance(value, (bool, dict, list, set)):
+        return ""
+    return str(value).strip()
 
 
 def aggregate_dashboard_node_events(events):
@@ -327,9 +347,8 @@ def build_matchmaking_records_payload(
         for player in players.values():
             result = player["result"]
 
-            if result is not None and isinstance(
-                result.get("durationSeconds"),
-                (int, float),
+            if result is not None and _is_finite_number(
+                result.get("durationSeconds")
             ):
                 total_duration += float(result["durationSeconds"])
                 duration_count += 1
@@ -379,9 +398,11 @@ def filter_frontend_records(records):
 
 def filter_frontend_ha_plan_records(records):
     official_idea_ids = {
-        normalize_creative_idea_identifier(record.get("ideaId"))
+        idea_id
         for record in records
         if record.get("officialRound") is True
+        for idea_id in (normalize_creative_idea_identifier(record.get("ideaId")),)
+        if idea_id
     }
 
     return [
@@ -390,8 +411,10 @@ def filter_frontend_ha_plan_records(records):
         if record.get("officialRound") is True
         or (
             record.get("eventType") == "ha-plan-generation"
-            and normalize_creative_idea_identifier(record.get("ideaId"))
-            in official_idea_ids
+            and (
+                idea_id := normalize_creative_idea_identifier(record.get("ideaId"))
+            )
+            and idea_id in official_idea_ids
         )
     ]
 
@@ -444,9 +467,9 @@ def build_level_records_payload(
     resolved_paths = paths or _DEFAULT_PATHS
     resolved_clock = clock or Clock()
     session_ids = {
-        event.get("sessionId")
+        sid
         for event in events
-        if event.get("sessionId")
+        if (sid := _safe_hashable_id(event.get("sessionId")))
     }
     rounds = build_round_records(levels)
     completed_count = 0
@@ -476,17 +499,17 @@ def build_level_records_payload(
 
         duration = get_record_value(end, "durationSeconds")
 
-        if isinstance(duration, (int, float)):
+        if _is_finite_number(duration):
             total_duration_seconds += duration
             ended_level_count += 1
 
         move_count = get_record_value(end, "moveCount")
         push_count = get_record_value(end, "pushCount")
 
-        if isinstance(move_count, int):
+        if _is_int_not_bool(move_count):
             total_moves += move_count
 
-        if isinstance(push_count, int):
+        if _is_int_not_bool(push_count):
             total_pushes += push_count
 
     average_duration_seconds = (
@@ -569,7 +592,7 @@ def build_round_records(levels):
             get_record_value(start, "gameRoundIndex")
             or get_record_value(end, "gameRoundIndex")
         )
-        if isinstance(round_index, int) and round_index > 0:
+        if _is_int_not_bool(round_index) and round_index > 0:
             round_record["roundIndex"] = round_index
 
         scene_name = (
@@ -597,13 +620,13 @@ def build_round_records(levels):
             round_record["failedCount"] += 1
 
         duration = get_record_value(end, "durationSeconds")
-        if isinstance(duration, (int, float)):
+        if _is_finite_number(duration):
             round_record["totalDurationSeconds"] += duration
 
     ordered_for_labels = sorted(
         rounds.values(),
         key=lambda round_record: (
-            round_record["startedAt"] or round_record["endedAt"] or "",
+            str(round_record["startedAt"] or round_record["endedAt"] or ""),
             round_record["order"],
         ),
     )
@@ -635,7 +658,7 @@ def build_round_records(levels):
     return sorted(
         ordered_for_labels,
         key=lambda round_record: (
-            round_record["startedAt"] or round_record["endedAt"] or "",
+            str(round_record["startedAt"] or round_record["endedAt"] or ""),
             round_record["order"],
         ),
         reverse=True,
@@ -652,9 +675,9 @@ def build_survey_records_payload(
     resolved_paths = paths or _DEFAULT_PATHS
     resolved_clock = clock or Clock()
     session_ids = {
-        response.get("sessionId")
+        sid
         for response in responses
-        if response.get("sessionId")
+        if (sid := _safe_hashable_id(response.get("sessionId")))
     }
     survey_counts = {}
     total_duration_seconds = 0.0
@@ -667,7 +690,7 @@ def build_survey_records_payload(
 
         duration = response.get("durationSeconds")
 
-        if isinstance(duration, (int, float)):
+        if _is_finite_number(duration):
             total_duration_seconds += duration
             duration_count += 1
 
@@ -689,7 +712,7 @@ def build_survey_records_payload(
 
     sorted_responses = sorted(
         normalized_responses,
-        key=lambda response: response.get("serverReceivedAt") or response.get("timestamp") or "",
+        key=lambda response: str(response.get("serverReceivedAt") or response.get("timestamp") or ""),
         reverse=True,
     )
 
@@ -719,9 +742,9 @@ def build_creative_ideas_payload(
     resolved_paths = paths or _DEFAULT_PATHS
     resolved_clock = clock or Clock()
     session_ids = {
-        idea.get("sessionId")
+        sid
         for idea in ideas
-        if idea.get("sessionId")
+        if (sid := _safe_hashable_id(idea.get("sessionId")))
     }
     normalized_ideas = [
         normalize_creative_idea(idea)
@@ -729,7 +752,7 @@ def build_creative_ideas_payload(
     ]
     sorted_ideas = sorted(
         normalized_ideas,
-        key=lambda idea: idea.get("serverReceivedAt") or idea.get("timestamp") or "",
+        key=lambda idea: str(idea.get("serverReceivedAt") or idea.get("timestamp") or ""),
         reverse=True,
     )
 
@@ -756,9 +779,9 @@ def build_expansion_choices_payload(
     resolved_paths = paths or _DEFAULT_PATHS
     resolved_clock = clock or Clock()
     session_ids = {
-        choice.get("sessionId")
+        sid
         for choice in choices
-        if choice.get("sessionId")
+        if (sid := _safe_hashable_id(choice.get("sessionId")))
     }
     normalized_choices = [
         normalize_expansion_choice(choice)
@@ -766,7 +789,7 @@ def build_expansion_choices_payload(
     ]
     sorted_choices = sorted(
         normalized_choices,
-        key=lambda choice: choice.get("serverReceivedAt") or choice.get("timestamp") or "",
+        key=lambda choice: str(choice.get("serverReceivedAt") or choice.get("timestamp") or ""),
         reverse=True,
     )
 
@@ -798,7 +821,7 @@ def build_ha_plan_events_payload(
     ]
     sorted_events = sorted(
         normalized_events,
-        key=lambda event: event.get("serverReceivedAt") or event.get("timestamp") or "",
+        key=lambda event: str(event.get("serverReceivedAt") or event.get("timestamp") or ""),
         reverse=True,
     )
     choice_count = sum(
@@ -839,7 +862,7 @@ def build_journey_events_payload(
     ]
     sorted_events = sorted(
         normalized_events,
-        key=lambda event: event.get("serverReceivedAt") or event.get("timestamp") or "",
+        key=lambda event: str(event.get("serverReceivedAt") or event.get("timestamp") or ""),
         reverse=True,
     )
     phase_counts = {}
@@ -1190,7 +1213,8 @@ def render_level_row(level):
     if end and not completed:
         status_text = value_or_dash(get_record_value(end, "endReason"))
 
-    structure = get_record_value(start, "structure") or {}
+    raw_structure = get_record_value(start, "structure")
+    structure = raw_structure if isinstance(raw_structure, dict) else {}
     round_id = get_record_value(start, "gameRoundId") or get_record_value(end, "gameRoundId")
     round_text = (
         get_round_display_name(start, end)
@@ -1222,7 +1246,7 @@ def get_level_sort_value(level):
     end = get_level_end(level)
     level_index = get_record_value(start, "levelIndex") or get_record_value(end, "levelIndex")
 
-    if isinstance(level_index, int):
+    if _is_int_not_bool(level_index):
         return level_index
 
     return 999999
@@ -1236,7 +1260,7 @@ def get_round_level_sort_value(level):
         or get_record_value(end, "roundLevelIndex")
     )
 
-    if isinstance(round_level_index, int):
+    if _is_int_not_bool(round_level_index):
         return round_level_index
 
     return get_level_sort_value(level)
@@ -1245,43 +1269,45 @@ def get_round_level_sort_value(level):
 def get_level_started_at(level):
     start = get_level_start(level)
     end = get_level_end(level)
-    return (
+    value = (
         get_record_value(start, "gameRoundStartedAt")
         or get_record_value(start, "timestamp")
         or get_record_value(start, "serverReceivedAt")
         or get_record_value(end, "timestamp")
         or get_record_value(end, "serverReceivedAt")
     )
+    return str(value) if value is not None else None
 
 
 def get_level_ended_at(level):
     start = get_level_start(level)
     end = get_level_end(level)
-    return (
+    value = (
         get_record_value(end, "timestamp")
         or get_record_value(end, "serverReceivedAt")
         or get_record_value(start, "timestamp")
         or get_record_value(start, "serverReceivedAt")
         or get_record_value(start, "gameRoundStartedAt")
     )
+    return str(value) if value is not None else None
 
 
 def earliest_time(current_value, next_value):
     if not current_value:
-        return next_value
+        return str(next_value) if next_value else None
 
     if not next_value:
-        return current_value
+        return str(current_value) if current_value else None
 
     return min(str(current_value), str(next_value))
 
 
 def latest_time(current_value, next_value):
     if not current_value:
-        return next_value
+        return str(next_value) if next_value else None
 
     if not next_value:
-        return current_value
+        return str(current_value) if current_value else None
 
     return max(str(current_value), str(next_value))
 
@@ -1345,21 +1371,21 @@ def get_round_display_name(start, end):
 
 
 def render_map_rows(rows):
-    if not rows:
+    if not isinstance(rows, list) or not rows:
         return "-"
 
     return escape_text("\n".join(str(row) for row in rows))
 
 
 def format_seconds(value):
-    if isinstance(value, (int, float)):
+    if _is_finite_number(value):
         return f"{value:.1f}s"
 
     return "-"
 
 
 def format_ratio(value):
-    if isinstance(value, (int, float)):
+    if _is_finite_number(value):
         return f"{value:.3f}"
 
     return "-"

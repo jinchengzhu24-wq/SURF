@@ -30,8 +30,24 @@ CATEGORY_LABELS = {
 }
 
 
+def _safe_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _safe_key_part(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _safe_nonneg_int(value):
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
 def failure_category(code, details=None):
-    if (details or {}).get("failureKind") == "review_validation":
+    if _safe_dict(details).get("failureKind") == "review_validation":
         return "component_review_validation"
     code = str(code or "").upper()
     if code.startswith("PATCH_"):
@@ -58,14 +74,15 @@ def failure_category(code, details=None):
 
 
 def _task(event):
-    task = event["payload"].get("task")
+    payload = _safe_dict(event.get("payload"))
+    task = payload.get("task")
     # Challenge review is part of the same message, not an extra user request.
     if (
-        event["eventType"] in {"message_generation_failed", "challenge_reason_review_pending"}
+        event.get("eventType") in {"message_generation_failed", "challenge_reason_review_pending"}
         or task in {"challenge_review", "proposal_clarification"}
     ):
         return "message"
-    return task or "message"
+    return str(task) if task is not None else "message"
 
 
 def _latencies(samples):
@@ -88,20 +105,29 @@ def summarize(events, example_limit=3):
     pipeline_attempts = {}
     proposal_attempts = {}
     for event in events:
-        payload_for_diagnostic = event.get("payload") or {}
-        proposal_diagnostic = (payload_for_diagnostic.get("proposalDiagnostic") or
-            (payload_for_diagnostic.get("details") or {}).get("proposalDiagnostic")) if isinstance(payload_for_diagnostic, dict) else None
-        if isinstance(proposal_diagnostic, dict) and proposal_diagnostic.get("requestId"):
-            proposal_attempts[(event.get("sessionId"), proposal_diagnostic["requestId"])] = proposal_diagnostic
+        if not isinstance(event, dict):
+            continue
+        payload_for_diagnostic = _safe_dict(event.get("payload"))
+        details_for_diagnostic = _safe_dict(payload_for_diagnostic.get("details"))
+        proposal_diagnostic = _safe_dict(
+            payload_for_diagnostic.get("proposalDiagnostic")
+            or details_for_diagnostic.get("proposalDiagnostic")
+        )
+        req_id = _safe_key_part(proposal_diagnostic.get("requestId"))
+        session_ref = _safe_key_part(event.get("sessionId"))
+        if proposal_diagnostic and req_id:
+            proposal_attempts[(session_ref, req_id)] = proposal_diagnostic
         if event.get("eventType") == "reply_pipeline_diagnostic":
-            value = event.get("payload") or {}
-            if value.get("requestId"):
-                pipeline_attempts[(event.get("sessionId"), value["requestId"])] = value
+            value = _safe_dict(event.get("payload"))
+            val_req_id = _safe_key_part(value.get("requestId"))
+            if val_req_id:
+                pipeline_attempts[(session_ref, val_req_id)] = value
             continue
         if event.get("eventType") == "component_recovery":
-            payload = event.get("payload") or {}
-            if payload.get("recoveryId"):
-                recoveries[(event.get("sessionId"), payload["recoveryId"])] = payload
+            payload = _safe_dict(event.get("payload"))
+            rec_id = _safe_key_part(payload.get("recoveryId"))
+            if rec_id:
+                recoveries[(session_ref, rec_id)] = payload
             continue
         if event.get("eventType") not in EVENT_TYPES:
             continue
@@ -110,7 +136,7 @@ def summarize(events, example_limit=3):
             skipped["missingMessageKeyOrPayload"] += 1
             continue
         task = _task(event)
-        key = (event.get("sessionId"), task, payload["messageKey"])
+        key = (session_ref, _safe_key_part(task), _safe_key_part(payload["messageKey"]))
         success = event["eventType"] == "reply_delivery_outcome"
         delivered = payload.get("reliableBodyDelivered") if isinstance(payload.get("reliableBodyDelivered"), bool) else None
         sample = {**payload, "task": task, "createdAt": event.get("createdAt"),
@@ -169,27 +195,27 @@ def summarize(events, example_limit=3):
     return {
         "logicalRequests": len(requests),
         "pipelineDiagnostics": {"httpAttempts": len(pipeline_attempts),
-            "versions": dict(Counter(p.get("pipelineVersion", "unknown") for p in pipeline_attempts.values())),
-            "stageOutcomes": dict(Counter(step.get("stage", "unknown") + ":" + step.get("status", "unknown")
-                for p in pipeline_attempts.values() for step in p.get("steps", []) if isinstance(step, dict))),
+            "versions": dict(Counter(str(p.get("pipelineVersion") or "unknown") for p in pipeline_attempts.values())),
+            "stageOutcomes": dict(Counter(str(step.get("stage") or "unknown") + ":" + str(step.get("status") or "unknown")
+                for p in pipeline_attempts.values() for step in (p.get("steps") if isinstance(p.get("steps"), list) else ()) if isinstance(step, dict))),
             "scope": "stage outcomes per observed HTTP attempt; not model accuracy or browser receipt"},
         "proposalDiagnostics": {
             "httpAttempts": len(proposal_attempts),
             "pipelineRecordsMissingDiagnostic": sum(not isinstance(value.get("proposalDiagnostic"), dict) for value in pipeline_attempts.values()),
-            "versions": dict(Counter(value.get("diagnosticVersion", "unknown") for value in proposal_attempts.values())),
-            "stageOutcomes": dict(Counter(step.get("stage", "unknown") + ":" + step.get("status", "unknown")
-                for value in proposal_attempts.values() for step in value.get("steps", []) if isinstance(step, dict))),
-            "failureReasons": dict(Counter(step.get("reasonCode", "UNKNOWN")
-                for value in proposal_attempts.values() for step in value.get("steps", [])
+            "versions": dict(Counter(str(value.get("diagnosticVersion") or "unknown") for value in proposal_attempts.values())),
+            "stageOutcomes": dict(Counter(str(step.get("stage") or "unknown") + ":" + str(step.get("status") or "unknown")
+                for value in proposal_attempts.values() for step in (value.get("steps") if isinstance(value.get("steps"), list) else ()) if isinstance(step, dict))),
+            "failureReasons": dict(Counter(str(step.get("reasonCode") or "UNKNOWN")
+                for value in proposal_attempts.values() for step in (value.get("steps") if isinstance(value.get("steps"), list) else ())
                 if isinstance(step, dict) and step.get("status") in {"failed", "rejected", "revalidation_failed"})),
-            "repairOutcomes": dict(Counter(step.get("component", "unknown") + ":" + step.get("status", "unknown")
-                for value in proposal_attempts.values() for step in value.get("steps", [])
+            "repairOutcomes": dict(Counter(str(step.get("component") or "unknown") + ":" + str(step.get("status") or "unknown")
+                for value in proposal_attempts.values() for step in (value.get("steps") if isinstance(value.get("steps"), list) else ())
                 if isinstance(step, dict) and step.get("stage") == "component_repair")),
             "scope": "observed phase/repair outcomes only; merged patches are not verified repairs or model accuracy",
         },
         "stateRecoveries": {"tasks": len(recoveries),
-            "attemptsUsed": sum(item.get("attemptsUsed", 0) for item in recoveries.values()),
-            "byStatus": dict(Counter(item.get("status", "unknown") for item in recoveries.values())),
+            "attemptsUsed": sum(_safe_nonneg_int(item.get("attemptsUsed")) for item in recoveries.values()),
+            "byStatus": dict(Counter(str(item.get("status") or "unknown") for item in recoveries.values())),
             "scope": "auxiliary state replay; excluded from body request counts and success rates"},
         "retriedRequests": sum(len(item["records"]) > 1 for item in requests.values()),
         "recordedOutcomes": sum(len(item["records"]) for item in requests.values()),

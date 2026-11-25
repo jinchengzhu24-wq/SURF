@@ -424,6 +424,8 @@ export function createDeleteDialogController({
     defaultSuccessText = "Record deleted successfully.",
     selectOnError = false
 } = {}) {
+    let accessLocked = requiresDashboardAccess();
+
     function setDeleteDialogBusy(busy) {
         state.deleteDialogBusy = busy;
         elements.deleteDialogForm?.setAttribute?.("aria-busy", busy ? "true" : "false");
@@ -432,7 +434,8 @@ export function createDeleteDialogController({
         if (elements.deleteDialogConfirm) {
             elements.deleteDialogConfirm.disabled = busy;
             if (busy) {
-                elements.deleteDialogConfirm.textContent = "Deleting...";
+                elements.deleteDialogConfirm.textContent =
+                    (state.pendingDelete && state.pendingDelete.busyLabel) || "Deleting...";
             } else if (state.pendingDelete) {
                 elements.deleteDialogConfirm.textContent = state.pendingDelete.confirmLabel || "Delete";
             }
@@ -467,6 +470,7 @@ export function createDeleteDialogController({
         if (state.deleteDialogBusy) {
             return;
         }
+        const wasAccessPrompt = Boolean(state.pendingDelete && state.pendingDelete.isAccessGate);
 
         if (elements.deleteDialog.open) {
             if (typeof elements.deleteDialog.close === "function") {
@@ -479,6 +483,9 @@ export function createDeleteDialogController({
         elements.deletePasswordInput.value = "";
         elements.deleteDialogError.textContent = "";
         state.pendingDelete = null;
+        if (wasAccessPrompt && accessLocked) {
+            setStatus?.("Dashboard access password required. Select Refresh to unlock.");
+        }
     }
 
     async function submitDeleteDialog(event) {
@@ -502,6 +509,9 @@ export function createDeleteDialogController({
 
         try {
             await apiClient.postProtected(config.endpoint, config.payload, password);
+            if (config.isAccessGate) {
+                accessLocked = false;
+            }
             if (config.afterSuccess) {
                 config.afterSuccess();
             }
@@ -514,7 +524,7 @@ export function createDeleteDialogController({
         } catch (error) {
             const message = getDeleteDialogError(error);
             elements.deleteDialogError.textContent = message;
-            setStatus?.(errorStatusPrefix + message);
+            setStatus?.((config.errorStatusPrefix ?? errorStatusPrefix) + message);
             setDeleteDialogBusy(false);
             if (selectOnError) {
                 elements.deletePasswordInput.focus?.();
@@ -528,24 +538,42 @@ export function createDeleteDialogController({
         return new URLSearchParams(search).get("access") === "1";
     }
 
+    function isDashboardAccessLocked() {
+        return accessLocked;
+    }
+
     function clearDashboardAccessParameter() {
-        if (!win || !win.location || !win.history || typeof win.history.replaceState !== "function") {
+        if (
+            !win
+            || !win.location
+            || win.location.protocol === "file:"
+            || !win.history
+            || typeof win.history.replaceState !== "function"
+        ) {
             return;
         }
         const fallbackHref = ((win.location.origin && win.location.origin !== "null") ? win.location.origin : apiClient.apiBase)
             + (win.location.pathname || "/frontend/")
             + (win.location.search || "");
-        const url = new URL(win.location.href || fallbackHref);
-        url.searchParams.delete("access");
-        win.history.replaceState(null, "", url.toString());
+        try {
+            const url = new URL(win.location.href || fallbackHref);
+            url.searchParams.delete("access");
+            win.history.replaceState(null, "", url.toString());
+        } catch (_error) {
+            // Ignore history restrictions in sandboxed or file URLs.
+        }
     }
 
     function requestDashboardAccess() {
+        accessLocked = true;
         openDeleteDialog({
+            isAccessGate: true,
             title: "Dashboard access required",
             description: "Enter the dashboard password to continue.",
             scope: "This opens the 8000 study dashboard.",
             confirmLabel: "Continue",
+            busyLabel: "Checking...",
+            errorStatusPrefix: "Dashboard access failed: ",
             endpoint: "/verify-dashboard-password",
             payload: {},
             progressText: "Checking dashboard password...",
@@ -560,6 +588,7 @@ export function createDeleteDialogController({
         setDeleteDialogBusy,
         submitDeleteDialog,
         requiresDashboardAccess,
+        isDashboardAccessLocked,
         clearDashboardAccessParameter,
         requestDashboardAccess
     };

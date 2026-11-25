@@ -1,6 +1,12 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .config import DEFAULT_LLM_MAX_ATTEMPTS
+
+
+def _reject_bool_int(value):
+    if isinstance(value, bool):
+        raise ValueError("Boolean value is not allowed for an integer field")
+    return value
 
 
 class PCSolvabilityError(ValueError):
@@ -73,6 +79,11 @@ class OnlineDesignerIntentionSyncRequest(BaseModel):
     eventId: str | None = ""
     sessionId: str | None = ""
 
+    @field_validator("playerNumber", mode="before")
+    @classmethod
+    def reject_bool_player_number(cls, value):
+        return _reject_bool_int(value)
+
 
 class OnlineCoCreationFlowEventRequest(BaseModel):
     eventId: str
@@ -104,6 +115,17 @@ class OnlineCoCreationFlowEventRequest(BaseModel):
     restoredFromStageNumber: int | None = None
     replacedVersionId: str | None = None
     replacedStageNumber: int | None = None
+
+    @field_validator(
+        "playerNumber",
+        "stageNumber",
+        "restoredFromStageNumber",
+        "replacedStageNumber",
+        mode="before",
+    )
+    @classmethod
+    def reject_bool_integers(cls, value):
+        return _reject_bool_int(value)
 
 
 class OnlineResultRequest(BaseModel):

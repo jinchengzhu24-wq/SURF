@@ -2435,4 +2435,79 @@ test("P2: error codes, challenge choice language, play composer guard, selectVer
     assert.equal(syncApp.elements.chatRetryButton.hidden, false);
     await syncApp.state.replyFeedback.retryAction();
     assert.equal(langPatchAttempt, 2);
+
+    // 11. 422 REQUIREMENT_PERMISSION_CONFLICT refreshes session & exposes #cancelProposalButton;
+    // unsynced awaiting_intention pre-fills readOnly intentionInput; native proposal omits translatedDisplay badge
+    let refreshedOn422 = false;
+    const permApp = loadApp({
+        keepSubmit: true,
+        overrides: {
+            api: async (path, options = {}) => {
+                if (path.endsWith("/messages") && options.method === "POST") {
+                    const err = new Error("Conflict");
+                    err.code = "REQUIREMENT_PERMISSION_CONFLICT";
+                    err.retryable = false;
+                    throw err;
+                }
+                if (path.endsWith("/api/sessions/session")) {
+                    refreshedOn422 = true;
+                    return {
+                        ...createDefaultSession(),
+                        languageLocked: true,
+                        proposalFlowState: { active: true, interactionMode: "binary_choice", status: "revision_needed", topicId: "t-1" },
+                    };
+                }
+                return { ...permApp.state.session };
+            },
+        },
+    });
+    permApp.state.session = { ...createDefaultSession(), languageLocked: true, turns: [] };
+    permApp.elements.messageInput.value = "Remove outer wall";
+    permApp.state.proposalMode = true;
+    await permApp.app.sendMessage({ preventDefault() {} });
+    assert.equal(refreshedOn422, true);
+    assert.equal(permApp.state.session.proposalFlowState.status, "revision_needed");
+    assert.equal(permApp.document.getElementById("cancelProposalButton")?.hidden, false);
+
+    // Unsynced awaiting_intention pre-fills readOnly intentionInput
+    permApp.state.session = {
+        ...createDefaultSession(),
+        status: "awaiting_intention",
+        languageLocked: true,
+        intention: { content: "Saved intention waiting for 8000 sync", language: "en" },
+    };
+    permApp.elements.intentionInput.value = "";
+    permApp.elements.intentionInput.readOnly = false;
+    permApp.app.renderSessionState();
+    assert.equal(permApp.elements.intentionForm.hidden, false);
+    assert.equal(permApp.elements.intentionInput.value, "Saved intention waiting for 8000 sync");
+    assert.equal(permApp.elements.intentionInput.readOnly, true);
+
+    // Native-language proposal turn must NOT show translatedDisplay label
+    const propTurn = {
+        turnId: "t-prop-native",
+        role: "assistant",
+        content: "Proposed edit ready",
+        language: "en",
+        versionId: "v1",
+        guidance: { move: "offer_proposal", proposalOffer: { summary: "S", rationale: "R", executionBrief: {} }, uiCues: [] },
+        translations: {},
+    };
+    permApp.state.language = "en";
+    permApp.state.session = {
+        ...createDefaultSession(),
+        language: "en",
+        languageLocked: true,
+        turns: [propTurn],
+        proposals: [{ proposalId: "p1", assistantTurnId: "t-prop-native", baseVersionId: "v1", status: "pending", diff: [] }],
+    };
+    permApp.app.renderMessages();
+    const collectNodeText = node => {
+        if (!node) return "";
+        if (typeof node === "string") return node;
+        return [node.textContent || "", ...(node.children || []).map(collectNodeText)].join(" ");
+    };
+    const renderedChatText = collectNodeText(permApp.elements.messageList);
+    assert.match(renderedChatText, /organized this map proposal/);
+    assert.doesNotMatch(renderedChatText, /Translated display/);
 });

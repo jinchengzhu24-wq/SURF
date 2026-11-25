@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import re
@@ -141,17 +142,27 @@ def build_cocreation_flow_event(
     event["studySessionId"] = str(player.get("studySessionId") or "").strip()
 
     if event_type in {"first_stage", "stage", "final"}:
-        if not payload.versionId or payload.stageNumber is None or payload.rows is None:
+        if (
+            not payload.versionId
+            or payload.stageNumber is None
+            or int(payload.stageNumber) < 1
+            or payload.rows is None
+        ):
             raise HTTPException(status_code=400, detail="Incomplete Stage event")
         try:
             validate_online_challenge_rows(payload.rows)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        diff_list = list(payload.diff or [])
+        try:
+            json.dumps(diff_list, allow_nan=False)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Invalid Stage diff") from error
         event.update({
             "versionId": normalize_cocreation_sync_id(payload.versionId, "version ID"),
             "stageNumber": int(payload.stageNumber),
             "rows": list(payload.rows),
-            "diff": list(payload.diff or []),
+            "diff": diff_list,
         })
         if event_type == "final" and duration is not None:
             event["coCreationDurationSeconds"] = round(duration, 2)
@@ -190,6 +201,7 @@ def build_cocreation_flow_event(
         if (
             not payload.versionId
             or payload.stageNumber is None
+            or int(payload.stageNumber) < 1
             or not assistant_text
             or len(assistant_text) > 12000
             or language not in {"en", "zh-CN"}
@@ -305,6 +317,8 @@ def build_cocreation_flow_event(
                 payload.versionId, "version ID"
             )
         if payload.stageNumber is not None:
+            if int(payload.stageNumber) < 1:
+                raise HTTPException(status_code=400, detail="Invalid Stage number")
             event["stageNumber"] = int(payload.stageNumber)
 
     return event
@@ -916,7 +930,12 @@ class OnlineRoomManager:
                     status_code=409,
                     detail="Cannot become ready before an opponent joins",
                 )
-            if room["status"] in {"challenges_ready", "waiting_for_results", "results_ready"}:
+            if room["status"] in {
+                "waiting_for_challenges",
+                "challenges_ready",
+                "waiting_for_results",
+                "results_ready",
+            }:
                 if bool(payload.ready) and player.get("ready") is True:
                     room["lastActivity"] = self.clock.now()
                     return serialize_online_room(room, player)
@@ -1140,6 +1159,10 @@ class OnlineRoomManager:
 
             event_id = str(payload.eventId or "").strip()
             session_id = str(payload.sessionId or "").strip()
+            if event_id:
+                event_id = normalize_cocreation_sync_id(event_id, "event ID")
+            if session_id:
+                session_id = normalize_cocreation_sync_id(session_id, "session ID")
             room["lastActivity"] = self.clock.now()
 
             if not existing_intention:
@@ -1192,8 +1215,9 @@ class OnlineRoomManager:
                 room["lastActivity"] = self.clock.now()
                 return {"status": "ok", "recorded": False, "ignored": True}
 
+            event_type = str(payload.eventType or "").strip()
             if (
-                payload.eventType != "first_stage"
+                event_type != "first_stage"
                 and not self.has_cocreation_first_stage(match_id, payload.playerNumber)
             ):
                 raise HTTPException(
@@ -1201,9 +1225,9 @@ class OnlineRoomManager:
                     detail="Co-creation flow has not started",
                 )
 
-            if payload.eventType == "first_stage":
-                self.materialize_pending_draft(room, player)
             event = build_cocreation_flow_event(room, payload, clock=self.clock)
+            if event_type == "first_stage":
+                self.materialize_pending_draft(room, player)
             room["lastActivity"] = self.clock.now()
             stored_event, created = self.append_cocreation_flow_event(room, event)
             return {"status": "ok", "recorded": created, "event": stored_event}

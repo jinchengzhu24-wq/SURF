@@ -1,6 +1,8 @@
 """Conversation, proposal discovery, challenge, recovery, and decision routes."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sqlite3
 import uuid
@@ -249,7 +251,9 @@ def submit_question_feedback(
     _validate_identifier(payload.idempotencyKey, 'idempotencyKey')
     _validate_identifier(question_id, 'questionId')
     signature = {'questionId': question_id, 'action': payload.action, 'baseVersionId': payload.baseVersionId}
-    with message_request_lock(session_id, payload.idempotencyKey, services=services):
+    with services.connect() as auth_database:
+        require_browser_session(auth_database, session_id, access_cookie, services=services)
+    with message_request_lock(session_id, payload.idempotencyKey, scope='question_feedback', request_signature=signature, services=services):
         with services.connect(immediate=True) as database:
             session = require_browser_session(database, session_id, access_cookie, services=services)
             prior = _question_feedback_event(database, session_id, payload.idempotencyKey)
@@ -343,7 +347,9 @@ def submit_intent_feedback(
     if payload.action != 'keep' and selected_hypothesis_id:
         raise ApiError(400, 'INVALID_INTENT_FEEDBACK', 'selectedHypothesisId is accepted only for a conflict choice.')
     signature = _intent_feedback_signature(payload, hypothesis_id, candidate)
-    with message_request_lock(session_id, payload.idempotencyKey, services=services):
+    with services.connect() as auth_database:
+        require_browser_session(auth_database, session_id, access_cookie, services=services)
+    with message_request_lock(session_id, payload.idempotencyKey, scope='intent_feedback', request_signature=signature, services=services):
         with services.connect(immediate=True) as database:
             session = require_browser_session(database, session_id, access_cookie, services=services)
             prior = _intent_feedback_event(database, session_id, payload.idempotencyKey)
@@ -351,6 +357,11 @@ def submit_intent_feedback(
                 if not _intent_feedback_signature_matches(prior.get('request'), signature):
                     raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The feedback key was already used for a different request.')
                 return {'outcome': prior['outcome'], 'session': services.serialize_session(database, session_id)}
+            if database.execute(
+                'SELECT 1 FROM conversation_turns WHERE session_id = ? AND request_id = ? LIMIT 1',
+                (session_id, payload.idempotencyKey),
+            ).fetchone() is not None:
+                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The feedback key was already used for another message.')
             session = require_active_session(database, session_id, access_cookie, services=services)
             require_current_base(session, payload.baseVersionId)
             _, source_guidance = _require_actionable_intent_card(
@@ -532,6 +543,11 @@ def submit_intent_feedback(
                 if not _intent_feedback_signature_matches(prior.get('request'), signature):
                     raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The feedback key was reused.')
                 return {'outcome': prior['outcome'], 'session': services.serialize_session(database, session_id)}
+            if database.execute(
+                'SELECT 1 FROM conversation_turns WHERE session_id = ? AND request_id = ? LIMIT 1',
+                (session_id, payload.idempotencyKey),
+            ).fetchone() is not None:
+                raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The feedback key was already used for another message.')
             session = require_active_session(database, session_id, access_cookie, services=services)
             require_current_base(session, payload.baseVersionId)
             _require_actionable_intent_card(database, session_id, payload.baseVersionId, hypothesis_id, payload.sourceTurnId)
@@ -596,12 +612,20 @@ def submit_intent_feedback(
             conflict_existing_id = None
             if review['verdict'] == 'conflict':
                 conflicting_ids = set(review.get('conflictingHypothesisIds') or [])
-                conflict_existing_id = next(
+                candidate_existing_id = next(
                     (item['hypothesisId'] for item in reversed(active) if item['hypothesisId'] in conflicting_ids),
                     None,
                 )
-                if conflict_existing_id is None:
+                if candidate_existing_id is None:
                     raise ApiError(502, 'MODEL_RESPONSE_INVALID', 'Kimi did not bind the conflict to confirmed memory.', retryable=True)
+                current_confirmed_ids = {
+                    item['id']
+                    for item in context.get('intentHypotheses', [])
+                    if item.get('status') == 'confirmed' and item.get('id') != hypothesis_id
+                }
+                if candidate_existing_id not in current_confirmed_ids:
+                    raise ApiError(409, 'INTENT_CONTEXT_CHANGED', 'Confirmed design inclinations changed while reviewing this conflict.')
+                conflict_existing_id = candidate_existing_id
             user_text = candidate if payload.action == 'revise' else '符合我的想法' if session['language'] == 'zh-CN' else 'This matches my idea.'
             services.insert_turn(database, session, 'user', user_text, payload.baseVersionId, payload.idempotencyKey, None)
             explanation = review['explanation']
@@ -768,11 +792,14 @@ def send_message(
     content = payload.content.strip()
     if not content or len(content) > MAX_MESSAGE_LENGTH:
         raise ApiError(400, 'INVALID_MESSAGE', 'The message must contain 1 to 2000 characters.')
+    with services.connect() as auth_database:
+        require_browser_session(auth_database, session_id, access_cookie, services=services)
     payload = _route_message_to_active_challenge(session_id, payload, content, access_cookie, services=services)
     content = payload.content.strip()
     _validate_identifier(payload.idempotencyKey, 'idempotencyKey')
     _validate_message_action_payload(payload)
-    with message_request_lock(session_id, payload.idempotencyKey, services=services):
+    message_signature = payload.model_dump()
+    with message_request_lock(session_id, payload.idempotencyKey, scope='message', request_signature=message_signature, services=services):
         guard = None
         with services.connect(immediate=True) as database:
             guard_session = require_browser_session(database, session_id, access_cookie, services=services)
@@ -855,7 +882,9 @@ def choose_binary_proposal(
 ):
     for field in ('idempotencyKey', 'topicId', 'questionId', 'choiceId', 'baseVersionId'):
         _validate_identifier(getattr(payload, field), field)
-    with message_request_lock(session_id, payload.idempotencyKey, services=services):
+    with services.connect() as auth_database:
+        require_browser_session(auth_database, session_id, access_cookie, services=services)
+    with message_request_lock(session_id, payload.idempotencyKey, scope='binary_choice', request_signature=payload.model_dump(), services=services):
         return binary_routes.choose(services, session_id, payload, request, access_cookie)
 
 
@@ -868,7 +897,9 @@ def cancel_binary_proposal(
 ):
     for field in ('idempotencyKey', 'topicId', 'baseVersionId'):
         _validate_identifier(getattr(payload, field), field)
-    with message_request_lock(session_id, payload.idempotencyKey, services=services):
+    with services.connect() as auth_database:
+        require_browser_session(auth_database, session_id, access_cookie, services=services)
+    with message_request_lock(session_id, payload.idempotencyKey, scope='binary_cancel', request_signature=payload.model_dump(), services=services):
         return binary_routes.cancel(services, session_id, payload, access_cookie)
 
 
@@ -1033,21 +1064,41 @@ def _send_message_locked_impl(
     )
 
 
+def _lock_fingerprint(request_signature):
+    if request_signature is None:
+        return None
+    return hashlib.sha256(
+        json.dumps(request_signature, sort_keys=True, ensure_ascii=False, default=str).encode('utf-8')
+    ).hexdigest()
+
+
 @contextmanager
-def message_request_lock(session_id, idempotency_key, *, services: CoCreationServices | None = None):
+def message_request_lock(
+    session_id,
+    idempotency_key,
+    *,
+    scope='default',
+    request_signature=None,
+    services: CoCreationServices | None = None,
+):
     locks = services._message_locks if services is not None else _FALLBACK_MESSAGE_LOCKS
     guard = services._message_locks_guard if services is not None else _FALLBACK_MESSAGE_LOCKS_GUARD
-    key = (session_id, idempotency_key)
+    key = (session_id, scope, idempotency_key)
+    fingerprint = _lock_fingerprint(request_signature)
     with guard:
         entry = locks.get(key)
         if entry is None:
-            entry = {'lock': Lock(), 'users': 0, 'error': None}
+            entry = {'lock': Lock(), 'users': 0, 'error': None, 'fingerprint': fingerprint}
             locks[key] = entry
         is_leader = entry['users'] == 0
         entry['users'] += 1
     entry['lock'].acquire()
     try:
-        if not is_leader and entry['error'] is not None:
+        if (
+            not is_leader
+            and entry['error'] is not None
+            and (fingerprint is None or entry['fingerprint'] == fingerprint)
+        ):
             raise entry['error']
         yield
     except Exception as error:
@@ -1055,11 +1106,13 @@ def message_request_lock(session_id, idempotency_key, *, services: CoCreationSer
             entry['error'] = error
         raise
     finally:
-        entry['lock'].release()
         with guard:
-            entry['users'] -= 1
-            if entry['users'] == 0:
+            if is_leader and locks.get(key) is entry:
                 locks.pop(key, None)
+            entry['users'] -= 1
+            if entry['users'] == 0 and locks.get(key) is entry:
+                locks.pop(key, None)
+        entry['lock'].release()
 
 
 @router.post('/api/sessions/{session_id}/proposals/{proposal_id}/decision')
@@ -1328,6 +1381,12 @@ def _decide_proposal_impl(
                 '                WHERE id = ?\n                ',
                 ('accepted' if payload.decision == 'accept' else 'rejected', now, verified_summary, proposal_id),
             )
+            if payload.decision == 'accept':
+                database.execute(
+                    "\n                    UPDATE change_proposals SET status = 'superseded', decided_at = ?\n"
+                    "                    WHERE session_id = ? AND id != ? AND status = 'pending'\n                    ",
+                    (now, session_id, proposal_id),
+                )
             _insert_decision(
                 database,
                 session_id,

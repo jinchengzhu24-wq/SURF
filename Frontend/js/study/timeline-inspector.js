@@ -331,13 +331,14 @@ export function createStudyTimelineInspector({
         const start = level.start || {};
         const end = level.end || {};
         const structure = start.structure || {};
+        const endedTimestamp = end.timestamp || end.serverReceivedAt;
         appendRecordGrid([
             ["Level run", level.levelRunId],
             ["Map hash", structure.mapHash],
             ["Source", start.source],
             ["Status", getLevelStatus(level).label],
             ["Started", formatTimestamp(getLevelTimestamp(level))],
-            ["Ended", end.timestamp ? formatTimestamp(end.timestamp) : "Missing end record"],
+            ["Ended", endedTimestamp ? formatTimestamp(endedTimestamp) : "Missing end record"],
             ["Solution", value(start.solutionSteps) + " steps / " + value(start.solverPushes) + " pushes"],
             ["Player", value(end.moveCount) + " moves / " + value(end.pushCount) + " pushes"]
         ]);

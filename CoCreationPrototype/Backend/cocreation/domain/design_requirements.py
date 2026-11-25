@@ -147,6 +147,8 @@ def validate_requirement_record(payload, user_turns, snapshot):
             raise ValueError("Requirement value must be an explicit nonnegative integer.")
         if item["unit"] not in {"absolute", "delta", "none"} or not isinstance(item["focused"], bool):
             raise ValueError("Invalid value unit or focus.")
+        if item["unit"] == "delta" and item["relation"] in {"increase", "decrease"} and value == 0:
+            raise ValueError("Delta increase/decrease requirements must have a positive value.")
         # Numeric authority must occur in the evidence, not in an entity label.
         if value is not None:
             import re

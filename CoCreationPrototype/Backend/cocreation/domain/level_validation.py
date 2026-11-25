@@ -305,6 +305,11 @@ def _validate_outer_wall_closure(rows):
             visited.add((next_x, next_y))
             exterior_void.append((next_x, next_y))
 
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            if rows[y][x] == " " and (x, y) not in visited:
+                _raise_open_outer_wall(x, y, " ")
+
 
 def _raise_open_outer_wall(x, y, tile):
     raise LevelValidationError(

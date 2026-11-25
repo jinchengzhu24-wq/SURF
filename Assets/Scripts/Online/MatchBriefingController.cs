@@ -100,6 +100,10 @@ public class MatchBriefingController : MonoBehaviour
                 state =>
                 {
                     readyRequestInFlight = false;
+                    if (leavingScene)
+                    {
+                        return;
+                    }
                     OnlineMatchContext.ApplyState(state);
                     UpdateUi(state);
                     TryContinue(state);
@@ -107,6 +111,10 @@ public class MatchBriefingController : MonoBehaviour
                 error =>
                 {
                     readyRequestInFlight = false;
+                    if (leavingScene)
+                    {
+                        return;
+                    }
                     SetFooter("Ready failed: " + error);
                     UpdateUi(OnlineMatchContext.RoomState);
                 }
@@ -121,11 +129,21 @@ public class MatchBriefingController : MonoBehaviour
             yield return client.GetRoom(
                 state =>
                 {
+                    if (leavingScene)
+                    {
+                        return;
+                    }
                     OnlineMatchContext.ApplyState(state);
                     UpdateUi(state);
                     TryContinue(state);
                 },
-                error => SetFooter("Connection error: " + error)
+                error =>
+                {
+                    if (!leavingScene)
+                    {
+                        SetFooter("Connection error: " + error);
+                    }
+                }
             );
 
             if (!leavingScene && !transitioned)
@@ -137,7 +155,8 @@ public class MatchBriefingController : MonoBehaviour
 
     private void TryContinue(OnlineRoomState state)
     {
-        if (state == null
+        if (leavingScene
+            || state == null
             || state.status != "waiting_for_challenges"
             || transitioned)
         {
@@ -201,6 +220,10 @@ public class MatchBriefingController : MonoBehaviour
 
     private void UpdateUi(OnlineRoomState state)
     {
+        if (leavingScene)
+        {
+            return;
+        }
         int currentNumber = OnlineMatchContext.PlayerNumber;
         int opponentNumber = currentNumber == 1 ? 2 : 1;
         OnlinePlayerState currentPlayer = state?.FindPlayer(currentNumber);

@@ -539,7 +539,16 @@ export function createUnityBridge(ctx) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 continue;
             }
-            if (latest.draftPreview?.regenerationRequestId !== requestId) return;
+            if (latest.draftPreview?.regenerationRequestId !== requestId) {
+                state.session = latest;
+                if (latest.languageLocked) {
+                    await enterWorkspaceFromSession();
+                } else {
+                    renderDraftPreview();
+                    updateControls();
+                }
+                return;
+            }
             state.session = latest;
             renderDraftPreview();
             updateControls();

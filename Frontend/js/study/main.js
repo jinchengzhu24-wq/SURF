@@ -63,6 +63,13 @@ export function getIdeaHash(ideaId, ideaText) {
 }
 
 export function finalizeJourney(journey) {
+    journey.levels.sort((left, right) => getLevelTimestamp(left).localeCompare(getLevelTimestamp(right)));
+    journey.creativeIdeas.sort(sortByTimestamp);
+    journey.expansions.sort(sortByTimestamp);
+    journey.surveys.sort(sortByTimestamp);
+    journey.haEvents.sort(sortByTimestamp);
+    journey.journeyEvents.sort(sortByTimestamp);
+
     const creative = journey.creativeIdeas[0] || {};
     const expansion = journey.expansions[0] || {};
     const firstLevel = journey.levels[0] || {};
@@ -80,12 +87,6 @@ export function finalizeJourney(journey) {
         levelStart.creativeIdeaId
     );
     journey.ideaHash = getIdeaHash(journey.ideaId, journey.ideaText);
-    journey.levels.sort((left, right) => getLevelTimestamp(left).localeCompare(getLevelTimestamp(right)));
-    journey.creativeIdeas.sort(sortByTimestamp);
-    journey.expansions.sort(sortByTimestamp);
-    journey.surveys.sort(sortByTimestamp);
-    journey.haEvents.sort(sortByTimestamp);
-    journey.journeyEvents.sort(sortByTimestamp);
 
     const timestamps = []
         .concat(journey.creativeIdeas, journey.expansions, journey.surveys, journey.haEvents, journey.journeyEvents)
@@ -169,13 +170,15 @@ export function buildIdeaJourneys(payload) {
 
         if (cleanSessionId && sessionIndex.has(cleanSessionId)) {
             const journey = sessionIndex.get(cleanSessionId);
-            journey.sessions.add(cleanSessionId);
+            if (!cleanIdeaId || !journey.ideaId || journey.ideaId === cleanIdeaId) {
+                journey.sessions.add(cleanSessionId);
 
-            if (!journey.ideaId && cleanIdeaId) {
-                journey.ideaId = cleanIdeaId;
+                if (!journey.ideaId && cleanIdeaId) {
+                    journey.ideaId = cleanIdeaId;
+                }
+
+                return journey;
             }
-
-            return journey;
         }
 
         return createJourney(cleanIdeaId, cleanSessionId);
@@ -424,6 +427,10 @@ export function createStudyDashboard({
     }
 
     async function loadData(manual) {
+        if (deleteDialog.isDashboardAccessLocked()) {
+            deleteDialog.requestDashboardAccess();
+            return;
+        }
         setStatus(manual ? "Refreshing study journeys..." : "Loading study journeys...");
 
         try {
@@ -476,7 +483,7 @@ export function createStudyDashboard({
 
     function renderSummary() {
         const payload = state.payload || {};
-        const completed = state.journeys.filter(journey => journey.completed).length;
+        const completed = state.journeys.filter(journey => journey.status === "completed").length;
         const anomalies = state.journeys.filter(journey => journey.status === "anomaly").length;
         const endedLevels = state.journeys
             .flatMap(journey => journey.levels)
@@ -713,7 +720,7 @@ export function createStudyDashboard({
             if (journey) state.selectedJourneyKey = journey.key;
         }
 
-        if (run) {
+        if (run && !state.selectedRunId) {
             state.selectedRunId = run;
             state.selectedStageKey = "level:" + run;
         }

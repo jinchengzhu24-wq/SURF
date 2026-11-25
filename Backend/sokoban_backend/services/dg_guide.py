@@ -25,6 +25,11 @@ DG_LAYOUT_ANSWERS = {
 }
 DG_FIRST_PERSON_PREFIXES = (
     "got it",
+    "nice!",
+    "sure!",
+    "okay!",
+    "alright!",
+    "sounds good!",
     "let's try",
     "let us try",
     "i'd try",

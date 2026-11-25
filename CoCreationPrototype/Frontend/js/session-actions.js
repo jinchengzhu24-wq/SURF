@@ -419,6 +419,23 @@ export function createSessionActions(ctx) {
                     // Keep the original proposal-state error visible if the refresh
                     // itself cannot complete.
                 }
+            } else if (
+                [
+                    "REQUIREMENT_PERMISSION_CONFLICT",
+                    "PROPOSAL_CHOICE_REQUIRED",
+                    "BINARY_BUSY",
+                    "DISAGREEMENT_ACTIVE",
+                    "INTENT_CONFLICT_PENDING",
+                    "SESSION_DEADLINE_EXPIRED",
+                    "PROPOSAL_PENDING",
+                    "VERSION_CONFLICT",
+                ].includes(error?.code)
+            ) {
+                try {
+                    await refreshSession();
+                } catch (_refreshError) {
+                    // Keep the original server error visible if refresh fails.
+                }
             } else if (error?.retryable) {
                 // A direct-language modification can start a server-owned proposal
                 // flow before Kimi returns. Refresh only that authority state so a

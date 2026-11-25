@@ -68,6 +68,10 @@ public abstract class GridPlayerController : MonoBehaviour
         transform.position = nextPos;
         Physics2D.SyncTransforms();
         LevelStudyRecorder.RecordPlayerMove(pushedBox);
+        if (box != null)
+        {
+            box.Reach();
+        }
     }
 
     private void FaceHorizontalDirection(float horizontalDirection)

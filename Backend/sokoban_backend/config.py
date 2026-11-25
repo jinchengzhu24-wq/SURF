@@ -1,6 +1,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 import os
 from pathlib import Path
 import re
@@ -161,6 +162,8 @@ def env_float(
     else:
         try:
             value = float(str(raw).strip())
+            if not math.isfinite(value):
+                value = float(default)
         except ValueError:
             value = float(default)
     if minimum is not None:

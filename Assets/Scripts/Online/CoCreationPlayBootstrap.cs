@@ -77,6 +77,7 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
     {
         if (bootstrapping)
         {
+            NotifyEmbeddedFailure();
             return;
         }
 
@@ -163,6 +164,7 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
                     + request.downloadHandler.text
                 );
                 bootstrapping = false;
+                ClearQueryIfStandalone(usesExistingUnityInstance);
                 if (usesExistingUnityInstance)
                 {
                     NotifyEmbeddedFailure();
@@ -201,6 +203,7 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
                     + exception.Message
                 );
                 bootstrapping = false;
+                ClearQueryIfStandalone(usesExistingUnityInstance);
                 if (usesExistingUnityInstance)
                 {
                     NotifyEmbeddedFailure();
@@ -209,12 +212,7 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
             }
         }
 
-#if UNITY_WEBGL && !UNITY_EDITOR
-        if (!usesExistingUnityInstance)
-        {
-            SokobanClearCoCreationPlayQuery();
-        }
-#endif
+        ClearQueryIfStandalone(usesExistingUnityInstance);
 
         string targetScene = CoCreationPlayContext.ResolveSceneName();
 
@@ -226,6 +224,7 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
             );
             CoCreationPlayContext.Clear();
             bootstrapping = false;
+            ClearQueryIfStandalone(usesExistingUnityInstance);
             if (usesExistingUnityInstance)
             {
                 NotifyEmbeddedFailure();
@@ -234,6 +233,16 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
         }
 
         SceneManager.LoadScene(targetScene);
+    }
+
+    private static void ClearQueryIfStandalone(bool usesExistingUnityInstance)
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        if (!usesExistingUnityInstance)
+        {
+            SokobanClearCoCreationPlayQuery();
+        }
+#endif
     }
 
     private static bool TryReadQueryValue(

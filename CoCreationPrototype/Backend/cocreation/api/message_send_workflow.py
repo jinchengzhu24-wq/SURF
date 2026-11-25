@@ -323,6 +323,17 @@ def _preflight_message_request(req: _MessageRequestContext) -> _PreflightState:
                     interpretation_context,
                     req.content,
                 )
+                active_disagreement = interpretation_context.get('activeDisagreement') or {}
+                if (
+                    payload.requestProposal
+                    and payload.action == 'none'
+                    and active_disagreement.get('status') == 'active'
+                ):
+                    raise ApiError(
+                        409,
+                        'DISAGREEMENT_ACTIVE',
+                        'Resolve the active design disagreement before requesting a new proposal.',
+                    )
                 saved_understanding = read_database.execute(
                     "SELECT payload_json FROM audit_events\n"
                     "                WHERE session_id = ? AND event_type = 'turn_understanding'\n"

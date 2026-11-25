@@ -26,6 +26,7 @@ from cocreation.persistence.repository import (
     load_design_context,
     load_json,
 )
+from cocreation.persistence.session_projection import is_intention_sync_pending
 
 from .config_models import (
     ApiError,
@@ -1526,29 +1527,14 @@ def _build_integration_status_payload(database, session_id, session):
             'updatedAt': session['draft_regeneration_updated_at'],
             'failureCode': session['draft_regeneration_failure_code'],
         }
-    if session['status'] == 'completed':
-        intention_submitted = database.execute(
-            "\n            SELECT payload_json FROM audit_events\n"
-            "            WHERE session_id = ? AND event_type = 'intention_submitted'\n"
-            "            ORDER BY id DESC LIMIT 1\n            ",
-            (session_id,),
-        ).fetchone()
-        intention_payload = load_json(intention_submitted['payload_json']) if intention_submitted else {}
-        intention_sync_required = bool(intention_payload.get('intentionSyncRequired'))
-        online_synced = database.execute(
-            "\n            SELECT 1 FROM audit_events\n"
-            "            WHERE session_id = ? AND event_type = 'online_intention_synced'\n"
-            "            LIMIT 1\n            ",
-            (session_id,),
-        ).fetchone()
-        if intention_sync_required and online_synced is None:
-            payload['status'] = 'awaiting_intention'
-            return payload
-        if session['final_version_id']:
-            version = get_version(database, session_id, session['final_version_id'])
-            payload['finalRows'] = load_json(version['rows_json'])
-            intention = database.execute('SELECT content FROM designer_intentions WHERE session_id = ?', (session_id,)).fetchone()
-            payload['designerIntention'] = intention['content'] if intention else None
+    if is_intention_sync_pending(database, session_id, session):
+        payload['status'] = 'awaiting_intention'
+        return payload
+    if session['status'] == 'completed' and session['final_version_id']:
+        version = get_version(database, session_id, session['final_version_id'])
+        payload['finalRows'] = load_json(version['rows_json'])
+        intention = database.execute('SELECT content FROM designer_intentions WHERE session_id = ?', (session_id,)).fetchone()
+        payload['designerIntention'] = intention['content'] if intention else None
     return payload
 
 

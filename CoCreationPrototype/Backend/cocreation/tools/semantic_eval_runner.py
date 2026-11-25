@@ -32,37 +32,60 @@ def suite_hash(suite):
 
 def load_suite(path=DEFAULT_SUITE):
     suite = json.loads(path.read_text(encoding="utf-8"))
-    if suite.get("schemaVersion") != 1 or suite.get("target") != "turn_understanding":
+    if not isinstance(suite, dict) or suite.get("schemaVersion") != 1 or suite.get("target") != "turn_understanding":
         raise ValueError("Unsupported evaluation suite.")
-    stages = suite.get("stages") or {}
+    stages = suite.get("stages")
+    if not isinstance(stages, dict) or not stages:
+        raise ValueError("Evaluation suite requires a stages mapping.")
     for stage_id, stage in stages.items():
-        if not isinstance(stage, dict):
+        if (
+            not isinstance(stage, dict)
+            or not isinstance(stage.get("rows"), list)
+            or isinstance(stage.get("stageNumber"), bool)
+            or not isinstance(stage.get("stageNumber"), int)
+        ):
             raise ValueError(f"Stage {stage_id} must be structurally valid and solvable.")
         validate_and_solve(stage["rows"])
+    cases = suite.get("cases")
+    if not isinstance(cases, list):
+        raise ValueError("Evaluation suite cases must be a list.")
     identities = set()
-    for case in suite.get("cases") or []:
+    for case in cases:
+        if not isinstance(case, dict):
+            raise ValueError("Each evaluation case must be an object.")
         identity = case.get("id")
-        if not identity or identity in identities:
+        if not isinstance(identity, str) or not identity or identity in identities:
             raise ValueError("Evaluation case IDs must be unique.")
         identities.add(identity)
-        inputs = case.get("input") or {}
-        if set(inputs) - INPUT_KEYS or inputs.get("stage") not in stages:
+        inputs = case.get("input")
+        if not isinstance(inputs, dict) or set(inputs) - INPUT_KEYS or inputs.get("stage") not in stages:
             raise ValueError(f"Invalid model input in {identity}.")
         conversation = inputs.get("conversation")
-        if not isinstance(conversation, list) or not conversation or conversation[-1].get("role") != "user":
-            raise ValueError(f"Case {identity} needs a latest user turn.")
-        if any(set(turn) != {"role", "content"} or turn["role"] not in {"user", "assistant"}
-               or not isinstance(turn["content"], str) or not turn["content"].strip() for turn in conversation):
+        if (
+            not isinstance(conversation, list)
+            or not conversation
+            or any(
+                not isinstance(turn, dict)
+                or set(turn) != {"role", "content"}
+                or turn["role"] not in {"user", "assistant"}
+                or not isinstance(turn["content"], str)
+                or not turn["content"].strip()
+                for turn in conversation
+            )
+            or conversation[-1]["role"] != "user"
+        ):
             raise ValueError(f"Invalid conversation in {identity}.")
         if "forcedProposal" in inputs and not isinstance(inputs["forcedProposal"], bool):
             raise ValueError(f"Invalid proposal flag in {identity}.")
-        expected = case.get("expected") or {}
-        if not expected or set(expected) - EXPECTATION_KEYS:
+        expected = case.get("expected")
+        if not isinstance(expected, dict) or not expected or set(expected) - EXPECTATION_KEYS:
             raise ValueError(f"Invalid expectations in {identity}.")
         for key in ("actsAll", "actsAny", "actsForbidden"):
-            if not set(expected.get(key) or []).issubset(ACTS):
+            vals = expected.get(key) or []
+            if not isinstance(vals, list) or any(not isinstance(x, str) for x in vals) or not set(vals).issubset(ACTS):
                 raise ValueError(f"Invalid speech acts in {identity}.")
-        if not set(expected.get("elementsAll") or []).issubset(ELEMENTS):
+        elements_all = expected.get("elementsAll") or []
+        if not isinstance(elements_all, list) or any(not isinstance(x, str) for x in elements_all) or not set(elements_all).issubset(ELEMENTS):
             raise ValueError(f"Invalid elements in {identity}.")
         for key in ("mapRelated", "directionSufficient", "forbidProtectedChange"):
             if key in expected and not isinstance(expected[key], bool):
@@ -70,8 +93,17 @@ def load_suite(path=DEFAULT_SUITE):
         if "topicAspect" in expected and expected["topicAspect"] not in {"visual", "gameplay", "mixed", "unspecified"}:
             raise ValueError(f"Invalid topic aspect in {identity}.")
         for key in ("editScopeAll", "editScopeForbidden"):
-            if not set(expected.get(key) or []).issubset(ELEMENTS | {"gameplay"}):
+            vals = expected.get(key) or []
+            if not isinstance(vals, list) or any(not isinstance(x, str) for x in vals) or not set(vals).issubset(ELEMENTS | {"gameplay"}):
                 raise ValueError(f"Invalid edit scope in {identity}.")
+        if "changesAll" in expected:
+            changes_all = expected["changesAll"]
+            if not isinstance(changes_all, list) or any(not isinstance(item, dict) for item in changes_all):
+                raise ValueError(f"Invalid changesAll in {identity}.")
+        if "focusEntitiesAll" in expected:
+            focus_all = expected["focusEntitiesAll"]
+            if not isinstance(focus_all, list) or any(not isinstance(x, str) for x in focus_all):
+                raise ValueError(f"Invalid focusEntitiesAll in {identity}.")
         if "preserveEmpty" in expected and type(expected["preserveEmpty"]) is not bool:
             raise ValueError(f"Invalid preservation expectation in {identity}.")
     if not identities:
@@ -138,18 +170,40 @@ def check_result(case, result):
 
 
 def score(suite, captures):
+    if not isinstance(suite, dict) or not isinstance(captures, dict):
+        raise ValueError("Suite and captures must be JSON objects.")
     if captures.get("suiteHash") != suite_hash(suite):
         raise ValueError("Captured outputs belong to a different suite; do not compare changed answers or inputs.")
     repeats = captures.get("repeats", 1)
     if not isinstance(repeats, int) or isinstance(repeats, bool) or not 1 <= repeats <= 20:
         raise ValueError("Invalid repeat count.")
-    cases = {case["id"]: case for case in suite["cases"]}
+    raw_cases = suite.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise ValueError("An evaluation suite cannot be empty.")
+    cases = {case["id"]: case for case in raw_cases if isinstance(case, dict) and isinstance(case.get("id"), str)}
+    if len(cases) != len(raw_cases):
+        raise ValueError("Evaluation case IDs must be valid and unique.")
+    raw_runs = captures.get("runs")
+    if raw_runs is None:
+        raw_runs = []
+    if not isinstance(raw_runs, list):
+        raise ValueError("Captured runs must be a list.")
     runs = {}
-    for run in captures.get("runs") or []:
-        key = (run.get("caseId"), run.get("repeat"))
-        if key[0] not in cases or not isinstance(key[1], int) or isinstance(key[1], bool) or not 1 <= key[1] <= repeats or key in runs:
+    for run in raw_runs:
+        if not isinstance(run, dict):
+            raise ValueError("Each captured run must be an object.")
+        case_id = run.get("caseId")
+        repeat = run.get("repeat")
+        if (
+            not isinstance(case_id, str)
+            or case_id not in cases
+            or not isinstance(repeat, int)
+            or isinstance(repeat, bool)
+            or not 1 <= repeat <= repeats
+            or (case_id, repeat) in runs
+        ):
             raise ValueError("Unknown, duplicate or out-of-range captured run.")
-        runs[key] = run
+        runs[(case_id, repeat)] = run
     outcomes = []
     reasons = Counter()
     for identity, case in cases.items():
@@ -173,7 +227,7 @@ def score(suite, captures):
     return {"suiteHash": suite_hash(suite), "target": "turn_understanding", "repeats": repeats,
         "model": captures.get("model"), "sourceHash": captures.get("sourceHash"),
         "cases": len(cases), "captured": len(runs), "missing": total - len(runs),
-        "passed": passed, "total": total, "rate": passed / total,
+        "passed": passed, "total": total, "rate": (passed / total) if total else 0.0,
         "stablePassCases": sum(item["stablePass"] for item in per_case.values()),
         "inconsistentCases": sum(item["inconsistent"] for item in per_case.values()),
         "failureReasons": dict(reasons), "byCase": per_case, "outcomes": outcomes,

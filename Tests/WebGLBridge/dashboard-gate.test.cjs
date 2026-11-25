@@ -56,4 +56,28 @@ test("dashboard Tab traversal wraps in both directions while the gate is open", 
     assert.deepEqual(pressTab({}), { prevented: true, stopped: true, focused: null });
     modal.hidden = true;
     assert.deepEqual(pressTab({}), { prevented: false, stopped: false, focused: null });
+
+    // Non-Tab keys outside modal controls (backdrop/body) must still be intercepted while modal is open
+    modal.hidden = false;
+    let escPrevented = false;
+    let escStopped = false;
+    context.captureDashboardPasswordKey({
+        type: "keydown",
+        key: "Escape",
+        target: {},
+        preventDefault: () => { escPrevented = true; },
+        stopImmediatePropagation: () => { escStopped = true; },
+    });
+    assert.deepEqual({ escPrevented, escStopped }, { escPrevented: true, escStopped: true });
+
+    let leakPrevented = false;
+    let leakStopped = false;
+    context.captureDashboardPasswordKey({
+        type: "keydown",
+        key: "w",
+        target: {},
+        preventDefault: () => { leakPrevented = true; },
+        stopImmediatePropagation: () => { leakStopped = true; },
+    });
+    assert.deepEqual({ leakPrevented, leakStopped }, { leakPrevented: true, leakStopped: true });
 });

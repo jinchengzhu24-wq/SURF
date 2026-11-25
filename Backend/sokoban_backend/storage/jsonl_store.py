@@ -104,9 +104,17 @@ def build_journey_event_identifier(event):
     return digest[:16]
 
 
+def _reject_non_finite_json_constant(constant: str) -> Any:
+    raise ValueError(f"Non-finite JSON constant is not allowed: {constant}")
+
+
 async def _parse_json_dict(request: Request) -> dict[str, Any]:
     try:
-        data = await request.json()
+        raw_body = await request.body()
+        data = json.loads(
+            raw_body.decode("utf-8"),
+            parse_constant=_reject_non_finite_json_constant,
+        )
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exception
     if not isinstance(data, dict):
@@ -143,8 +151,11 @@ class StudyLogStore:
                     if not line:
                         continue
                     try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
+                        data = json.loads(
+                            line,
+                            parse_constant=_reject_non_finite_json_constant,
+                        )
+                    except (json.JSONDecodeError, ValueError):
                         malformed_count += 1
                         continue
                     if isinstance(data, dict):
@@ -178,7 +189,9 @@ class StudyLogStore:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as log_file:
                     for record in records:
-                        log_file.write(json.dumps(record, ensure_ascii=False))
+                        log_file.write(
+                            json.dumps(record, ensure_ascii=False, allow_nan=False)
+                        )
                         log_file.write("\n")
                     log_file.flush()
                     os.fsync(log_file.fileno())
@@ -196,7 +209,9 @@ class StudyLogStore:
         target.parent.mkdir(parents=True, exist_ok=True)
         with self.record_lock:
             with target.open("a", encoding="utf-8") as log_file:
-                log_file.write(json.dumps(record, ensure_ascii=False))
+                log_file.write(
+                    json.dumps(record, ensure_ascii=False, allow_nan=False)
+                )
                 log_file.write("\n")
 
     def online_match_flow_directory(self, match_id: str) -> Path:
@@ -266,7 +281,8 @@ class StudyLogStore:
             raise HTTPException(status_code=400, detail="ideaText is required")
         data["ideaText"] = idea_text
         data.setdefault("eventType", "creative-idea")
-        data.setdefault("ideaId", f"idea-{int(self.clock.now() * 1000)}")
+        if not normalize_creative_idea_identifier(data.get("ideaId")):
+            data["ideaId"] = f"idea-{int(self.clock.now() * 1000)}"
         data["serverReceivedAt"] = self.clock.utc_timestamp()
         log_path = self.paths.creative_idea_log_file
 

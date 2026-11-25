@@ -254,11 +254,6 @@ public class QuestionnaireController : MonoBehaviour
 
     public void OpenExternalSurvey()
     {
-        if (externalSurveyOpened)
-        {
-            return;
-        }
-
         if (!TryGetHttpUrl(externalSurveyUrl, out string surveyUrl))
         {
             Debug.LogError("QuestionnaireController: External survey URL must use HTTP or HTTPS.");
@@ -272,12 +267,6 @@ public class QuestionnaireController : MonoBehaviour
                 : surveyUrl
         );
         externalSurveyOpened = true;
-
-        if (externalSurveyLinkButton != null)
-        {
-            externalSurveyLinkButton.interactable = false;
-        }
-
         UpdateSubmitState();
     }
 
@@ -410,6 +399,8 @@ public class QuestionnaireController : MonoBehaviour
                 yield return new WaitForSeconds(0.75f);
                 SceneManager.LoadScene(nextSceneName);
             }
+            UpdateSubmitState();
+            yield break;
         }
         else
         {

@@ -424,6 +424,10 @@ export function createMatchmakingDashboard({
     }
 
     async function loadData(manual) {
+        if (deleteDialog.isDashboardAccessLocked()) {
+            deleteDialog.requestDashboardAccess();
+            return;
+        }
         setStatus(manual ? "Refreshing MatchMaking records..." : "Loading MatchMaking records...");
 
         try {

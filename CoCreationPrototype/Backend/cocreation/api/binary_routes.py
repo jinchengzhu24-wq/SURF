@@ -339,7 +339,8 @@ def cancel(services: CoCreationServices, session_id, payload, access_cookie):
                 raise ApiError(409, "IDEMPOTENCY_CONFLICT", "This key belongs to another action.")
             return services.serialize_session(database, session_id)
         _check_non_binary_idempotency_conflict(database, session_id, payload.idempotencyKey)
-        _guard(services, database, session_id, access_cookie, payload.baseVersionId)
+        session = require_active_session(database, session_id, access_cookie, services=services)
+        require_current_base(session, payload.baseVersionId)
         topic = binary.current_topic(database, session_id, payload.baseVersionId, clock=services.clock)
         if not topic or topic["topicId"] != payload.topicId:
             raise ApiError(409, "PROPOSAL_STALE", "This topic is no longer active.")

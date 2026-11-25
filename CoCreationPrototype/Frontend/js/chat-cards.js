@@ -515,7 +515,13 @@ function renderAssistantBubbleContent(turn, bubble) {
     const body = assistantBodyWithoutCues(localized.content, uiCues, question);
     renderAssistantBody(bodyNode, body, guidance.coordinateLinks, turn);
     bubble.appendChild(bodyNode);
-    if (localized !== turn) {
+    const isTranslatedDisplay = Boolean(
+        turn.role === "assistant"
+        && turn.language
+        && turn.language !== state.language
+        && turn.translations?.[state.language]
+    );
+    if (isTranslatedDisplay) {
         const translatedLabel = document.createElement("small");
         translatedLabel.className = "translation-label";
         translatedLabel.textContent = t("translatedDisplay");
