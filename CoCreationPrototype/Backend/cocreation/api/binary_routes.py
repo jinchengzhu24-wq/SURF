@@ -11,8 +11,10 @@ from cocreation.domain import binary_discovery as binary
 from cocreation.domain.design_requirements import (
     INTERPRETATION_VERSION,
     evaluate_requirements,
+    normalize_requirement_record,
     preflight_requirements,
     protected_change_requested,
+    requirement_model_view,
     validate_requirement_record,
 )
 from cocreation.domain.proposal_search import parse_revision_plan
@@ -25,6 +27,7 @@ from cocreation.persistence.repository import (
     load_design_context,
     load_entity_bindings,
 )
+from cocreation.reliability.reply_reliability import requirement_cache_key
 
 from .config_models import (
     ApiError,
@@ -418,7 +421,7 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
                 raise ValueError("BINARY_EXECUTION_MISMATCH")
 
         if topic["questionCount"] >= 3:
-            step, caches = {"action": "plan", "note": "", "question": "", "branches": []}, []
+            step, caches = {"action": "plan", "note": "", "question": "", "branches": [], "planStrategies": [], "protectedEntities": []}, []
         else:
             step, caches = services.llm.generate_binary_step(
                 topic,
@@ -429,17 +432,36 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
                 deadline,
                 preflight_budget,
             )
-            # The generator's existing independent review has accepted this record and both directions.
-            if topic.get("requirements") is None:
-                topic["requirements"] = validate_requirement_record(
+            if step["action"] != "protected_refusal" and topic.get("requirements") is None:
+                normalized_req, _ = normalize_requirement_record(
                     step["initialRequirements"],
                     topic["userTurns"][:1],
                     stage["stageSnapshot"],
                 )
-            stage["requirementRecord"] = topic["requirements"]
-        if preflight_requirements(context["rows"], topic["requirements"]):
+                topic["requirements"] = validate_requirement_record(
+                    normalized_req,
+                    topic["userTurns"][:1],
+                    stage["stageSnapshot"],
+                )
+            if step["action"] != "protected_refusal":
+                stage["requirementRecord"] = topic["requirements"]
+        if step["action"] != "protected_refusal" and preflight_requirements(context["rows"], topic["requirements"]):
             raise ApiError(422, "REQUIREMENT_PERMISSION_CONFLICT", "The request conflicts with fixed map permissions.")
-        if step["action"] == "ask":
+        if step["action"] == "protected_refusal":
+            permission_message = binary.protected_refusal_message(
+                step.get("protectedEntities") or [],
+                topic["initialRequest"],
+                context["language"],
+            )
+            topic.update(status="cancelled", retryAction=None, failureCode=None)
+            execution = LLMExecutionResult(
+                permission_message,
+                1,
+                request.state.request_id,
+                model="server-permission-guard",
+                guidance={"proposalOffer": None, "disagreement": None, "followUpQuestion": None, "uiCues": []},
+            )
+        elif step["action"] == "ask":
             question_id = "question-" + uuid.uuid4().hex
             topic["questionCount"] += 1
             question = {
@@ -486,7 +508,15 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
             raise binary.BinaryError("BINARY_DIRECTIONS_UNAVAILABLE")
         else:
             phase = "binary_finalization"
-            execution = _finalize(services, topic, context, validator, request, deadline)
+            execution = _finalize(
+                services,
+                topic,
+                context,
+                validator,
+                request,
+                deadline,
+                plan_strategies=step.get("planStrategies") or [],
+            )
             _persist_verified_requirements(session_id, topic["versionId"], context["stageContext"], services=services)
             topic.update(status="proposal_ready", retryAction=None, failureCode=None)
         with services.connect(immediate=True) as database:
@@ -500,7 +530,7 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
             ):
                 raise ApiError(409, "PROPOSAL_STALE", "The active question changed while preparing the reply.")
             _check_binding(_context(services, database, session_id, topic), topic)
-            if step["action"] not in {"ask", "blocked"}:
+            if step["action"] == "plan":
                 execution = _bind_execution_to_stage(
                     execution,
                     topic["versionId"],
@@ -532,10 +562,17 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
             if step["action"] == "ask":
                 topic["pendingQuestion"]["turnId"] = turn_id
             _save(services, database, session_id, topic)
+            event_name = (
+                "binary_question_verified"
+                if step["action"] == "ask"
+                else "binary_protected_refusal"
+                if step["action"] == "protected_refusal"
+                else "binary_offer_verified"
+            )
             services.record_event(
                 database,
                 session_id,
-                "binary_question_verified" if step["action"] == "ask" else "binary_offer_verified",
+                event_name,
                 {
                     "topicId": topic["topicId"],
                     "baseVersionId": topic["versionId"],
@@ -544,6 +581,7 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
                     "branchPreflightMs": [c["preflightMs"] for c in caches],
                     "branchCount": len(caches),
                     "policyVersion": binary.POLICY_VERSION,
+                    **({"protectedEntities": list(step.get("protectedEntities") or [])} if step["action"] == "protected_refusal" else {}),
                 },
                 services.utc_now(),
             )
@@ -642,18 +680,41 @@ def _operations(base, rows):
     ]
 
 
-def _finalize(services: CoCreationServices, topic, context, validator, request, deadline):
+def _finalize(services: CoCreationServices, topic, context, validator, request, deadline, *, plan_strategies=None):
     stage = context["stageContext"]
     stage.setdefault("_reliabilityState", {})
     stage["binaryChoices"] = topic["choices"]
     stage["binaryPromises"] = [c["promise"] for c in topic["choices"]]
-    if isinstance(topic.get("requirements"), dict):
-        cached_initial = dict(topic["requirements"])
-        cached_initial.setdefault("interpretationVersion", INTERPRETATION_VERSION)
-        stage["verifiedRequirementCache"] = [
-            *(stage.get("verifiedRequirementCache") or []),
-            {"baseVersionId": topic["versionId"], "record": cached_initial},
-        ]
+    base_req = copy.deepcopy(topic.get("requirements") or {"requirements": [], "automaticBindings": [], "exactTransitions": []})
+    if topic["choices"]:
+        choice_reqs = binary.compile_choice_requirements_deterministic(topic["choices"], topic["userTurns"], context["language"])
+        combined = requirement_model_view(base_req)
+        combined["requirements"] = [*combined["requirements"], *choice_reqs]
+        merged_record = validate_requirement_record(combined, topic["userTurns"], stage["stageSnapshot"])
+        binary.require_choice_coverage(merged_record, topic["choices"])
+        if preflight_requirements(context["rows"], merged_record):
+            raise ApiError(422, "REQUIREMENT_PERMISSION_CONFLICT", "The request conflicts with fixed map permissions.")
+    else:
+        merged_record = dict(base_req)
+    merged_record["topicId"] = topic["topicId"]
+    merged_record.setdefault("interpretationVersion", INTERPRETATION_VERSION)
+    cache_key = requirement_cache_key(stage, topic["userTurns"])
+    merged_record["evidenceSignature"] = cache_key
+    stage["requirementRecord"] = merged_record
+    stage["verifiedRequirementCache"] = [
+        *(stage.get("verifiedRequirementCache") or []),
+        {"baseVersionId": topic["versionId"], "cacheKey": cache_key, "record": merged_record},
+    ]
+    stage["_reliabilityState"]["verifiedRequirements"] = {"cacheKey": cache_key, "record": merged_record}
+    if plan_strategies:
+        stage["precompiledRevisionStrategies"] = copy.deepcopy(list(plan_strategies))
+    elif (
+        isinstance(topic.get("selectedCandidate"), dict)
+        and topic["selectedCandidate"].get("topicBinding") == topic["binding"]
+        and topic["selectedCandidate"].get("selectedPrefix") == binary.path_signature(topic["choices"])
+        and isinstance(topic["selectedCandidate"].get("strategy"), dict)
+    ):
+        stage["precompiledRevisionStrategies"] = [copy.deepcopy(topic["selectedCandidate"]["strategy"])]
     try:
         execution = services.llm.generate_revision_search_proposal_sync(
             conversation=[{"role": "user", "content": t["content"]} for t in topic["userTurns"]],
@@ -672,6 +733,11 @@ def _finalize(services: CoCreationServices, topic, context, validator, request, 
             "CANDIDATE_UNSOLVABLE",
             "SEMANTIC_CONSTRAINT_NOT_MET",
             "HARD_OBJECTIVE_NOT_MET",
+            "UPSTREAM_TIMEOUT",
+            "MODEL_RESPONSE_INVALID",
+            "MODEL_EMPTY_RESPONSE",
+            "GLOBAL_PROPOSAL_TIMEOUT",
+            "REVISION_CONTRACT_CONFLICT",
         }:
             raise
         verified = stage.get("_reliabilityState", {}).get("verifiedRequirements")

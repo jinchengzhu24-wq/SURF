@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import copy
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -9,9 +10,11 @@ import hashlib
 import json
 import os
 import re
+import threading
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any
+import httpx
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -496,7 +499,8 @@ async def _default_request_completion(*args, **kwargs):
 
 async def _request_completion_impl(api_key, base_url, model, messages, max_completion_tokens, timeout_seconds, structured=True, task=None, manual_edit_direction_count=None, response_format_override=None, temperature=0.6):
     svc = _current_service()
-    client = svc.create_async_client(api_key, base_url, timeout_seconds)
+    use_pool = svc.client_factory is None
+    client = None if use_pool else svc.create_async_client(api_key, base_url, timeout_seconds)
     request_options = {'model': model, 'messages': messages, 'temperature': temperature, 'max_completion_tokens': max_completion_tokens, 'stream': False, 'extra_body': {'thinking': {'type': 'disabled'}}}
     if response_format_override is not None:
         request_options['response_format'] = response_format_override
@@ -506,7 +510,10 @@ async def _request_completion_impl(api_key, base_url, model, messages, max_compl
     async def create_completion():
         trace_reply('provider_call', 'started', modelCalls=1)
         try:
-            result = await client.chat.completions.create(**request_options)
+            if use_pool:
+                result = await _pooled_create_completion(api_key, base_url, timeout_seconds, request_options)
+            else:
+                result = await client.chat.completions.create(**request_options)
             trace_reply('provider_call', 'passed')
             return result
         except BaseException as error:
@@ -522,7 +529,8 @@ async def _request_completion_impl(api_key, base_url, model, messages, max_compl
                 return await create_completion()
             raise
     finally:
-        await client.close()
+        if client is not None:
+            await client.close()
 
 def _content_block_sentences(value):
     return [sentence.strip() for sentence in re.split('(?<=[!?\\u3002\\uff01\\uff1f])\\s*|(?<=\\.)(?!\\d)\\s*|[\\r\\n]+', str(value or '')) if sentence.strip()]
@@ -730,6 +738,122 @@ def _clean_optional_text(value, field_name):
 
 def _default_create_async_client(api_key, base_url, timeout_seconds):
     return AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds, max_retries=0)
+
+
+class _PooledLLMClientManager:
+    """Process-wide HTTP keep-alive pool pinned to one persistent daemon asyncio loop."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._clients: dict[tuple[str, str], AsyncOpenAI] = {}
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._loop is not None and not self._loop.is_closed() and self._thread is not None and self._thread.is_alive():
+                return self._loop
+            ready = threading.Event()
+            holder: dict[str, asyncio.AbstractEventLoop] = {}
+
+            def _run_loop() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                holder['loop'] = loop
+                ready.set()
+                try:
+                    loop.run_forever()
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+
+            thread = threading.Thread(target=_run_loop, name='cocreation-llm-pool', daemon=True)
+            thread.start()
+            ready.wait()
+            self._loop = holder['loop']
+            self._thread = thread
+            return self._loop
+
+    async def _get_or_create_client(self, api_key: str, base_url: str) -> AsyncOpenAI:
+        key = (str(api_key), str(base_url))
+        client = self._clients.get(key)
+        if client is None:
+            http_client = httpx.AsyncClient(
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=60.0),
+            )
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=BACKEND_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+                http_client=http_client,
+            )
+            self._clients[key] = client
+        return client
+
+    async def _execute_on_pool(self, api_key: str, base_url: str, timeout_seconds: float | None, request_options: dict[str, Any]) -> Any:
+        client = await self._get_or_create_client(api_key, base_url)
+        if timeout_seconds is not None:
+            secs = max(0.001, float(timeout_seconds))
+            per_call_timeout = httpx.Timeout(secs, connect=min(10.0, secs))
+            scoped = client.with_options(timeout=per_call_timeout)
+        else:
+            scoped = client
+        return await scoped.chat.completions.create(**request_options)
+
+    async def create_completion(self, api_key: str, base_url: str, timeout_seconds: float | None, request_options: dict[str, Any]) -> Any:
+        loop = self._ensure_loop()
+        cf_future = asyncio.run_coroutine_threadsafe(
+            self._execute_on_pool(api_key, base_url, timeout_seconds, request_options),
+            loop,
+        )
+        try:
+            return await asyncio.wrap_future(cf_future)
+        except asyncio.CancelledError:
+            cf_future.cancel()
+            raise
+
+    def close_all(self) -> None:
+        with self._lock:
+            loop = self._loop
+            thread = self._thread
+            clients = list(self._clients.values())
+            self._clients.clear()
+            self._loop = None
+            self._thread = None
+        if loop is not None and not loop.is_closed():
+            async def _shutdown() -> None:
+                for client in clients:
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
+
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_shutdown(), loop)
+                fut.result(timeout=2.0)
+            except Exception:
+                pass
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=2.0)
+
+
+_POOLED_CLIENT_MANAGER = _PooledLLMClientManager()
+atexit.register(_POOLED_CLIENT_MANAGER.close_all)
+
+
+async def _pooled_create_completion(api_key: str, base_url: str, timeout_seconds: float | None, request_options: dict[str, Any]) -> Any:
+    return await _POOLED_CLIENT_MANAGER.create_completion(api_key, base_url, timeout_seconds, request_options)
+
+
+def close_pooled_llm_clients() -> None:
+    _POOLED_CLIENT_MANAGER.close_all()
 
 
 def _create_async_client(api_key, base_url, timeout_seconds):

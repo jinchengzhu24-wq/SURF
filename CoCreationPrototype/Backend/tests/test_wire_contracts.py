@@ -314,3 +314,62 @@ class WireContracts(unittest.TestCase):
                 schema = self.calls[-1]["response_format"]["json_schema"]["schema"]
                 self.assertTrue(fields <= set(schema["properties"]))
                 self.assertFalse(schema["additionalProperties"])
+
+    def test_default_pooled_client_reuses_async_openai_across_asyncio_runs(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from cocreation.llm import config_and_runtime as runtime
+
+        created = []
+        closed = []
+        with_options_timeouts = []
+        call_timeouts = []
+
+        class PooledStubClient:
+            def __init__(self, **kwargs):
+                created.append(kwargs)
+                self._timeout = None
+                self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+            def with_options(self, *, timeout=None):
+                with_options_timeouts.append(timeout)
+                scoped = PooledStubClient.__new__(PooledStubClient)
+                scoped._timeout = timeout
+                scoped.chat = SimpleNamespace(completions=SimpleNamespace(create=scoped._create))
+                return scoped
+
+            async def _create(self, **kwargs):
+                call_timeouts.append(self._timeout)
+                return response({"ok": True})
+
+            async def close(self):
+                closed.append(True)
+
+        svc = llm.CoCreationLLMService(llm.LLMConfig(api_key="pool-key", base_url="https://pool.invalid/v1"))
+        runtime.close_pooled_llm_clients()
+        try:
+            with patch.object(runtime, "AsyncOpenAI", side_effect=lambda **kw: PooledStubClient(**kw)):
+                r1 = asyncio.run(svc.request_completion("pool-key", "https://pool.invalid/v1", llm.KIMI_MODEL,
+                    [{"role": "user", "content": "one"}], 100, 12.0, structured=False, task="plain_chat"))
+                r2 = asyncio.run(svc.request_completion("pool-key", "https://pool.invalid/v1", llm.KIMI_MODEL,
+                    [{"role": "user", "content": "two"}], 100, 15.0, structured=False, task="plain_chat"))
+            self.assertEqual(len(created), 1)
+            self.assertEqual(len(with_options_timeouts), 2)
+            self.assertEqual(len(call_timeouts), 2)
+            self.assertIsNotNone(r1)
+            self.assertIsNotNone(r2)
+        finally:
+            runtime.close_pooled_llm_clients()
+        self.assertEqual(len(closed), 1)
+
+        per_call_closed = []
+        class PerCallClient(FakeAsyncOpenAIClient):
+            async def close(self):
+                per_call_closed.append(True)
+        svc_factory = llm.CoCreationLLMService(
+            llm.LLMConfig(api_key="k", base_url="https://f.invalid/v1"),
+            client_factory=lambda *a: PerCallClient(lambda req, n: ({"ok": True}, "stop")),
+        )
+        asyncio.run(svc_factory.request_completion("k", "https://f.invalid/v1", llm.KIMI_MODEL,
+            [{"role": "user", "content": "x"}], 50, 5.0, structured=False))
+        self.assertEqual(len(per_call_closed), 1)

@@ -321,6 +321,11 @@ class ProposalUnderstandingTests(unittest.TestCase):
         self.assertEqual([x.kwargs["task"] for x in call.call_args_list], ["turn_understanding", "turn_understanding_review"])
         self.assertEqual(call.call_args_list[0].args[5], 25.0)
         self.assertEqual(call.call_args_list[1].args[5], 18.0)
+        review_messages = call.call_args_list[1].args[3]
+        self.assertIn("chosen EXCLUSIVELY from allowedEvidenceRefs", review_messages[0]["content"])
+        self.assertIn("do NOT reject or try to delete/rewrite it", review_messages[0]["content"])
+        review_payload = json.loads(review_messages[1]["content"])
+        self.assertEqual(review_payload.get("allowedEvidenceRefs"), ["user:u1", "user:u2", "user:latest"])
 
         short_call = RecordedAsyncCall(side_effect=[response(good)])
         with llm_scope(completion_requester=short_call):
@@ -332,6 +337,43 @@ class ProposalUnderstandingTests(unittest.TestCase):
                 _deadline=time.monotonic() + 10.0,
             )
         self.assertLessEqual(short_call.call_args_list[0].args[5], 10.0)
+
+    def test_policy2_lightweight_mode_strips_proposal_understanding_and_skips_review(self):
+        from types import SimpleNamespace
+        from tests.fakes import RecordedAsyncCall
+
+        model_payload = {
+            "acts": ["evaluation"],
+            "elements": ["water"],
+            "evidenceSpan": "How does the layout feel?",
+            "directionSufficient": False,
+            "mapRelated": True,
+            "changes": [],
+        }
+        calls = []
+
+        async def fake_request(*args, **kwargs):
+            calls.append((kwargs["task"], args[3], args[4], args[5], kwargs.get("response_format_override")))
+            return response(model_payload)
+
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=fake_request)):
+            res = llm.classify_turn_understanding(
+                [{"role": "user", "content": "How does the layout feel?"}],
+                self.snapshot,
+                "offline-lightweight",
+                proposal_context={"policy2Lightweight": True},
+                _deadline=time.monotonic() + 116.0,
+            )
+        self.assertEqual([t for t, *_ in calls], ["turn_understanding"])
+        _, msgs, max_tokens, timeout, rf_override = calls[0]
+        self.assertIsNone(res["proposalUnderstanding"])
+        self.assertTrue(res["lightweightRouting"])
+        self.assertEqual(max_tokens, 350)
+        self.assertLessEqual(timeout, 15.0)
+        self.assertEqual(rf_override["json_schema"]["name"], "cocreation_turn_routing")
+        self.assertNotIn("currentStageSnapshot", msgs[1]["content"])
+        self.assertNotIn("policy2Lightweight", msgs[1]["content"])
+        self.assertIn("Policy 2 lightweight routing mode", msgs[0]["content"])
 
 
 if __name__ == "__main__":

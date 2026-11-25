@@ -62,6 +62,7 @@ from cocreation.domain.understanding_review import (
     REVIEW_VERSION,
 )
 import cocreation.domain.proposal_options as proposal_options
+from cocreation.domain.binary_discovery import _has_protected_edit_text
 from cocreation.domain.proposal_understanding import (
     turn_schema,
     validate_topic,
@@ -387,7 +388,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
     last_error = None
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
-    optional_budget = OptionalRepairBudget(deadline, clock=svc.clock)
+    optional_budget = OptionalRepairBudget(deadline, clock=svc.clock, cap_seconds=15.0)
     optional_budget.spent = float((stage_context or {}).get('_optionalRepairSpent') or 0.0)
     component_checks = []
     semantic_messages = semantic_messages or messages
@@ -735,7 +736,34 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                 guidance['intentHypothesis'] = intent_decision['cardText'] if draft_classification == 'candidate' else None
                 guidance['intentConfidence'] = 'medium' if draft_classification == 'candidate' else None
                 active_intents = [{'hypothesisId': item.get('id'), 'statement': item.get('statement'), 'semanticClaims': item.get('semanticClaims') or [], 'evidenceText': item.get('evidenceText') or ''} for item in ((stage_context or {}).get('designContext') or {}).get('intentHypotheses', []) if item.get('status') == 'confirmed']
-                intent_review = await _current_service().review_ordinary_intent_with_recovery(optional_budget=optional_budget, component_checks=component_checks, api_key=api_key, base_url=base_url, user_text=latest_user_text, body=body, decision=intent_decision, active_inclinations=active_intents, language=language, request_id=request_id, deadline=deadline, discussion_background=_dialogue_background_prompt(stage_context), visible_questions=(stage_context or {}).get('ordinaryOpenQuestions'), component_state=stage_context.setdefault('_reliabilityState', {}))
+                rel_state = stage_context.setdefault('_reliabilityState', {})
+                ordinary_open_questions = (stage_context or {}).get('ordinaryOpenQuestions') or []
+                locked_body_recheck = bool(rel_state.get('lockedIntentReview') and rel_state.get('bodyReviewRequired'))
+                needs_intent_review = bool(
+                    draft_decision_missing
+                    or draft_classification == 'candidate'
+                    or ordinary_open_questions
+                    or locked_body_recheck
+                    or _has_protected_edit_text(body)
+                )
+                if needs_intent_review:
+                    intent_review = await _current_service().review_ordinary_intent_with_recovery(optional_budget=optional_budget, component_checks=component_checks, api_key=api_key, base_url=base_url, user_text=latest_user_text, body=body, decision=intent_decision, active_inclinations=active_intents, language=language, request_id=request_id, deadline=deadline, discussion_background=_dialogue_background_prompt(stage_context), visible_questions=ordinary_open_questions, component_state=rel_state)
+                else:
+                    trace_reply('joint_review', 'skipped', 'ON_DEMAND_NO_CANDIDATE_OR_QUESTIONS')
+                    intent_review = {
+                        'classification': draft_classification,
+                        'claims': [],
+                        'cardText': '',
+                        'cardTextValid': True,
+                        'bodyValid': True,
+                        'relation': 'none',
+                        'conflictingHypothesisIds': [],
+                        'explanation': None,
+                        'issues': [],
+                        'reviewedActiveClaims': [],
+                        'reviewVersion': 'on-demand-skipped-v1',
+                        'skippedOnDemand': True,
+                    }
                 if stage_context.get('_reliabilityState', {}).get('questionReviewIssue'):
                     component_checks.append(ComponentCheck('question_review', 'omitted', 'QUESTION_RESULTS_INVALID'))
                 if intent_review.get('issues'):

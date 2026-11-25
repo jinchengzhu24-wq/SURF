@@ -377,7 +377,8 @@ class AuditBinaryModelTests(unittest.TestCase):
         patch_calls = [msg for task, msg in seen_prompts if task == "proposal_clarification_patch"]
         self.assertEqual(len(patch_calls), 1)
         self.assertIn("branch-2", patch_calls[0])
-        self.assertEqual(len(review_calls), 2)
+        self.assertEqual(len(review_calls), 0)
+        self.assertNotIn("proposal_clarification_review", [task for task, _ in seen_prompts])
         self.assertNotIn("proposal_clarification_review_patch", [task for task, _ in seen_prompts])
 
 

@@ -369,14 +369,42 @@ def _resolve_turn_understanding_or_binary(
     """Classify turn understanding when needed and hand off eligible requests to Policy 2."""
     payload = req.payload
     services = req.services
-    if payload.action == 'none' and preflight.precomputed_understanding is None:
+    direct_binary = (
+        payload.action == 'none'
+        and payload.requestProposal
+        and services.settings.binary_discovery_enabled
+        and services.should_start_binary_fn is None
+        and preflight.precomputed_understanding is None
+        and not preflight.proposal_context_for_understanding
+        and (preflight.understanding_context.get('activeDisagreement') or {}).get('status') != 'active'
+    )
+    if direct_binary:
+        preflight.precomputed_understanding = {
+            'acts': ['revision_request'],
+            'elements': [],
+            'evidenceSpan': req.content,
+            'directionSufficient': True,
+            'mapRelated': True,
+            'changes': [],
+            'proposalUnderstanding': None,
+            'semanticPolicyVersion': 1,
+            'directBinaryEntry': True,
+        }
+    elif payload.action == 'none' and preflight.precomputed_understanding is None:
+        understanding_ctx = (
+            {**preflight.understanding_context, 'policy2Lightweight': True}
+            if services.settings.binary_discovery_enabled
+            and not preflight.proposal_context_for_understanding
+            and not payload.requestProposal
+            else preflight.understanding_context
+        )
         try:
             preflight.precomputed_understanding = services.llm.classify_turn_understanding(
                 preflight.prior_conversation,
                 preflight.snapshot_for_understanding,
                 req.request.state.request_id,
                 forced_proposal=payload.requestProposal,
-                proposal_context=preflight.understanding_context,
+                proposal_context=understanding_ctx,
                 _deadline=req.message_started_at + req.llm_budget_seconds,
             )
             preflight.understanding_freshly_classified = True

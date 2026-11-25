@@ -87,6 +87,7 @@ from cocreation.domain.proposal_diagnostics import (
 from cocreation.domain.design_requirements import (
     requirement_response_schema,
     validate_requirement_record,
+    normalize_requirement_record,
     evaluate_requirements,
     preflight_requirements,
     goal_rank,
@@ -236,7 +237,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         if visible_choices and isinstance(raw_understanding, dict)
         else raw_understanding
     )
-    messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Interpret this single authorized proposal topic into the supplied JSON schema. selectedInterfaceChoices are explicit clicks, not inferred agreement. Cover EACH sourceTurnId with its visible action meaning. Do not import hidden promise focus, coordinates or budgets as user constraints. Concrete button promises receive a separate strict execution check; keep the existing negotiable-goal policy for other goals. Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. Question text is linguistic context only, never evidence of a user requirement or current map fact. The current StageSnapshot is the only map authority. Ignore 'I do not know', 'either is fine' and other noncommittal answers without discarding earlier clear directions. Distinguish entity counts, entity positions, gameplay switching, push order, route length and timing. 'Increase switching between boxes' is gameplay/boxAlternations/increase, never box/count. 'Make the player spend longer' is gameplay/experience/seek, never player/count. 'Interrupt B1 early' is gameplay/timing/early with B1 as the explicit entity. An AI-proposed preference selected by the designer stays a preference or negotiable goal, not a new prohibition, fixed number, coordinate or mandatory route dependency. Clearly expressed directional goals are strength=goal, even if described as must; they may be partly achieved or deferred, but never reversed. Use invariant only for explicit prohibitions, fixed counts, unchanged positions/distribution, or explicitly fixed edit scope. Numeric values must come from user evidence, not B1/T2 labels; null means no number was stated. unit=delta means an explicitly stated change amount; absolute means an explicitly fixed value. Do not invent numeric thresholds. priorityEvidenceSpan is empty unless the user explicitly prioritized that goal; focused=true only for the current clearly named focus. Preserve all clear still-active directions. A later explicit correction can replace an earlier direction for the same property; an unclear reply cannot supersede it. Unspecified entities may be chosen from current snapshot labels within the water/internal-wall editing scope. automaticBindings accepts ONLY existing entity LABELS (P, B1, T1, etc.), never terrain names, cells, zones or invented IDs. It may be empty; terrain-only wishes do not require choosing an entity. editing scope. Record those choices only in automaticBindings, never as explicit requirements or confirmed design memory. Never replace a designer's explicit entity. statements must be short, understandable, and in the response language; avoid new map claims. Do not infer stronger requirements from assistant explanations or unconfirmed DesignContext hypotheses. Use the topic understanding to distinguish goals, edit scope, spatial focus and preservation. Recheck it against original designerTurns: it is a candidate interpretation, not extra evidence. A focus around an entity does not request relocating it. Visual composition is a valid goal without additional transport or gameplay objectives.  exactTransitions is empty unless the designer explicitly specified the exact coordinates and tile change. Never extract exact changes or coordinates from question text. Interface clicks (selectedInterfaceChoices) NEVER authorize exactTransitions; keep exactTransitions=[] unless the designer typed explicit row/column coordinates in a free-text turn. Preserve inherited verified meanings (such as gameplay/experience for a broad 'make it simpler' turn) alongside the concrete obstacle/route requirement for each clicked choice. For each selectedInterfaceChoices entry with action.kind='reduce_obstacles' (water or internal_walls), emit one water or wall count/decrease requirement (strength='goal', value=null, unit='none', entities=[]) citing an exact substring of that choice's designer turn; do not invent extra distribution, distance, appearance, or entity-bound requirements from assistant question or note text."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'answeredQuestions': discovery.get('answers') or [], 'selectedInterfaceChoices': visible_choices, 'currentStageSnapshot': snapshot, 'responseLanguage': stage_context.get('responseLanguage', 'en'), 'editableComponents': ['water', 'internal_walls'], 'proposalUnderstanding': understanding_view, 'selectedDirection': proposal_options.planning_projection(discovery), 'inheritedVerifiedRequirements': inherited, 'requirementDefinitions': REQUIREMENT_DEFINITIONS, 'inheritanceRule': 'Retain unchanged verified meanings. Only exact later designer correction may supersede related items; recheck complete coverage, including inherited items, against all supplied evidence.'}, ensure_ascii=False)}]
+    messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Interpret this single authorized proposal topic into the supplied JSON schema. selectedInterfaceChoices are explicit clicks, not inferred agreement. Cover EACH sourceTurnId with its visible action meaning. Do not import hidden promise focus, coordinates or budgets as user constraints. Platform protections (outer_shell, player, boxes, targets counts and positions) are ALREADY enforced by the server: NEVER emit requirements for outer_shell, player, boxes, or targets even if the designer explicitly mentions keeping them fixed. Always set scope='all' by default; use scope='original_cells' ONLY when component is 'water' or 'wall' AND property is 'count' (NEVER on positions, distribution, gameplay, player, box, or target). Concrete button promises receive a separate strict execution check; keep the existing negotiable-goal policy for other goals. Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. Question text is linguistic context only, never evidence of a user requirement or current map fact. The current StageSnapshot is the only map authority. Ignore 'I do not know', 'either is fine' and other noncommittal answers without discarding earlier clear directions. Distinguish entity counts, entity positions, gameplay switching, push order, route length and timing. 'Increase switching between boxes' is gameplay/boxAlternations/increase, never box/count. 'Make the player spend longer' is gameplay/experience/seek, never player/count. 'Interrupt B1 early' is gameplay/timing/early with B1 as the explicit entity. An AI-proposed preference selected by the designer stays a preference or negotiable goal, not a new prohibition, fixed number, coordinate or mandatory route dependency. Clearly expressed directional goals are strength=goal, even if described as must; they may be partly achieved or deferred, but never reversed. Use invariant only for explicit prohibitions, fixed counts, unchanged positions/distribution, or explicitly fixed edit scope. Numeric values must come from user evidence, not B1/T2 labels; null means no number was stated. unit=delta means an explicitly stated change amount; absolute means an explicitly fixed value. Do not invent numeric thresholds. priorityEvidenceSpan is empty unless the user explicitly prioritized that goal; focused=true only for the current clearly named focus. Preserve all clear still-active directions. A later explicit correction can replace an earlier direction for the same property; an unclear reply cannot supersede it. Unspecified entities may be chosen from current snapshot labels within the water/internal-wall editing scope. automaticBindings accepts ONLY existing entity LABELS (P, B1, T1, etc.), never terrain names, cells, zones or invented IDs. It may be empty; terrain-only wishes do not require choosing an entity. editing scope. Record those choices only in automaticBindings, never as explicit requirements or confirmed design memory. Never replace a designer's explicit entity. statements must be short, understandable, and in the response language; avoid new map claims. Do not infer stronger requirements from assistant explanations or unconfirmed DesignContext hypotheses. Use the topic understanding to distinguish goals, edit scope, spatial focus and preservation. Recheck it against original designerTurns: it is a candidate interpretation, not extra evidence. A focus around an entity does not request relocating it. Visual composition is a valid goal without additional transport or gameplay objectives.  exactTransitions is empty unless the designer explicitly specified the exact coordinates and tile change. Never extract exact changes or coordinates from question text. Interface clicks (selectedInterfaceChoices) NEVER authorize exactTransitions; keep exactTransitions=[] unless the designer typed explicit row/column coordinates in a free-text turn. Preserve inherited verified meanings (such as gameplay/experience for a broad 'make it simpler' turn) alongside the concrete obstacle/route requirement for each clicked choice. For each selectedInterfaceChoices entry with action.kind='reduce_obstacles' (water or internal_walls), emit one water or wall count/decrease requirement (strength='goal', value=null, unit='none', entities=[]) citing an exact substring of that choice's designer turn; do not invent extra distribution, distance, appearance, or entity-bound requirements from assistant question or note text."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'answeredQuestions': discovery.get('answers') or [], 'selectedInterfaceChoices': visible_choices, 'currentStageSnapshot': snapshot, 'responseLanguage': stage_context.get('responseLanguage', 'en'), 'editableComponents': ['water', 'internal_walls'], 'proposalUnderstanding': understanding_view, 'selectedDirection': proposal_options.planning_projection(discovery), 'inheritedVerifiedRequirements': inherited, 'requirementDefinitions': REQUIREMENT_DEFINITIONS, 'inheritanceRule': 'Retain unchanged verified meanings. Only exact later designer correction may supersede related items; recheck complete coverage, including inherited items, against all supplied evidence.'}, ensure_ascii=False)}]
     last_issue = ''
     failure_details = {'task': 'revision_requirements', 'failureStage': 'compilation', 'failureKind': 'timeout'}
     locked = {}
@@ -274,11 +275,13 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 payload = {key: patched[key] for key in ('requirements', 'automaticBindings', 'exactTransitions')}
                 payload['requirements'] += patched.get('additionalRequirements', [])
             else:
-                response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 3200, min(20.0, remaining), task='revision_requirements'), timeout=min(20.0, remaining)))
+                response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 3200, min(25.0, remaining), task='revision_requirements'), timeout=min(25.0, remaining)))
                 choice = _require_first_choice(response)
                 if getattr(choice, 'finish_reason', None) == 'length':
                     raise ValueError('Requirements JSON was truncated.')
                 payload = parse_json_object(choice.message.content)
+            if stage_context.get('binaryDiscovery'):
+                payload, _ = normalize_requirement_record(payload, turns, snapshot)
             valid_items, component_issues = validate_requirement_components(payload, turns, snapshot)
             if component_issues:
                 repair_issues = component_issues
@@ -298,7 +301,15 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 raise
             if any((raw_by_id.get(identity) != raw for identity, raw in locked.items())):
                 raise ValueError('A local repair changed a locked, previously valid requirement.')
-            review_messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Independently verify this interpretation against exact designer evidence. Return JSON accepted and structured issues. Each issue has requirementIds, kind (evidence/meaning/coverage/conflict), exact evidenceSpans from designerTurns, and repairInstruction. Use IDs from the interpretation; coverage issues can have an empty ID list. Identify all related conflicting requirements. Reject misread attributes, directions, units, invented priorities, invented exact transitions, missing prohibitions, or missing still-active goals. Entity mentions are not entity changes. Questions provide linguistic context only; a selected preference never confirms assistant-invented numerical/coordinate/mandatory dependency requirements. Do not judge feasibility here. Only explicit prohibitions/fixed values are invariants; clear directional wishes are negotiable goals. Automatic bindings can fill an unspecified goal but cannot replace an explicit binding. A short answer binds to its supplied question. Reject 'early' interpreted as a fixed push count. Keep each repairInstruction to one concise sentence (under 25 words) and return at most 3 issues. For selectedInterfaceChoices: an inherited broad goal such as gameplay/experience/seek/goal (value=null, unit=none) is valid; a clicked reduce_obstacles choice compiled as water or wall count/decrease (value=null, unit=none, entities=[], strength='goal' or 'preference', focused=true or false) using an exact substring of its designer turn is valid—do not reject merely for goal vs preference, focused boolean, or concise statement wording, and do not demand requirements for entities or effects mentioned only in assistant question or note text. Every string in issue.evidenceSpans MUST be a non-empty exact verbatim substring of designerTurns[*].content (never question, note, statement, or paraphrased text). If no concrete violation exists against exact designerTurns, return accepted=true and issues=[]."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'selectedInterfaceChoices': visible_choices, 'answeredQuestions': discovery.get('answers') or [], 'interpretation': record, 'proposalUnderstanding': understanding_view}, ensure_ascii=False)}]
+            if stage_context.get('binaryDiscovery'):
+                record['topicId'] = discovery.get('topicId')
+                record['evidenceSignature'] = cache_key
+                record['interpretationVersion'] = INTERPRETATION_VERSION
+                stage_context.setdefault('_reliabilityState', {})['verifiedRequirements'] = {'cacheKey': cache_key, 'record': record}
+                _log_llm_event('requirements_verified', requestId=request_id, task='revision_requirements', attempt=attempt, requirementCount=len(record['requirements']), cacheKey=cache_key)
+                trace_proposal('requirements_review', 'requirement_review', 'passed', attempt=attempt)
+                return record
+            review_messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Independently verify this interpretation against exact designer evidence. Return JSON accepted and structured issues. Each issue has requirementIds, kind (evidence/meaning/coverage/conflict), exact evidenceSpans from designerTurns, and repairInstruction. Use IDs from the interpretation; coverage issues can have an empty ID list. Identify all related conflicting requirements. Reject misread attributes, directions, units, invented priorities, invented exact transitions, missing prohibitions, or missing still-active goals. Platform protections (outer_shell, player, boxes, targets counts and positions) are server-enforced: omitting them is EXPECTED and VALID (do NOT raise a missing-rule or coverage issue for omitting platform protections), AND if a designer turn explicitly states keeping player, boxes, or targets fixed, including a matching preserve/equal requirement (scope='all', value=null, unit='none', exact designer evidence) is ALSO valid (do NOT reject merely for including or omitting explicitly stated player/box/target preservation). Entity mentions are not entity changes. Questions provide linguistic context only; a selected preference never confirms assistant-invented numerical/coordinate/mandatory dependency requirements. Do not judge feasibility here. Only explicit prohibitions/fixed values are invariants; clear directional wishes are negotiable goals. Automatic bindings can fill an unspecified goal but cannot replace an explicit binding. A short answer binds to its supplied question. Reject 'early' interpreted as a fixed push count. Keep each repairInstruction to one concise sentence (under 25 words) and return at most 3 issues. For selectedInterfaceChoices: an inherited broad goal such as gameplay/experience/seek/goal (value=null, unit=none) is valid; a clicked reduce_obstacles choice compiled as water or wall count/decrease (value=null, unit=none, entities=[], strength='goal' or 'preference', focused=true or false) using an exact substring of its designer turn is valid—do not reject merely for goal vs preference, focused boolean, or concise statement wording, and do not demand requirements for entities or effects mentioned only in assistant question or note text. Every string in issue.evidenceSpans MUST be copied verbatim character-for-character from designerTurns[*].content (never translated, paraphrased, summarized, or copied from question/note/statement/schema names; when uncertain, copy the exact relevant clause or the full designerTurns[*].content string verbatim). If no concrete violation exists against exact designerTurns, return accepted=true and issues=[]."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'selectedInterfaceChoices': visible_choices, 'answeredQuestions': discovery.get('answers') or [], 'interpretation': record, 'proposalUnderstanding': understanding_view}, ensure_ascii=False)}]
             review_messages[1]['content'] = json.dumps({**json.loads(review_messages[1]['content']), 'inheritedVerifiedRequirements': inherited, 'requirementDefinitions': REQUIREMENT_DEFINITIONS, 'inheritanceRule': 'Reject loss or reinterpretation of unchanged verified goals. Allow replacement only for exact later designer correction; qualitative appearance is not a numeric distribution claim.'}, ensure_ascii=False)
             if retry_review_only and review_retry_note:
                 review_messages.append({'role': 'system', 'content': review_retry_note})
@@ -311,9 +322,9 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             trace_proposal('requirements_review', 'requirement_review', 'started', attempt=attempt)
             verdict = {}
             if review_repair_request is not None:
-                verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request, review_messages, request_id, deadline, 'revision_requirement_review', max_tokens=1600, timeout_limit=min(12.0, remaining)))
+                verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request, review_messages, request_id, deadline, 'revision_requirement_review', max_tokens=1600, timeout_limit=min(18.0, remaining)))
             else:
-                reviewed = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, review_messages, 1600, min(12.0, remaining), task='revision_requirement_review'), timeout=min(12.0, remaining)))
+                reviewed = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, review_messages, 1600, min(18.0, remaining), task='revision_requirement_review'), timeout=min(18.0, remaining)))
                 choice = _require_first_choice(reviewed)
                 if getattr(choice, 'finish_reason', None) == 'length':
                     raise ValueError('Independent requirements review JSON was truncated.')
@@ -373,7 +384,13 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                     else:
                         retry_review_only = True
                         if failure_kind == 'interpretation':
-                            review_retry_note = f'Previous review output failed technical validation ({last_issue}). Return valid JSON {{accepted, issues}}. Every string in issue.evidenceSpans MUST be a non-empty exact verbatim substring of designerTurns[*].content (never question or note text). If the interpretation is valid against exact designerTurns, return accepted=true and issues=[].'
+                            turn_texts = json.dumps([turn['content'] for turn in turns], ensure_ascii=False)
+                            review_retry_note = (
+                                f'Previous review output failed technical validation ({last_issue}). Return valid JSON {{accepted, issues}}. '
+                                f'Every string in issue.evidenceSpans MUST be a non-empty exact verbatim substring of designerTurns[*].content (one of: {turn_texts}; '
+                                'copy characters verbatim; never translate, paraphrase, or use question/note/statement text). '
+                                'If the interpretation is valid against exact designerTurns, return accepted=true and issues=[].'
+                            )
             if (review_repair_request is not None or (retry_review_only and technical_fields)) and failure_details['failureKind'] == 'interpretation':
                 failure_details['failureKind'] = 'review_validation'
             next_reuses_compilation = review_repair_request is not None or retry_review_only
@@ -459,7 +476,7 @@ def _generate_verified_proposal_failure_analysis(api_key, base_url, context, row
     started = svc.clock.monotonic()
     model = svc.config.model
     try:
-        timeout = min(12.0, svc.remaining_until(deadline))
+        timeout = min(18.0, svc.remaining_until(deadline))
         response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, prompt, 700, timeout, task='proposal_failure_analysis'), timeout=timeout))
         choice = _require_first_choice(response)
         if getattr(choice, 'finish_reason', None) == 'length':
@@ -733,33 +750,51 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
     movement_requirement = _authorized_movement_requirement(conversation)
     preserved_components = _authorized_preserved_components(conversation, stage_context)
     messages = _build_revision_plan_messages(conversation, rows, language, stage_context, movement_requirement, preserved_components)
-    _log_llm_event('llm_request_started', requestId=request_id, task='revision_plan', primaryModel=models[0], fallbackModel=None, timeoutSeconds=svc.config.backend_request_timeout_seconds if stage_context.get('requirementPolicyVersion') == 1 else svc.config.proposal_request_timeout_seconds, internalDeadlineSeconds=round(svc.remaining_until(deadline), 3), revisionPlanPhaseSeconds=min(svc.config.proposal_llm_phase_timeout_seconds, svc.remaining_until(deadline)), revisionPlanTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, operationAttemptSeconds=svc.config.proposal_operation_attempt_timeout_seconds, deterministicSearchSeconds=svc.config.proposal_search_deadline_seconds, responseMode='revision_plan')
-    try:
-        plan, attempts_used, model = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, svc.clock.monotonic() + plan_phase_seconds), first_attempt_timeout=plan_primary_seconds), timeout=min(plan_phase_seconds, svc.remaining_until(deadline))))
-    except asyncio.TimeoutError as exception:
-        elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
-        _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=svc.config.proposal_generation_attempts, latencyMs=elapsed_ms, responseMode='revision_plan')
-        raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not compile the revision plan before the proposal time limit.', request_id, True, svc.config.proposal_generation_attempts, 504) from exception
-    except LLMServiceError as exception:
-        if exception.code in {'MODEL_RESPONSE_INVALID', 'MODEL_EMPTY_RESPONSE', 'MODEL_LOW_QUALITY_RESPONSE'}:
-            exception.code = 'REVISION_PLAN_INVALID'
-            exception.safe_message = 'Kimi did not return a complete valid RevisionPlan after the bounded repair attempt.'
-        _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code=exception.code, attemptsUsed=exception.attempts_used, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), responseMode='revision_plan', **_provider_error_fields(exception))
-        raise
-    plan = _bind_execution_brief_to_plan(plan, stage_context.get('authorizedExecutionBrief') if stage_context else None)
-    plan = _apply_objective_policy_to_plan(plan, objective_policy, preserved_components)
-    plan, contract_preflight_failures = _preflight_revision_strategies(plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') if stage_context else '')
-    if not plan.strategies:
-        correction_feedback = json.dumps(contract_preflight_failures[-3:], ensure_ascii=False, separators=(',', ':'))[:1600]
+    plan = None
+    attempts_used = 0
+    contract_preflight_failures = []
+    precompiled_raw = stage_context.get('precompiledRevisionStrategies')
+    if precompiled_raw:
         try:
-            corrected_plan, correction_attempts, _ = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, svc.clock.monotonic() + svc.config.proposal_plan_retry_timeout_seconds), max_attempts=1, initial_validation_feedback=correction_feedback, first_attempt_timeout=svc.config.proposal_plan_retry_timeout_seconds), timeout=max(0.001, min(svc.config.proposal_plan_retry_timeout_seconds, svc.remaining_until(deadline)))))
-            attempts_used += correction_attempts
-            corrected_plan = _bind_execution_brief_to_plan(corrected_plan, stage_context.get('authorizedExecutionBrief') if stage_context else None)
-            corrected_plan = _apply_objective_policy_to_plan(corrected_plan, objective_policy, preserved_components)
-            plan, corrected_failures = _preflight_revision_strategies(corrected_plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') if stage_context else '')
-            contract_preflight_failures.extend(corrected_failures)
-        except (asyncio.TimeoutError, LLMServiceError):
-            plan = RevisionPlan(tuple())
+            pre_plan = parse_revision_plan({'strategies': list(precompiled_raw)})
+            pre_plan = _bind_execution_brief_to_plan(pre_plan, stage_context.get('authorizedExecutionBrief') if stage_context else None)
+            pre_plan = _apply_objective_policy_to_plan(pre_plan, objective_policy, preserved_components)
+            pre_plan, pre_failures = _preflight_revision_strategies(pre_plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') if stage_context else '')
+            contract_preflight_failures.extend(pre_failures)
+            if pre_plan.strategies:
+                plan = pre_plan
+                _log_llm_event('revision_plan_reused', requestId=request_id, task='revision_plan', strategyCount=len(plan.strategies))
+        except (ValueError, TypeError, KeyError):
+            plan = None
+    if plan is None:
+        _log_llm_event('llm_request_started', requestId=request_id, task='revision_plan', primaryModel=models[0], fallbackModel=None, timeoutSeconds=svc.config.backend_request_timeout_seconds if stage_context.get('requirementPolicyVersion') == 1 else svc.config.proposal_request_timeout_seconds, internalDeadlineSeconds=round(svc.remaining_until(deadline), 3), revisionPlanPhaseSeconds=min(svc.config.proposal_llm_phase_timeout_seconds, svc.remaining_until(deadline)), revisionPlanTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, operationAttemptSeconds=svc.config.proposal_operation_attempt_timeout_seconds, deterministicSearchSeconds=svc.config.proposal_search_deadline_seconds, responseMode='revision_plan')
+        try:
+            plan, attempts_used, model = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, svc.clock.monotonic() + plan_phase_seconds), first_attempt_timeout=plan_primary_seconds), timeout=min(plan_phase_seconds, svc.remaining_until(deadline))))
+        except asyncio.TimeoutError as exception:
+            elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
+            _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=svc.config.proposal_generation_attempts, latencyMs=elapsed_ms, responseMode='revision_plan')
+            raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not compile the revision plan before the proposal time limit.', request_id, True, svc.config.proposal_generation_attempts, 504) from exception
+        except LLMServiceError as exception:
+            if exception.code in {'MODEL_RESPONSE_INVALID', 'MODEL_EMPTY_RESPONSE', 'MODEL_LOW_QUALITY_RESPONSE'}:
+                exception.code = 'REVISION_PLAN_INVALID'
+                exception.safe_message = 'Kimi did not return a complete valid RevisionPlan after the bounded repair attempt.'
+            _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code=exception.code, attemptsUsed=exception.attempts_used, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), responseMode='revision_plan', **_provider_error_fields(exception))
+            raise
+        plan = _bind_execution_brief_to_plan(plan, stage_context.get('authorizedExecutionBrief') if stage_context else None)
+        plan = _apply_objective_policy_to_plan(plan, objective_policy, preserved_components)
+        plan, compile_failures = _preflight_revision_strategies(plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') if stage_context else '')
+        contract_preflight_failures.extend(compile_failures)
+        if not plan.strategies:
+            correction_feedback = json.dumps(contract_preflight_failures[-3:], ensure_ascii=False, separators=(',', ':'))[:1600]
+            try:
+                corrected_plan, correction_attempts, _ = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, svc.clock.monotonic() + svc.config.proposal_plan_retry_timeout_seconds), max_attempts=1, initial_validation_feedback=correction_feedback, first_attempt_timeout=svc.config.proposal_plan_retry_timeout_seconds), timeout=max(0.001, min(svc.config.proposal_plan_retry_timeout_seconds, svc.remaining_until(deadline)))))
+                attempts_used += correction_attempts
+                corrected_plan = _bind_execution_brief_to_plan(corrected_plan, stage_context.get('authorizedExecutionBrief') if stage_context else None)
+                corrected_plan = _apply_objective_policy_to_plan(corrected_plan, objective_policy, preserved_components)
+                plan, corrected_failures = _preflight_revision_strategies(corrected_plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') if stage_context else '')
+                contract_preflight_failures.extend(corrected_failures)
+            except (asyncio.TimeoutError, LLMServiceError):
+                plan = RevisionPlan(tuple())
     if not plan.strategies:
         error = LLMServiceError('REVISION_CONTRACT_CONFLICT', 'Every proposed strategy failed contract feasibility preflight.', request_id, False, attempts_used, 422)
         error.revision_plan = {'strategies': []}
@@ -837,19 +872,32 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         operation_result = asyncio.run(asyncio.wait_for(_generate_map_operation_candidates(api_key=api_key, base_url=base_url, models=models, messages=operation_messages, base_rows=rows, request_id=request_id, language=language, proposal_validator=objective_validator, revision_contract=revision_contract, baseline_metrics=baseline_metrics, started_at=started_at, deadline=deadline, candidate_evidence=evidence_by_fingerprint, excluded_map_fingerprints=excluded_candidate_fingerprints), timeout=remaining_seconds))
     except asyncio.TimeoutError as exception:
         exhausted_global_budget = svc.remaining_until(deadline) <= 0.05
-        error = LLMServiceError('GLOBAL_PROPOSAL_TIMEOUT' if exhausted_global_budget else 'UPSTREAM_TIMEOUT', 'The complete proposal pipeline exhausted its global time budget.' if exhausted_global_budget else 'Kimi did not create executable revision operations before the operation-phase time limit.', request_id, True, attempts_used + svc.config.proposal_generation_attempts, 504)
-        error.revision_plan = plan.as_dict()
-        error.revision_contract = revision_contract
-        raise error from exception
+        if stage_context.get('binaryDiscovery') and svc.remaining_until(deadline) > 1.0:
+            try:
+                fallback = _deterministic_revision_fallback(rows=rows, plan=plan, revision_contract=revision_contract, request_id=request_id, language=language, proposal_validator=objective_validator, baseline_metrics=baseline_metrics, movement_requirement=movement_requirement, preserved_components=preserved_components, entity_bindings=(stage_context or {}).get('entityBindings'), started_at=started_at, deadline=deadline, excluded_map_fingerprints=excluded_candidate_fingerprints)
+                fallback_diagnostics = dict(fallback.proposal_diagnostics or {})
+                fallback_diagnostics['modifierFailure'] = {'code': 'UPSTREAM_TIMEOUT'}
+                operation_result = replace(fallback, attempts_used=attempts_used + svc.config.proposal_generation_attempts, revision_plan=plan.as_dict(), revision_contract=revision_contract, proposal_diagnostics=fallback_diagnostics)
+            except Exception:
+                error = LLMServiceError('GLOBAL_PROPOSAL_TIMEOUT' if exhausted_global_budget else 'UPSTREAM_TIMEOUT', 'The complete proposal pipeline exhausted its global time budget.' if exhausted_global_budget else 'Kimi did not create executable revision operations before the operation-phase time limit.', request_id, True, attempts_used + svc.config.proposal_generation_attempts, 504)
+                error.revision_plan = plan.as_dict()
+                error.revision_contract = revision_contract
+                raise error from exception
+        else:
+            error = LLMServiceError('GLOBAL_PROPOSAL_TIMEOUT' if exhausted_global_budget else 'UPSTREAM_TIMEOUT', 'The complete proposal pipeline exhausted its global time budget.' if exhausted_global_budget else 'Kimi did not create executable revision operations before the operation-phase time limit.', request_id, True, attempts_used + svc.config.proposal_generation_attempts, 504)
+            error.revision_plan = plan.as_dict()
+            error.revision_contract = revision_contract
+            raise error from exception
     except LLMServiceError as exception:
         exception.attempts_used += attempts_used
         exception.revision_plan = plan.as_dict()
         exception.revision_contract = revision_contract
-        if exception.code != 'PROPOSAL_SEARCH_EXHAUSTED':
+        binary_recoverable = stage_context.get('binaryDiscovery') and exception.code in {'PROPOSAL_SEARCH_EXHAUSTED', 'UPSTREAM_TIMEOUT', 'MODEL_RESPONSE_INVALID', 'MODEL_EMPTY_RESPONSE'}
+        if exception.code != 'PROPOSAL_SEARCH_EXHAUSTED' and not binary_recoverable:
             raise
         fallback = None
         replan_failure = None
-        semantic_contract = not any((item.get('requiredTransitions') for item in revision_contract.get('strategies') or []))
+        semantic_contract = (not stage_context.get('binaryDiscovery')) and not any((item.get('requiredTransitions') for item in revision_contract.get('strategies') or []))
         if semantic_contract:
             try:
                 fallback, plan, revision_contract, replan_attempts = _attempt_semantic_revision_replan(api_key=api_key, base_url=base_url, model=models[0], original_messages=messages, rows=rows, request_id=request_id, language=language, stage_context=stage_context, objective_policy=objective_policy, objective_validator=objective_validator, baseline_metrics=baseline_metrics, movement_requirement=movement_requirement, preserved_components=preserved_components, started_at=started_at, deadline=deadline, first_failure=exception, evidence_by_fingerprint=evidence_by_fingerprint, excluded_map_fingerprints=excluded_candidate_fingerprints)
@@ -860,12 +908,16 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
             if fallback is None:
                 fallback = _deterministic_revision_fallback(rows=rows, plan=plan, revision_contract=revision_contract, request_id=request_id, language=language, proposal_validator=objective_validator, baseline_metrics=baseline_metrics, movement_requirement=movement_requirement, preserved_components=preserved_components, entity_bindings=(stage_context or {}).get('entityBindings'), started_at=started_at, deadline=deadline, excluded_map_fingerprints=excluded_candidate_fingerprints)
         except TimeoutError as search_timeout:
+            if exception.code != 'PROPOSAL_SEARCH_EXHAUSTED':
+                raise exception from search_timeout
             budget_error = LLMServiceError('PROPOSAL_SEARCH_BUDGET_EXCEEDED', 'Deterministic local search reached its time budget before finding a complete candidate.', request_id, True, exception.attempts_used, 504)
             budget_error.revision_plan = plan.as_dict()
             budget_error.revision_contract = revision_contract
             budget_error.proposal_diagnostics = dict(getattr(exception, 'proposal_diagnostics', {}) or {})
             raise budget_error from search_timeout
         except ProposalSearchExhausted as search_exception:
+            if exception.code != 'PROPOSAL_SEARCH_EXHAUSTED':
+                raise exception from search_exception
             diagnostics = dict(getattr(exception, 'proposal_diagnostics', {}) or {})
             diagnostics['deterministicFallback'] = search_exception.diagnostics
             diagnostics['replanAttempted'] = semantic_contract

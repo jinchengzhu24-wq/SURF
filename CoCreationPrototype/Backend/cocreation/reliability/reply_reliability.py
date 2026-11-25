@@ -83,10 +83,11 @@ class ComponentCheck:
 
 class OptionalRepairBudget:
     """Optional presentation work must never consume the recovery reserve."""
-    def __init__(self, deadline, clock=None):
+    def __init__(self, deadline, clock=None, cap_seconds=10.0):
         self.deadline = deadline
         self.spent = 0.0
         self._clock = clock
+        self.cap_seconds = float(cap_seconds)
 
     def _monotonic(self):
         return self._clock.monotonic() if self._clock is not None else time.monotonic()
@@ -95,7 +96,7 @@ class OptionalRepairBudget:
         remaining = self.deadline - self._monotonic()
         if remaining < 20.0:
             return 0.0
-        return max(0.0, min(10.0 - self.spent, remaining - 20.0))
+        return max(0.0, min(self.cap_seconds - self.spent, remaining - 20.0))
 
     def record(self, started):
         self.spent += max(0.0, self._monotonic() - started)

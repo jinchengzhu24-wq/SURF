@@ -108,8 +108,8 @@ class JointReviewTests(unittest.TestCase):
     def test_budget_exhaustion_makes_no_repair_call_and_has_specific_reason(self):
         trace = ReplyTrace("r", "m", "v", lambda *a, **k: None)
         token = CURRENT_REPLY_TRACE.set(trace)
-        budget = OptionalRepairBudget(time.monotonic() + 60)
-        budget.spent = 10
+        budget = OptionalRepairBudget(time.monotonic() + 60, cap_seconds=15.0)
+        budget.spent = budget.cap_seconds
         try:
             repair = RecordedAsyncCall()
             with llm_scope(intent_component_repairer=repair):
@@ -196,6 +196,130 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(state["questionAnswerReview"]["answeredQuestionIds"], ["q1"])
         self.assertEqual(tasks, ["plain_chat", "intent_candidate_review", "intent_body_repair", "plain_chat", "intent_candidate_review"])
         self.assertEqual(state["lockedIntentReview"]["claims"], [CLAIM])
+
+    def test_ordinary_none_without_questions_skips_intent_review_on_demand(self):
+        none_reply = (
+            "这个布局把左下方水域和中央通道分开，第一步推箱需要绕开水格才能不堵住后路。\n"
+            '<GUIDANCE>INTENT_DECISION: {"classification":"none","claims":[],"cardText":""}</GUIDANCE>'
+        )
+        review = RecordedAsyncCall(side_effect=AssertionError("intent_candidate_reviewer should be skipped when none & no open questions"))
+        with llm_scope(completion_requester=RecordedAsyncCall(return_value=completion(none_reply)), intent_candidate_reviewer=review):
+            result = llm.generate_chat_reply(
+                [{"role": "user", "content": "How does the layout feel?"}],
+                OPERATION_BASE_ROWS,
+                "on-demand-skip",
+                stage_context={"ordinaryOpenQuestions": []},
+            )
+        self.assertEqual(review.await_count, 0)
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertTrue(result.guidance["_intentCandidateReview"]["skippedOnDemand"])
+
+    def test_ordinary_open_questions_or_missing_decision_still_triggers_intent_review(self):
+        for case_name, raw, questions in (
+            (
+                "open_questions",
+                BODY + '\n<GUIDANCE>INTENT_DECISION: {"classification":"none","claims":[],"cardText":""}</GUIDANCE>',
+                [{"questionId": "q1", "question": "Which spacing would you prefer?"}],
+            ),
+            (
+                "missing_decision",
+                BODY,
+                [],
+            ),
+        ):
+            with self.subTest(case=case_name):
+                review = RecordedAsyncCall(return_value={**verdict(answeredQuestionIds=["q1"] if questions else []), "reviewVersion": "test"})
+                with llm_scope(completion_requester=RecordedAsyncCall(return_value=completion(raw)), intent_candidate_reviewer=review):
+                    llm.generate_chat_reply(
+                        [{"role": "user", "content": USER}],
+                        OPERATION_BASE_ROWS,
+                        f"on-demand-trigger-{case_name}",
+                        stage_context={"ordinaryOpenQuestions": questions},
+                    )
+                self.assertEqual(review.await_count, 1)
+
+    def test_policy2_lightweight_routing_allows_revision_request_and_compact_retry(self):
+        snapshot = {"rows": OPERATION_BASE_ROWS, "entities": []}
+        req = RecordedAsyncCall(
+            return_value=completion(
+                json.dumps(
+                    {
+                        "acts": ["revision_request"],
+                        "elements": ["internal_walls"],
+                        "evidenceSpan": "右边显得太拥挤了，我希望整体更通透一些。",
+                        "directionSufficient": True,
+                        "mapRelated": True,
+                        "changes": [
+                            {
+                                "component": "internal_walls",
+                                "operation": "change",
+                                "property": "position",
+                                "evidenceSpan": "右边显得太拥挤了，我希望整体更通透一些。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        )
+        with llm_scope(completion_requester=req):
+            result = llm.classify_turn_understanding(
+                [{"role": "user", "content": "右边显得太拥挤了，我希望整体更通透一些。"}],
+                snapshot,
+                "lightweight-revision-act",
+                proposal_context={"policy2Lightweight": True},
+            )
+        self.assertEqual(req.await_count, 1)
+        self.assertTrue(result["lightweightRouting"])
+        self.assertIsNone(result["proposalUnderstanding"])
+
+        # Bad evidenceSpan on attempt 1 should retry directly with compact schema (no snapshot patch prompt)
+        bad_then_good = RecordedAsyncCall(
+            side_effect=[
+                completion(
+                    json.dumps(
+                        {
+                            "acts": ["intent"],
+                            "elements": ["internal_walls"],
+                            "evidenceSpan": "non-verbatim span",
+                            "directionSufficient": False,
+                            "mapRelated": True,
+                            "changes": [],
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+                completion(
+                    json.dumps(
+                        {
+                            "acts": ["intent"],
+                            "elements": ["internal_walls"],
+                            "evidenceSpan": "我希望整体更通透一些。",
+                            "directionSufficient": False,
+                            "mapRelated": True,
+                            "changes": [],
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            ]
+        )
+        seen_tasks = []
+
+        async def track(*args, **kwargs):
+            seen_tasks.append(kwargs.get("task"))
+            return await bad_then_good(*args, **kwargs)
+
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=track)):
+            retried = llm.classify_turn_understanding(
+                [{"role": "user", "content": "右边显得太拥挤了，我希望整体更通透一些。"}],
+                snapshot,
+                "lightweight-compact-retry",
+                proposal_context={"policy2Lightweight": True},
+            )
+        self.assertEqual(seen_tasks, ["turn_understanding", "turn_understanding"])
+        self.assertTrue(retried["lightweightRouting"])
+        self.assertEqual(retried["evidenceSpan"], "我希望整体更通透一些。")
 
 
 class JointHttpTests(SessionTestCase):

@@ -44,6 +44,30 @@ def topic_schema():
         "required": list(properties)}
 
 
+def lightweight_turn_schema(include_human_edit_engagement=False):
+    change_properties = {
+        "component": {"type": "string", "enum": sorted(COMPONENTS)},
+        "operation": {"type": "string", "enum": ["change", "preserve", "mention"]},
+        "property": {"type": "string", "enum": ["count", "position", "shape", "layout", "route", "push_order", "switching", "rhythm", "appearance", "unknown"]},
+        "evidenceSpan": {"type": "string"},
+    }
+    properties = {
+        "acts": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "string",
+            "enum": ["evaluation", "intent", "explanation_request", "idea_request", "revision_request", "unclear"]}},
+        "elements": {"type": "array", "maxItems": 6, "items": {"type": "string",
+            "enum": sorted(COMPONENTS - {"gameplay"})}},
+        "evidenceSpan": {"type": "string"},
+        "directionSufficient": {"type": "boolean"},
+        "mapRelated": {"type": "boolean"},
+        "changes": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "properties": change_properties, "required": list(change_properties)}},
+    }
+    if include_human_edit_engagement:
+        properties["humanEditEngagement"] = {"anyOf": [engagement_schema(), {"type": "null"}]}
+    return {"type": "object", "additionalProperties": False, "properties": properties,
+        "required": list(properties)}
+
+
 def turn_schema():
     change_properties = {
         "component": {"type": "string", "enum": sorted(COMPONENTS)},
@@ -243,6 +267,8 @@ def reusable_understanding(result, version_id, *, expected_signature=None, conte
         return False
     if expected_signature is not None and result.get("evidenceSignature") != expected_signature:
         return False
+    if result.get("lightweightRouting") is True and not (context or {}).get("topicId"):
+        return True
     reason = critical_review_reason(result, context)
     review = result.get("criticalReview") or {}
     if review and review.get("policyVersion") != MEANING_REVIEW_VERSION:
@@ -288,7 +314,8 @@ def protected_request_message(understanding, language):
         "shape": ("形状", "shape"), "layout": ("布局", "layout")}
     changes = [x for x in understanding.get("changes") or [] if x.get("component") in PROTECTED
         and x.get("operation") == "change" and x.get("property") in properties]
-    if not changes or not (understanding.get("criticalReview") or {}).get("verified"):
+    verified = bool((understanding.get("criticalReview") or {}).get("verified") or understanding.get("lightweightRouting"))
+    if not changes or not verified:
         raise ValueError("A permission refusal needs independently reviewed change evidence.")
     chinese = language == "zh-CN"
     index = 0 if chinese else 1

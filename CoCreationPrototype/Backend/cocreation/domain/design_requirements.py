@@ -5,6 +5,26 @@ and evaluates typed facts; it never infers a requirement from keyword proximity.
 """
 import hashlib
 import json
+import re
+
+
+_PLATFORM_LOCK_PHRASE = re.compile(
+    r"(?:保持.{0,12}(?:不变|固定|原位|原地)|不要(?:移动|挪动|改动|改变|动)|不可(?:移动|改动)|(?:位置|数量)不变|"
+    r"keep.{0,24}(?:fixed|unchanged|intact)|do\s+not\s+move|don't\s+move)",
+    re.I,
+)
+_GENERIC_ENTITY_LABELS = {
+    "PLAYER",
+    "BOX",
+    "BOXES",
+    "TARGET",
+    "TARGETS",
+    "WALL",
+    "WALLS",
+    "WATER",
+    "OUTER_SHELL",
+    "GAMEPLAY",
+}
 
 
 POLICY_VERSION = 1
@@ -96,6 +116,95 @@ def requirement_response_schema():
                 "sourceTurnId": {"type": "string"}, "evidenceSpan": {"type": "string"}},
             "required": ["row", "column", "from", "to", "sourceTurnId", "evidenceSpan"]}},
     }, "required": ["requirements", "automaticBindings", "exactTransitions"]}
+
+
+def normalize_requirement_record(payload, user_turns, snapshot):
+    """Deterministically normalize benign schema/platform-protection quirks without relaxing numeric/coordinate evidence."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("requirements"), list):
+        return payload, []
+    sources = {str(item["id"]): str(item["content"]) for item in user_turns or []}
+    labels = {str(item.get("id") or item.get("label") or "").upper() for item in (snapshot or {}).get("entities") or []}
+    default_turn_id = str(user_turns[0]["id"]) if user_turns else ""
+    cleaned, audit_notes = [], []
+    for raw in payload["requirements"]:
+        if not isinstance(raw, dict):
+            cleaned.append(raw)
+            continue
+        item = dict(raw)
+        is_protected_component = item.get("component") in {"player", "box", "target"} and item.get("property") in {"count", "positions"}
+        has_lock_signal = (
+            item.get("relation") in {"preserve", "equal", "invariant"}
+            or item.get("strength") == "hard"
+            or (
+                item.get("value") is None
+                and any(_PLATFORM_LOCK_PHRASE.search(str(item.get(field) or "")) for field in ("evidenceSpan", "statement"))
+            )
+        )
+        if is_protected_component and has_lock_signal:
+            audit_notes.append("dropped_platform_protection")
+            continue
+        if "entities" not in item or item.get("entities") is None:
+            item["entities"] = []
+            audit_notes.append("defaulted_entities")
+        if isinstance(item.get("entities"), list):
+            kept_entities = []
+            for entity in item["entities"]:
+                if isinstance(entity, str) and entity.upper() in _GENERIC_ENTITY_LABELS and entity.upper() not in labels:
+                    audit_notes.append("dropped_generic_entity_label")
+                    continue
+                kept_entities.append(entity)
+            item["entities"] = kept_entities
+        if "focused" not in item or not isinstance(item.get("focused"), bool):
+            item["focused"] = False
+            audit_notes.append("defaulted_focused")
+        if "priorityEvidenceSpan" not in item or item.get("priorityEvidenceSpan") is None:
+            item["priorityEvidenceSpan"] = ""
+            audit_notes.append("defaulted_priority_span")
+        if "scope" not in item or item.get("scope") is None:
+            item["scope"] = "all"
+        if item.get("scope") == "original_cells" and (
+            item.get("property") != "count" or item.get("component") not in {"water", "wall"}
+        ):
+            item["scope"] = "all"
+            audit_notes.append("coerced_scope_all")
+        if item.get("sourceTurnId") not in sources and len(sources) == 1 and default_turn_id:
+            item["sourceTurnId"] = default_turn_id
+            audit_notes.append("bound_single_source_turn")
+        source_text = sources.get(str(item.get("sourceTurnId") or ""))
+        priority_span = item.get("priorityEvidenceSpan")
+        if source_text and item.get("value") is None:
+            span = item.get("evidenceSpan")
+            if not isinstance(span, str) or not span.strip() or span not in source_text:
+                if isinstance(priority_span, str) and priority_span.strip() and priority_span in source_text:
+                    item["evidenceSpan"] = priority_span
+                else:
+                    item["evidenceSpan"] = source_text
+                audit_notes.append("normalized_qualitative_evidence_span")
+            if not isinstance(item.get("statement"), str) or not item["statement"].strip():
+                item["statement"] = str(item.get("evidenceSpan") or source_text).strip()[:400]
+                audit_notes.append("defaulted_statement")
+        if source_text and isinstance(priority_span, str) and priority_span and priority_span not in source_text:
+            item["priorityEvidenceSpan"] = ""
+            audit_notes.append("cleared_nonverbatim_priority_span")
+        cleaned.append(item)
+    raw_bindings = payload.get("automaticBindings")
+    cleaned_bindings = raw_bindings
+    if isinstance(raw_bindings, list):
+        cleaned_bindings = []
+        for binding in raw_bindings:
+            if (
+                isinstance(binding, dict)
+                and isinstance(binding.get("entity"), str)
+                and binding["entity"].upper() in _GENERIC_ENTITY_LABELS
+                and binding["entity"].upper() not in labels
+            ):
+                audit_notes.append("dropped_generic_entity_label")
+                continue
+            cleaned_bindings.append(binding)
+        if cleaned_bindings and not any(not (isinstance(r, dict) and r.get("entities")) for r in cleaned):
+            cleaned_bindings = []
+            audit_notes.append("dropped_unbound_automatic_bindings")
+    return {**payload, "requirements": cleaned, "automaticBindings": cleaned_bindings}, list(dict.fromkeys(audit_notes))
 
 
 def validate_requirement_record(payload, user_turns, snapshot):

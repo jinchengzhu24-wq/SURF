@@ -57,9 +57,19 @@ def response_format():
     branch = {"type": "object", "additionalProperties": False, "properties": {
         "label": {"type": "string"}, "strategy": strategy, "promise": promise},
         "required": ["label", "strategy", "promise"]}
-    props = {"action": {"type": "string", "enum": ["ask", "plan", "blocked"]}, "question": {"type": "string"},
-        "note": {"type": "string"}, "branches": {"type": "array", "maxItems": 2, "items": branch},
-        "initialRequirements": {"anyOf": [requirement_response_schema(), {"type": "null"}]}}
+    props = {
+        "action": {"type": "string", "enum": ["ask", "plan", "protected_refusal", "blocked"]},
+        "question": {"type": "string"},
+        "note": {"type": "string"},
+        "branches": {"type": "array", "maxItems": 2, "items": branch},
+        "planStrategies": {"type": "array", "maxItems": 3, "items": strategy},
+        "protectedEntities": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {"type": "string", "enum": ["player", "boxes", "targets", "outer_shell"]},
+        },
+        "initialRequirements": {"anyOf": [requirement_response_schema(), {"type": "null"}]},
+    }
     return {"type": "json_schema", "json_schema": {"name": "cocreation_binary_discovery", "strict": True,
         "schema": {"type": "object", "additionalProperties": False, "properties": props, "required": list(props)}}}
 
@@ -96,21 +106,60 @@ def validate_promise(value):
     return copy.deepcopy(value)
 
 
+PROTECTED_ENTITY_KEYS = ("player", "boxes", "targets", "outer_shell")
+
+
 def parse_step(value, question_count):
-    if not isinstance(value, dict) or set(value) != {"action", "question", "note", "branches", "initialRequirements"}:
+    core_keys = {"action", "question", "note", "branches", "initialRequirements"}
+    allowed_keys = core_keys | {"planStrategies", "protectedEntities"}
+    if not isinstance(value, dict) or not core_keys.issubset(value) or set(value) - allowed_keys:
         raise BinaryError("BINARY_ENVELOPE_INVALID", "envelope")
-    if value["action"] not in {"ask", "plan", "blocked"} or not isinstance(value["branches"], list):
+    value.setdefault("planStrategies", [])
+    value.setdefault("protectedEntities", [])
+    if (
+        value["action"] not in {"ask", "plan", "protected_refusal", "blocked"}
+        or not isinstance(value["branches"], list)
+        or not isinstance(value["planStrategies"], list)
+        or not isinstance(value["protectedEntities"], list)
+    ):
         raise BinaryError("BINARY_ACTION_INVALID", "action")
     for field in ("question", "note"):
         if not isinstance(value[field], str) or len(value[field]) > 1200:
             raise BinaryError("BINARY_TEXT_INVALID", field)
         value[field] = " ".join(value[field].split())
-    if value["action"] != "ask":
-        if value["question"] or value["branches"]:
+    if value["action"] == "protected_refusal":
+        if value["question"] or value["branches"] or value["planStrategies"]:
             raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
-        if value["action"] == "blocked" and not value["note"]:
+        entities = value["protectedEntities"]
+        if (
+            not entities
+            or len(entities) > 4
+            or any(not isinstance(item, str) or item not in PROTECTED_ENTITY_KEYS for item in entities)
+        ):
+            raise BinaryError("BINARY_PROTECTED_ENTITIES_REQUIRED", "protectedEntities")
+        value["protectedEntities"] = list(dict.fromkeys(entities))
+        return value
+    if value["action"] == "plan":
+        if value["question"] or value["branches"] or value["protectedEntities"]:
+            raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
+        if len(value["planStrategies"]) > 3:
+            raise BinaryError("BINARY_PLAN_STRATEGY_INVALID", "planStrategies")
+        for item in value["planStrategies"]:
+            try:
+                plan = parse_revision_plan({"strategies": [item]})
+                if set(plan.strategies[0].operators) - EDITABLE_OPERATORS or plan.strategies[0].metric_goals:
+                    raise BinaryError("BINARY_PLAN_STRATEGY_INVALID", "planStrategies")
+            except (ValueError, TypeError, KeyError) as error:
+                raise BinaryError("BINARY_PLAN_STRATEGY_INVALID", "planStrategies") from error
+        return value
+    if value["action"] == "blocked":
+        if value["question"] or value["branches"] or value["planStrategies"] or value["protectedEntities"]:
+            raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
+        if not value["note"]:
             raise BinaryError("BINARY_TEXT_INVALID", "note")
         return value
+    if value["planStrategies"] or value["protectedEntities"]:
+        raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
     if question_count >= 3:
         raise BinaryError("BINARY_QUESTION_LIMIT", "action")
     if not value["question"] or len(value["branches"]) != 2:
@@ -343,13 +392,23 @@ def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validat
                 found = search_revision_plan(rows, plan, validate, **search_kwargs)
             except ValueError as error:
                 code = "BINARY_PREFLIGHT_BUDGET" if monotonic() >= branch_deadline else "BINARY_PREFLIGHT_NOT_FOUND"
-                reasons = (getattr(error, "diagnostics", None) or {}).get("failureReasons") or {}
+                diagnostics = getattr(error, "diagnostics", None) or {}
+                reasons = diagnostics.get("failureReasons") or {}
                 safe_reasons = [
                     f"{key}={reasons[key]}"
                     for key in sorted(reasons)
                     if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(key)) and isinstance(reasons[key], int)
                 ][:5]
-                detail = ("search failure reasons: " + ", ".join(safe_reasons)) if safe_reasons else None
+                if safe_reasons:
+                    detail = "search failure reasons: " + ", ".join(safe_reasons)
+                elif diagnostics.get("constructedCandidates") == 0:
+                    detail = (
+                        "zero constructible editable candidates inside focus "
+                        "(walls connected to outer border belong to fixed outer_shell; "
+                        "use editableInternalWallCells or focus=null)"
+                    )
+                else:
+                    detail = None
                 raise BinaryError(code, branch_field, detail=detail) from error
             result = (list(found.rows), found.validation)
         candidate, validation = result
@@ -408,3 +467,112 @@ def require_choice_coverage(record, choices):
             raise ValueError("BINARY_CHOICE_COVERAGE: selected shorter solution was omitted or changed.")
         if any(t.get("sourceTurnId") == choice["sourceTurnId"] for t in record.get("exactTransitions", [])):
             raise ValueError("BINARY_CHOICE_COVERAGE: an interface choice did not specify exact tile transitions.")
+
+
+_PROTECTED_TEXT_ZH = re.compile(
+    r"(?:移动|挪动|移走|删掉|删除|移除|新增|添加|增加|拆掉|打破|修改)(?:.{0,4})(?:玩家|起点|出生点|箱子|目标点?|外墙|外壳)"
+    r"(?![的之]?(?:绕路|难度|步数|推|拉|节奏|交互|配合|切换|顺序|选择|路径|路线|思考|压力|成本|体验|操作|方向))"
+    r"(?!\s*(?:到目标|往目标|去目标))"
+)
+_PROTECTED_TEXT_ZH_BA = re.compile(
+    r"把(?:.{0,4})(?:玩家|起点|出生点|箱子|目标点?|外墙|外壳)"
+    r"(?![的之]?(?:推进|推拉|顺序|路线|路径|节奏|方式|策略))"
+    r"(?:.{0,8})(?:移动|挪动|移走|删掉|删除|移除|拆掉|打破|改|换)"
+)
+_PROTECTED_TEXT_EN = re.compile(
+    r"\b(?:move|relocate|shift|remove|delete|add)\s+(?:the\s+)?(?:player|start|box(?:es)?|target(?:s)?|outer\s+(?:wall|shell))\b",
+    re.IGNORECASE,
+)
+_NEGATION_PREFIX = re.compile(
+    r"(?:不要|别|不|勿|保留|保持|不动|不改|keep|preserve|without|never|cannot|can't|won't|do\s+not|don't)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _has_protected_edit_text(text):
+    source = str(text or "")
+    for pattern in (_PROTECTED_TEXT_ZH, _PROTECTED_TEXT_ZH_BA, _PROTECTED_TEXT_EN):
+        for match in pattern.finditer(source):
+            prefix = source[max(0, match.start() - 16) : match.start()]
+            if _NEGATION_PREFIX.search(prefix):
+                continue
+            return True
+    return False
+
+
+def validate_binary_step_deterministic(step, topic, language):
+    """Enforce hard permission & component/operator contracts deterministically instead of a sync LLM review."""
+    if step.get("action") != "ask":
+        return
+    texts = [("question", step.get("question", "")), ("note", step.get("note", ""))]
+    for index, branch in enumerate(step.get("branches") or [], start=1):
+        texts.append((f"branch-{index}", branch.get("label", "")))
+    for field, text in texts:
+        if _has_protected_edit_text(text):
+            raise BinaryError("BINARY_PROTECTED_TEXT", field)
+    for index, branch in enumerate(step.get("branches") or [], start=1):
+        component = branch["promise"]["component"]
+        operators = set(branch["strategy"]["operators"])
+        if component == "water" and not (operators & {"add_water", "remove_water"}):
+            raise BinaryError("BINARY_BRANCH_COMPONENT_MISMATCH", f"branch-{index}")
+        if component == "internal_walls" and not (operators & {"add_wall", "remove_wall"}):
+            raise BinaryError("BINARY_BRANCH_COMPONENT_MISMATCH", f"branch-{index}")
+        if component == "obstacles" and not (operators & EDITABLE_OPERATORS):
+            raise BinaryError("BINARY_BRANCH_COMPONENT_MISMATCH", f"branch-{index}")
+
+
+def compile_choice_requirements_deterministic(choices, user_turns, language="zh-CN"):
+    """Deterministically compile signed button choices into validated typed requirements."""
+    sources = {str(item["id"]): str(item["content"]) for item in user_turns or []}
+    compiled = []
+    for choice in choices or []:
+        turn_id = choice["sourceTurnId"]
+        span = sources.get(turn_id) or str(choice.get("label") or "")
+        promise = choice["promise"]
+        kind = promise["kind"]
+        comp = promise["component"]
+        if kind in {"reduce_obstacles", "widen_corridor"}:
+            req_component = "water" if comp == "water" else "wall"
+            req_property, req_relation = "count", "decrease"
+        elif kind == "shorter_solution":
+            req_component, req_property, req_relation = "gameplay", "solutionSteps", "decrease"
+        else:
+            req_component, req_property, req_relation = "water", "positions", "relocate"
+        compiled.append(
+            {
+                "component": req_component,
+                "property": req_property,
+                "relation": req_relation,
+                "strength": "goal",
+                "entities": [],
+                "value": None,
+                "unit": "none",
+                "priorityEvidenceSpan": "",
+                "focused": True,
+                "sourceTurnId": turn_id,
+                "evidenceSpan": span,
+                "statement": str(choice.get("label") or span).strip()[:400],
+                "scope": "all",
+            }
+        )
+    return compiled
+
+
+def protected_refusal_message(protected_entities, initial_request, language):
+    """Build a participant-facing permission explanation for protected entities without leaking internal rules."""
+    names = {
+        "targets": ("目标点", "targets"),
+        "boxes": ("箱子", "boxes"),
+        "player": ("玩家起点", "player start"),
+        "outer_shell": ("外墙轮廓", "outer shell"),
+    }
+    chinese = language == "zh-CN"
+    idx = 0 if chinese else 1
+    labels = list(dict.fromkeys(names[key][idx] for key in protected_entities or [] if key in names))
+    entity_text = ("、".join(labels) if chinese else ", ".join(labels)) or ("受保护对象" if chinese else "protected elements")
+    snippet = " ".join(str(initial_request or "").split())[:120]
+    if chinese:
+        prefix = f"你提到的“{snippet}”涉及修改{entity_text}，" if snippet else f"这项请求涉及修改{entity_text}，"
+        return f"{prefix}超出了当前 AI 修改权限。目前只能调整水域和内部墙体；玩家、箱子、目标点和连接外壳都会保持不变，已保存的 Stage 与此前讨论也会保留。"
+    prefix = f'Your request “{snippet}” asks to change {entity_text}, which is ' if snippet else f"This request asks to change {entity_text}, which is "
+    return f"{prefix}beyond the current editing permissions. Only water and internal walls may be edited; player, boxes, targets, and the connected outer shell remain fixed, and the saved Stage and prior discussion are preserved."

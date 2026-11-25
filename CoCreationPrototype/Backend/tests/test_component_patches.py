@@ -630,6 +630,83 @@ class ComponentIntegrationTests(unittest.TestCase):
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertEqual(call.await_count, 1)
 
+    def test_review_proposal_requirements_uses_25s_18s_caps_and_excludes_platform_protections(self):
+        snapshot = build_stage_snapshot(ROWS, version_id="v1")
+        captured = []
+
+        async def fake_request(*args, **kwargs):
+            captured.append((kwargs["task"], args[5], args[3][0]["content"]))
+            if kwargs["task"] == "revision_requirements":
+                return completion({"requirements": [], "automaticBindings": [], "exactTransitions": []})
+            return completion({"accepted": True, "issues": []})
+
+        call = RecordedAsyncCall(side_effect=fake_request)
+        with llm_scope(completion_requester=call):
+            result = llm.proposal_planning._review_proposal_requirements(
+                "offline",
+                "offline",
+                {
+                    "stageSnapshot": snapshot,
+                    "responseLanguage": "en",
+                    "proposalDiscovery": {"topicId": "t1", "userTurns": [{"id": "u1", "content": "Add wall, keep player fixed"}]},
+                },
+                "req-25-18",
+                time.monotonic() + 116.0,
+            )
+        self.assertEqual(result["requirements"], [])
+        self.assertEqual([item[0] for item in captured], ["revision_requirements", "revision_requirement_review"])
+        self.assertGreater(captured[0][1], 20.0)
+        self.assertLessEqual(captured[0][1], 25.0)
+        self.assertGreater(captured[1][1], 12.0)
+        self.assertLessEqual(captured[1][1], 18.0)
+        self.assertIn("NEVER emit requirements for outer_shell, player, boxes, or targets", captured[0][2])
+        self.assertIn("Always set scope='all' by default", captured[0][2])
+        self.assertIn("omitting them is EXPECTED and VALID", captured[1][2])
+        self.assertIn("Every string in issue.evidenceSpans MUST be copied verbatim", captured[1][2])
+
+    def test_review_retry_note_includes_exact_designer_turn_texts_on_technical_retry(self):
+        snapshot = build_stage_snapshot(ROWS, version_id="v1")
+        captured_prompts = []
+
+        async def fake_request(*args, **kwargs):
+            captured_prompts.append((kwargs["task"], args[3]))
+            if kwargs["task"] == "revision_requirements":
+                return completion({"requirements": [], "automaticBindings": [], "exactTransitions": []})
+            if len([p for p in captured_prompts if p[0] == "revision_requirement_review"]) == 1:
+                return completion({
+                    "accepted": False,
+                    "issues": [{
+                        "requirementIds": [],
+                        "kind": "coverage",
+                        "evidenceSpans": ["paraphrased non-verbatim text"],
+                        "repairInstruction": "Add missing wall rule.",
+                    }],
+                })
+            return completion({"accepted": True, "issues": []})
+
+        call = RecordedAsyncCall(side_effect=fake_request)
+        with llm_scope(completion_requester=call):
+            result = llm.proposal_planning._review_proposal_requirements(
+                "offline",
+                "offline",
+                {
+                    "stageSnapshot": snapshot,
+                    "responseLanguage": "zh-CN",
+                    "proposalDiscovery": {
+                        "topicId": "t-retry",
+                        "userTurns": [{"id": "u1", "content": "加一面内墙增加绕路"}],
+                    },
+                },
+                "req-retry-note",
+                time.monotonic() + 116.0,
+            )
+        self.assertEqual(result["requirements"], [])
+        reviews = [msgs for task, msgs in captured_prompts if task == "revision_requirement_review"]
+        self.assertEqual(len(reviews), 2)
+        retry_system_notes = "\n".join(m["content"] for m in reviews[1] if m["role"] == "system")
+        self.assertIn("加一面内墙增加绕路", retry_system_notes)
+        self.assertIn("exact verbatim substring of designerTurns", retry_system_notes)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1030,7 +1030,7 @@ class LLMClientTests(unittest.TestCase):
             client.chat.completions.calls[0]["extra_body"],
             {"thinking": {"type": "disabled"}},
         )
-        self.assertEqual(create_client.call_count, 2)
+        self.assertEqual(create_client.call_count, 1)
         self.assertTrue(any(call.args[:2] == ("test-kimi-key", "https://api.moonshot.cn/v1")
                             for call in create_client.call_args_list))
 
