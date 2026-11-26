@@ -204,9 +204,17 @@ elif command -v sudo >/dev/null 2>&1; then
 fi
 
 if [ -x "$REMOTE_DIR/.venv/bin/python" ]; then
-    "$REMOTE_DIR/.venv/bin/python" -c "import subprocess, sys, tomllib; deps = tomllib.load(open('$REMOTE_DIR/pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', *deps])"
+    if "$REMOTE_DIR/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+        "$REMOTE_DIR/.venv/bin/python" -c "import subprocess, sys, tomllib; deps = tomllib.load(open('$REMOTE_DIR/pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', *deps])"
+    elif command -v uv >/dev/null 2>&1; then
+        "$REMOTE_DIR/.venv/bin/python" -c "import subprocess, sys, tomllib; deps = tomllib.load(open('$REMOTE_DIR/pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call(['uv', 'pip', 'install', '--python', sys.executable, '--quiet', *deps])"
+    elif [ -x "$HOME/.local/bin/uv" ]; then
+        "$REMOTE_DIR/.venv/bin/python" -c "import os, subprocess, sys, tomllib; deps = tomllib.load(open('$REMOTE_DIR/pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call([os.path.expanduser('~/.local/bin/uv'), 'pip', 'install', '--python', sys.executable, '--quiet', *deps])"
+    else
+        echo "WARNING: Neither pip nor uv found for $REMOTE_DIR/.venv/bin/python; skipping dependency sync." >&2
+    fi
 else
-    echo "WARNING: $REMOTE_DIR/.venv/bin/python not found; skipping pip sync." >&2
+    echo "WARNING: $REMOTE_DIR/.venv/bin/python not found; skipping dependency sync." >&2
 fi
 
 if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
@@ -245,7 +253,7 @@ fi
     $remoteScript = $remoteScript -replace "`r`n", "`n"
 
     if ($PSCmdlet.ShouldProcess("${SshAlias}:${RemoteDir}", "Extract bundle, restart $ServiceName, and run /health + /ready checks")) {
-        $sshArgs = @($sshCommonArgs) + @($SshAlias, "bash -s")
+        $sshArgs = @($sshCommonArgs) + @($SshAlias, "tr -d '\r' | bash -s")
         Write-Host "==> Deploying on $SshAlias ($RemoteDir) and restarting $ServiceName" -ForegroundColor Cyan
         $remoteScript | & ssh @sshArgs
         if ($LASTEXITCODE -ne 0) {
