@@ -1,8 +1,9 @@
 import { TILE_ORDER, getTileClass, type SokobanTile } from "@sokoban/ui-core";
 import type { JSX } from "preact";
 import { t, tileDisplayKey } from "../../i18n";
-import { selectedTile } from "../../store/editorStore";
+import { isDirty, selectedTile } from "../../store/editorStore";
 import {
+  binaryFlowActive,
   busy,
   canEditSelected,
   isDeadlineExpired,
@@ -26,7 +27,16 @@ const PALETTE_SYMBOLS: Record<string, string> = {
 export function TilePalette(): JSX.Element {
   const lang = language.value;
   const activeTile = selectedTile.value;
-  const disabled = !canEditSelected.value || busy.value || unityPlayActive.value;
+  const binaryBlocked =
+    binaryFlowActive.value || session.value?.proposalFlowState?.status === "planning";
+  const disabled =
+    !canEditSelected.value || busy.value || unityPlayActive.value || binaryBlocked;
+
+  const binaryBlockHint = binaryBlocked
+    ? isDirty.value
+      ? t(lang, "hint.binaryDraftReset")
+      : t(lang, "hint.binaryProposal")
+    : "";
 
   const blockedStatus = isDeadlineExpired.value
     ? t(lang, "deadlineExpiredAnnouncement")
@@ -36,9 +46,7 @@ export function TilePalette(): JSX.Element {
         ? t(lang, "hint.playActive")
         : isHistoricalStage.value
           ? t(lang, "hint.history")
-          : busy.value
-            ? t(lang, "hint.busy")
-            : "";
+          : binaryBlockHint || (busy.value ? t(lang, "hint.busy") : "");
 
   return (
     <div class="map-toolbar" aria-label={t(lang, "editorTitle")}>
@@ -52,7 +60,6 @@ export function TilePalette(): JSX.Element {
             type="button"
             class={`palette-button ${getTileClass(tile)}${selected ? " selected" : ""}`}
             aria-pressed={selected ? "true" : "false"}
-            disabled={disabled}
             aria-disabled={disabled ? "true" : undefined}
             onClick={() => {
               if (!disabled) selectedTile.value = tile;

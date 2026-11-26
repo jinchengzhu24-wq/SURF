@@ -528,6 +528,13 @@ async def test_study_records_bounds_nan_rejection_and_export() -> None:
     assert s_res["recordType"] == "survey"
     await svc.record_level_start({"studySessionId": "st-1", "roundId": "r1"})
     await svc.record_level_end({"studySessionId": "st-1", "roundId": "r1", "completed": True})
+    with db.read_conn() as conn:
+        rows = conn.execute(
+            "SELECT match_id, participant_id FROM study_records "
+            "WHERE record_type IN ('level_start', 'level_end')"
+        ).fetchall()
+        assert len(rows) == 2
+        assert all(r["match_id"] is None and r["participant_id"] == "st-1" for r in rows)
     j_res = await svc.record_journey({"ideaId": "idea-1", "phase": "dg", "action": "confirm"})
     assert j_res["journeyEventId"]
 
@@ -683,3 +690,782 @@ async def test_dashboard_service_projection_auth_and_deletes(tmp_path: Path) -> 
 
     cleared = await dash.clear_matchmaking_records(supplied_password="admin-pw")
     assert cleared["cleared"] is True
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: study participant_id, Stage assess/CAS/replay, read-model safety
+# ---------------------------------------------------------------------------
+
+
+async def test_study_participant_id_session_id_and_play_attempt_status_enum(
+    tmp_path: Path,
+) -> None:
+    from server.domain.sessions import PlayAttemptStatus
+    from server.persistence._study_import import import_study_logs
+
+    assert {s.value for s in PlayAttemptStatus} == {
+        "issued",
+        "loaded",
+        "started",
+        "completed",
+        "abandoned",
+        "interrupted",
+    }
+
+    clock = FakeClock()
+    db = SQLiteDatabase(tmp_path / "study_pid.sqlite3")
+    study_repo = StudyRepository(db)
+    svc = StudyRecordsService(study_repo, clock=clock)
+    await svc.record_survey({"sessionId": "sess-pid-1", "q1": "ok"})
+    with db.read_conn() as conn:
+        row = conn.execute("SELECT participant_id FROM study_records").fetchone()
+        assert row is not None and row["participant_id"] == "sess-pid-1"
+
+    logs_dir = tmp_path / "study_logs"
+    logs_dir.mkdir()
+    (logs_dir / "survey_responses.jsonl").write_text(
+        json.dumps({"sessionId": "imported-sess-9", "q1": 4}) + "\n",
+        encoding="utf-8",
+    )
+    import_db = SQLiteDatabase(tmp_path / "study_import.sqlite3")
+    stats = import_study_logs(import_db, logs_dir)
+    assert stats["study_inserted"] == 1
+    with import_db.read_conn() as conn:
+        imp_row = conn.execute("SELECT participant_id FROM study_records").fetchone()
+        assert imp_row is not None and imp_row["participant_id"] == "imported-sess-9"
+
+
+async def test_read_model_fallback_strips_internal_choices_and_treats_ready_active(
+    tmp_path: Path,
+) -> None:
+    from server.application.sessions.read_model.progress import build_proposal_flow_state
+    from server.application.sessions.read_model.projections import build_proposal_state
+    from server.core.grid import map_fingerprint
+    from server.persistence.models import ConversationTurnRecord, LevelVersionRecord
+    from server.persistence.repositories._mappers import row_to_session
+
+    db = SQLiteDatabase(tmp_path / "rm_safety.sqlite3")
+    with db.write_tx() as conn:
+        conn.execute(
+            "INSERT INTO design_sessions("
+            "session_id, mode, language, language_locked, status, access_token_hash, "
+            "integration_token_hash, bootstrap_token_hash, current_version_id, "
+            "created_at, updated_at"
+            ") VALUES ('s1', 'unity', 'en', 1, 'active', 'a', 'i', 'b', 'v1', "
+            "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+        )
+        s_row = conn.execute("SELECT * FROM design_sessions WHERE session_id = 's1'").fetchone()
+    assert s_row is not None
+    session_rec = row_to_session(s_row)
+
+    from server.application.sessions.stage.entity_bindings import build_entity_bindings
+    from server.persistence.models import SessionReadModel
+
+    bindings = build_entity_bindings(VALID_ROWS, source="initial")
+    ver = LevelVersionRecord(
+        version_id="v1",
+        session_id="s1",
+        version_number=1,
+        source="initial",
+        summary="init",
+        rows=list(VALID_ROWS),
+        bindings=bindings,
+        entity_bindings=bindings,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    read_model = SessionReadModel(session=session_rec, versions=[ver])
+
+    # Partial topic_state missing `binding` triggers fallback path in build_proposal_flow_state
+    topic_state = {
+        "topicId": "top-1",
+        "versionId": "v1",
+        "status": "clarifying",
+        "choices": [],
+        "pendingQuestion": {
+            "questionId": "q1",
+            "topicId": "top-1",
+            "baseVersionId": "v1",
+            "number": 2,
+            "question": "Which?",
+            "note": "Pick",
+            "choices": [{"choiceId": "c1", "letter": "A", "label": "Opt A"}],
+            "_internalChoices": [{"choiceId": "c1", "cachedRows": list(VALID_ROWS)}],
+        },
+    }
+    flow = build_proposal_flow_state(read_model, topic_state)
+    assert flow["active"] is True
+    assert flow["clarificationQuestionCount"] == 2
+    assert "_internalChoices" not in (flow["pendingQuestion"] or {})
+    assert "cachedRows" not in json.dumps(flow)
+
+    # Proposal binding status='ready' is treated as actionable alongside 'active'
+    turn = ConversationTurnRecord(
+        turn_id="t1",
+        session_id="s1",
+        sequence_number=1,
+        role="assistant",
+        content="Proposal ready",
+        language="en",
+        guidance={"proposalOffer": {"summary": "Move wall"}},
+        proposal_binding={
+            "baseVersionId": "v1",
+            "mapFingerprint": map_fingerprint(VALID_ROWS),
+            "entityBindingFingerprint": bindings["bindingFingerprint"],
+            "status": "ready",
+            "executionBrief": {
+                "requiredTransitions": [{"row": 2, "column": 2, "from": ".", "to": "#"}]
+            },
+        },
+        version_id="v1",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    p_state = build_proposal_state(
+        turn,
+        session_status="active",
+        current_version_id="v1",
+        deadline_expired=False,
+        versions_by_id={"v1": ver},
+        contexts_by_version={"v1": {}},
+        latest_revision_turn_by_version={"v1": "t1"},
+    )
+    assert p_state is not None and p_state["actionable"] is True
+
+
+async def test_assess_version_human_edit_review_idempotency_sweep_and_cas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlparse
+
+    from server.application.sessions import (
+        CoCreationAppSettings,
+        SessionLifecycleService,
+        SessionReadModelService,
+        StageService,
+    )
+    from server.core.grid import map_fingerprint
+    from server.domain.errors import IdempotencyConflictError
+    from server.llm.pipelines.chat import ChatPipeline
+    from server.llm.pipelines.understanding import UnderstandingPipeline
+    from server.persistence import (
+        DialogueRepository,
+        OperationalRepository,
+        SessionsRepository,
+    )
+
+    clock = FakeClock()
+    db = SQLiteDatabase(tmp_path / "stage_fixes.sqlite3")
+    settings = CoCreationAppSettings(
+        token_secret="unit-test-secret",
+        cocreation_deadline_seconds=600,
+        draft_regeneration_pending_timeout_seconds=60,
+        draft_regeneration_claimed_timeout_seconds=120,
+        interrupted_after_seconds=300,
+    )
+    rooms_repo = RoomsRepository(db)
+    sessions_repo = SessionsRepository(db)
+    dialogue_repo = DialogueRepository(db)
+    op_repo = OperationalRepository(db)
+    room_sync = OnlineRoomService(rooms_repo, clock=clock)
+    read_model = SessionReadModelService(
+        sessions_repo, dialogue_repo, op_repo, clock=clock, settings=settings
+    )
+    edited_rows = list(VALID_ROWS)
+    edited_rows[4] = "#....#.....#"
+
+    opening_resp = json.dumps(
+        {
+            "assistantMessage": "Stage 1 ready.",
+            "move": "observe_stage",
+            "followUpQuestion": None,
+            "intentDecision": None,
+            "intentConfidence": None,
+            "revisionOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+            "coordinateLinks": [],
+            "assessment": {
+                "solutionSummary": "Solvable.",
+                "difficultyOpinion": "Manageable.",
+                "features": ["Open"],
+                "suggestions": ["Test"],
+                "satisfactionQuestion": None,
+            },
+            "designContextPatch": None,
+        }
+    )
+    conflict_resp = json.dumps(
+        {
+            "comparisons": [
+                {
+                    "directionId": "dir-goal-1",
+                    "relation": "conflict",
+                    "explanation": "Adds a wall where open center was desired.",
+                }
+            ]
+        }
+    )
+    review_resp = json.dumps(
+        {
+            "openingMessage": "Saved Stage 2 stays solvable.",
+            "assessment": {
+                "solutionSummary": "Solvable.",
+                "difficultyOpinion": "Tighter center.",
+                "features": ["Center wall"],
+                "suggestions": ["Compare routes"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": "This edit adds a center wall opposite to keeping center open.",
+            "conflict": {
+                "userPosition": "You confirmed keeping the center open.",
+                "aiPosition": "The saved edit places a wall in the center.",
+                "coreDisagreement": "Open center vs central wall.",
+                "nextQuestion": "Keep the wall or restore the open center?",
+            },
+        }
+    )
+    transport = _FakeTransport(
+        [
+            opening_resp,
+            UpstreamLLMError("UPSTREAM_TIMEOUT", "timeout", retryable=False),
+            conflict_resp,
+            review_resp,
+        ]
+    )
+    chat_pipe = ChatPipeline(transport, model="kimi-fake", clock=clock)
+    und_pipe = UnderstandingPipeline(transport, model="kimi-fake", clock=clock)
+
+    lifecycle = SessionLifecycleService(
+        db,
+        sessions_repo,
+        op_repo,
+        read_model,
+        room_sync=room_sync,
+        clock=clock,
+        settings=settings,
+        demo_level_generator=lambda: SimpleNamespace(rows=tuple(VALID_ROWS), seed=1),
+    )
+    stage = StageService(
+        db,
+        sessions_repo,
+        op_repo,
+        read_model,
+        chat_pipeline=chat_pipe,
+        understanding_pipeline=und_pipe,
+        room_sync=room_sync,
+        clock=clock,
+        settings=settings,
+        demo_level_generator=lambda: SimpleNamespace(rows=tuple(edited_rows), seed=2),
+    )
+
+    # 1. Demo draft_ops: atomic regeneration + non-latest duplicate idempotency_key
+    demo = await lifecycle.create_demo_session(language="en", idempotency_key="demo-a1")
+    d_sid = demo["sessionId"]
+    d_boot = parse_qs(urlparse(demo["launchUrl"]).fragment)["bootstrap"][0]
+    d_tok = (await lifecycle.authorize_browser_access(d_sid, d_boot))["accessToken"]
+    await stage.request_draft_regeneration(d_sid, d_tok, idempotency_key="dr-1")
+    clock.advance(1.0)
+    await stage.request_draft_regeneration(d_sid, d_tok, idempotency_key="dr-2")
+    # Replaying non-latest 'dr-1' must NOT raise IntegrityError
+    replay_dr1 = await stage.request_draft_regeneration(d_sid, d_tok, idempotency_key="dr-1")
+    assert replay_dr1["draftPreview"]["generation"] == 3
+
+    # 2. Formal session: complete_draft_regeneration CAS, sweep & read-time expiry
+    room = await room_sync.create_room(study_session_id="st-1", menu_started_flow=True)
+    await room_sync.join_room(
+        room_code=room["roomCode"], study_session_id="st-2", menu_started_flow=True
+    )
+    created = await lifecycle.create_formal_session(
+        rows=VALID_ROWS,
+        initial_draft_method="partial_completion",
+        language="en",
+        idempotency_key="f-1",
+        match_id=room["matchId"],
+        player_number=1,
+    )
+    sid = created["sessionId"]
+    int_tok = created["integrationToken"]
+    boot = parse_qs(urlparse(created["launchUrl"]).fragment)["bootstrap"][0]
+    access = (await lifecycle.authorize_browser_access(sid, boot))["accessToken"]
+
+    r_pend = await stage.request_draft_regeneration(sid, access, idempotency_key="u-dr-1")
+    req_id = r_pend["draftPreview"]["regenerationRequestId"]
+    await stage.claim_draft_regeneration(sid, req_id, int_tok)
+    clock.advance(125.0)  # Past claimed timeout (120s)
+    # Read-time expiry via get_integration_status marks it timed_out
+    int_status = await read_model.get_integration_status(sid, int_tok)
+    assert int_status["draftRegeneration"]["status"] == "timed_out"
+    with pytest.raises(ConflictError):
+        await stage.complete_draft_regeneration(sid, req_id, int_tok, rows=edited_rows)
+    assert sessions_repo.get_session(sid).draft_rows == list(VALID_ROWS)  # type: ignore[union-attr]
+
+    # language.py draft_generation CAS check inside write_tx()
+    stale_session = sessions_repo.get_session(sid)
+    assert stale_session is not None
+    sessions_repo.update_session(sid, draft_generation=99)
+    with pytest.raises(ConflictError):
+        from server.application.sessions.lifecycle.language import update_language_impl
+
+        await update_language_impl(
+            db=db,
+            room_sync=room_sync,
+            clock=clock,
+            settings=settings,
+            session=stale_session,
+            language="en",
+        )
+    sessions_repo.update_session(sid, draft_generation=1)
+
+    # Lock language -> Stage 1, assess Stage 1
+    p1 = await lifecycle.update_language(sid, access, language="en")
+    v1 = p1["currentVersionId"]
+    await stage.assess_version(sid, v1, access, idempotency_key="as-1")
+
+    # Seed confirmed direction into v1 DesignContext so v2 inherits it for conflict adjudication
+    with db.write_tx() as conn:
+        ctx = {
+            "schemaVersion": 6,
+            "userGoals": [
+                {
+                    "id": "dir-goal-1",
+                    "goal": "Keep center open",
+                    "authority": "confirmed",
+                    "status": "active",
+                    "confidence": 1.0,
+                }
+            ],
+        }
+        conn.execute(
+            "UPDATE level_versions SET design_context_json = ? WHERE version_id = ?",
+            (json.dumps(ctx), v1),
+        )
+
+    # Save manual edit -> Stage 2
+    p2 = await stage.save_version(
+        sid,
+        access,
+        base_version_id=v1,
+        rows=edited_rows,
+        idempotency_key="save-v2",
+        summary="Add center wall",
+    )
+    v2 = p2["currentVersionId"]
+
+    # Play attempt CAS & sweep_expired_operations
+    pa = await stage.create_play_attempt(sid, v2, access, idempotency_key="pa-cas")
+    att_id = pa["attemptId"]
+    ticket = parse_qs(urlparse(pa["playUrl"]).query)["cocreationPlay"][0]
+    await stage.bootstrap_play_attempt(att_id, ticket)
+    with pytest.raises(ConflictError):
+        await stage.bootstrap_play_attempt(att_id, ticket)
+    clock.advance(301.0)
+    await stage.sweep_expired_operations()
+    assert sessions_repo.get_play_attempt(att_id).status == "interrupted"  # type: ignore[union-attr]
+
+    # First assess on v2 fails (UpstreamLLMError queued) -> emits reply_generation_failed
+    with pytest.raises(UpstreamLLMError):
+        await stage.assess_version(sid, v2, access, idempotency_key="as-v2")
+    events_after_fail = dialogue_repo.list_events(sid)
+    assert any(ev.event_type == "reply_generation_failed" for ev in events_after_fail)
+
+    # In-progress lock blocks concurrent assess_version without burning LLM; stale (>150s) recovers
+    op_repo.claim_key(
+        sid,
+        "assess_version",
+        "as-v2-lock",
+        request_hash=op_repo.get_key(sid, "assess_version", "as-v2").request_hash,  # type: ignore[union-attr]
+        created_at=clock.utc_now(),
+    )
+    with pytest.raises(ConflictError):
+        await stage.assess_version(sid, v2, access, idempotency_key="as-v2-lock")
+
+    # Retry with same key 'as-v2' succeeds: commits 2 turns, activeDisagreement, audits, & node
+    assessed_v2 = await stage.assess_version(sid, v2, access, idempotency_key="as-v2")
+    v2_turns = [
+        t
+        for t in assessed_v2["turns"]
+        if t["versionId"] == v2 and t["role"] == "assistant"
+    ]
+    assert len(v2_turns) == 2
+    assert assessed_v2["interactionState"]["proposalBlocked"] is True
+    assert assessed_v2["interactionState"]["disagreementId"] is not None
+
+    ev_types = {ev.event_type for ev in dialogue_repo.list_events(sid)}
+    assert {
+        "reply_delivery_outcome",
+        "human_edit_reviewed",
+        "disagreement_started",
+        "intent_progress_rewrite",
+    }.issubset(ev_types)
+
+    room_evs = rooms_repo.list_room_events(room["matchId"])
+    assert any(
+        ev.event_type == "node" and ev.payload.get("nodeType") == "manual_edit_review"
+        for ev in room_evs
+    )
+
+    # Advance past deadline: completed replays of save_version & assess_version still succeed!
+    clock.advance(700.0)
+    replay_save = await stage.save_version(
+        sid,
+        access,
+        base_version_id=v1,
+        rows=edited_rows,
+        idempotency_key="save-v2",
+        summary="Add center wall",
+    )
+    assert replay_save["currentVersionId"] == v2
+    replay_assess = await stage.assess_version(sid, v2, access, idempotency_key="as-v2")
+    assert len([t for t in replay_assess["turns"] if t["versionId"] == v2]) == 2
+    with pytest.raises(IdempotencyConflictError):
+        await stage.save_version(
+            sid,
+            access,
+            base_version_id=v1,
+            rows=VALID_ROWS,
+            idempotency_key="save-v2",
+        )
+    assert map_fingerprint(VALID_ROWS) != map_fingerprint(edited_rows)
+    monkeypatch.undo()
+
+
+async def test_stage_save_restore_finalize_guards_cleanup_sync_and_cancellation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlparse
+
+    from server.application.sessions import (
+        CoCreationAppSettings,
+        SessionLifecycleService,
+        SessionReadModelService,
+        StageService,
+    )
+    from server.application.sessions.lifecycle.finalize import finalize_session_impl
+    from server.application.sessions.read_model.projections import sanitize_turn_guidance
+    from server.application.sessions.stage.stage_ops import (
+        assess_version_impl,
+        restore_version_impl,
+    )
+    from server.domain.memory.models import Disagreement
+    from server.llm.pipelines.chat import ChatPipeline
+    from server.persistence import DialogueRepository, OperationalRepository, SessionsRepository
+
+    # 1. Disagreement.phase accepts "reason_pending" & non-standard grid fallback in projections
+    dis = Disagreement.model_validate(
+        {
+            "status": "active",
+            "subject": "ai_revision_challenge",
+            "phase": "reason_pending",
+            "challengeId": "chg-1",
+        }
+    )
+    assert dis.phase == "reason_pending"
+    sanitized = sanitize_turn_guidance(
+        {"move": "observe_stage", "coordinateLinks": [{"label": "P", "row": 1, "column": 1}]},
+        "Player at (1, 1)",
+        ["####"],
+        None,
+    )
+    assert "coordinateLinks" not in sanitized
+
+    clock = FakeClock()
+    db = SQLiteDatabase(tmp_path / "stage_guards.sqlite3")
+    settings = CoCreationAppSettings(
+        token_secret="unit-test-secret", cocreation_deadline_seconds=600
+    )
+    rooms_repo = RoomsRepository(db)
+    sessions_repo = SessionsRepository(db)
+    dialogue_repo = DialogueRepository(db)
+    op_repo = OperationalRepository(db)
+    room_sync = OnlineRoomService(rooms_repo, clock=clock)
+    read_model = SessionReadModelService(
+        sessions_repo, dialogue_repo, op_repo, clock=clock, settings=settings
+    )
+    lifecycle = SessionLifecycleService(
+        db,
+        sessions_repo,
+        op_repo,
+        read_model,
+        room_sync=room_sync,
+        clock=clock,
+        settings=settings,
+        demo_level_generator=lambda: SimpleNamespace(rows=tuple(VALID_ROWS), seed=1),
+    )
+    stage = StageService(
+        db,
+        sessions_repo,
+        op_repo,
+        read_model,
+        room_sync=room_sync,
+        clock=clock,
+        settings=settings,
+    )
+
+    room = await room_sync.create_room(study_session_id="st-1", menu_started_flow=True)
+    await room_sync.join_room(
+        room_code=room["roomCode"], study_session_id="st-2", menu_started_flow=True
+    )
+    created = await lifecycle.create_formal_session(
+        rows=VALID_ROWS,
+        initial_draft_method="partial_completion",
+        language="en",
+        idempotency_key="f-guard-1",
+        match_id=room["matchId"],
+        player_number=1,
+    )
+    sid = created["sessionId"]
+    boot = parse_qs(urlparse(created["launchUrl"]).fragment)["bootstrap"][0]
+    access = (await lifecycle.authorize_browser_access(sid, boot))["accessToken"]
+    p1 = await lifecycle.update_language(sid, access, language="en")
+    v1 = p1["currentVersionId"]
+
+    # 2. Missing online_rooms row during co-creation sync logs warning without rolling back
+    rooms_repo.delete_match(room["matchId"])
+    caplog.set_level("WARNING")
+    with db.write_tx() as conn:
+        ev_res, ev_created = room_sync.record_cocreation_event_tx(
+            conn,
+            match_id=room["matchId"],
+            player_slot=1,
+            event_payload={"eventId": "ev-miss", "eventType": "stage"},
+        )
+        assert ev_res["ignored"] is True and ev_created is False
+        int_res = room_sync.record_designer_intention_tx(
+            conn,
+            match_id=room["matchId"],
+            player_slot=1,
+            designer_intention="Keep it simple.",
+        )
+        assert int_res["ignored"] is True
+    assert any("online_rooms row was not found" in rec.message for rec in caplog.records)
+
+    # 3. save_version rejects clarifying topic with PROPOSAL_CHOICE_REQUIRED
+    op_repo.upsert_topic(
+        sid,
+        "top-clarify",
+        {"topicId": "top-clarify", "versionId": v1, "status": "clarifying"},
+        clock.utc_now(),
+    )
+    edited_v2 = list(VALID_ROWS)
+    edited_v2[4] = "#....#.....#"
+    with pytest.raises(ConflictError) as exc_info:
+        await stage.save_version(
+            sid,
+            access,
+            base_version_id=v1,
+            rows=edited_v2,
+            idempotency_key="save-blocked",
+        )
+    assert exc_info.value.code == "PROPOSAL_CHOICE_REQUIRED"
+
+    # Once topic leaves clarifying (e.g. planning), save_version succeeds and cleans up active state
+    op_repo.upsert_topic(
+        sid,
+        "top-clarify",
+        {"topicId": "top-clarify", "versionId": v1, "status": "planning"},
+        clock.utc_now(),
+    )
+    dialogue_repo.insert_turn(
+        turn_id="t-v1", session_id=sid, role="assistant", content="Offer",
+        version_id=v1, request_id="r-v1", created_at=clock.utc_now(),
+    )
+    dialogue_repo.insert_proposal(
+        proposal_id="prop-v1", session_id=sid, assistant_turn_id="t-v1",
+        base_version_id=v1, status="pending", proposal={"summary": "old"},
+        created_at=clock.utc_now(), idempotency_key="pk-v1",
+    )
+    dialogue_repo.upsert_challenge(
+        challenge_id="chg-v1", session_id=sid, base_version_id=v1,
+        source_proposal_turn_id="t-v1", challenge_turn_id="t-v1",
+        status="awaiting_choice", created_at=clock.utc_now(),
+    )
+
+    p2 = await stage.save_version(
+        sid,
+        access,
+        base_version_id=v1,
+        rows=edited_v2,
+        idempotency_key="save-v2-ok",
+    )
+    v2 = p2["currentVersionId"]
+    assert dialogue_repo.get_proposal(sid, "prop-v1").status == "superseded"  # type: ignore[union-attr]
+    assert dialogue_repo.get_challenge(sid, "chg-v1").status == "resolved"  # type: ignore[union-attr]
+    assert op_repo.get_topic(sid, "top-clarify").state["status"] == "cancelled"  # type: ignore[union-attr]
+
+    # 4. restore_version also cleans up pending proposals, unfinished challenges, and active topics
+    op_repo.upsert_topic(
+        sid,
+        "top-v2",
+        {"topicId": "top-v2", "versionId": v2, "status": "retry_pending"},
+        clock.utc_now(),
+    )
+    dialogue_repo.insert_turn(
+        turn_id="t-v2", session_id=sid, role="assistant", content="Offer 2",
+        version_id=v2, request_id="r-v2", created_at=clock.utc_now(),
+    )
+    dialogue_repo.insert_proposal(
+        proposal_id="prop-v2", session_id=sid, assistant_turn_id="t-v2",
+        base_version_id=v2, status="pending", proposal={"summary": "v2 offer"},
+        created_at=clock.utc_now(), idempotency_key="pk-v2",
+    )
+    dialogue_repo.upsert_challenge(
+        challenge_id="chg-v2", session_id=sid, base_version_id=v2,
+        source_proposal_turn_id="t-v2", challenge_turn_id="t-v2",
+        status="awaiting_reason", created_at=clock.utc_now(),
+    )
+    p3 = await stage.restore_version(
+        sid,
+        v1,
+        access,
+        base_version_id=v2,
+        idempotency_key="restore-v1",
+    )
+    v3 = p3["currentVersionId"]
+    assert dialogue_repo.get_proposal(sid, "prop-v2").status == "superseded"  # type: ignore[union-attr]
+    assert dialogue_repo.get_challenge(sid, "chg-v2").status == "resolved"  # type: ignore[union-attr]
+    assert op_repo.get_topic(sid, "top-v2").state["status"] == "cancelled"  # type: ignore[union-attr]
+
+    # 5. CancelledError marks idempotency keys as "failed" across save/restore/assess/finalize
+    class _CancellingTransport:
+        async def complete(self, **kwargs: Any) -> TransportResponse:
+            raise asyncio.CancelledError()
+
+    sess_obj = sessions_repo.get_session(sid)
+    assert sess_obj is not None
+
+    with pytest.MonkeyPatch.context() as mp:
+        async def _cancel_solve(*args: Any, **kwargs: Any) -> Any:
+            raise asyncio.CancelledError()
+
+        mp.setattr("server.application.sessions.stage.service.solve_stage_async", _cancel_solve)
+        mp.setattr("server.application.sessions.stage.stage_ops.solve_stage_async", _cancel_solve)
+        mp.setattr(
+            "server.application.sessions.lifecycle.finalize.solve_stage_async", _cancel_solve
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await stage.save_version(
+                sid, access, base_version_id=v3, rows=edited_v2, idempotency_key="cancel-save"
+            )
+        assert op_repo.get_key(sid, "save_version", "cancel-save").status == "failed"  # type: ignore[union-attr]
+
+        with pytest.raises(asyncio.CancelledError):
+            await restore_version_impl(
+                db=db,
+                sessions_repo=sessions_repo,
+                operational_repo=op_repo,
+                room_sync=room_sync,
+                clock=clock,
+                session=sess_obj,
+                version_id=v2,
+                base_version_id=v3,
+                idempotency_key="cancel-restore",
+            )
+        assert op_repo.get_key(sid, "restore_version", "cancel-restore").status == "failed"  # type: ignore[union-attr]
+
+        cancel_pipe = ChatPipeline(_CancellingTransport(), model="fake", clock=clock)
+        with pytest.raises(asyncio.CancelledError):
+            await assess_version_impl(
+                db=db,
+                sessions_repo=sessions_repo,
+                operational_repo=op_repo,
+                chat_pipeline=cancel_pipe,
+                room_sync=room_sync,
+                clock=clock,
+                session=sess_obj,
+                version_id=v3,
+                idempotency_key="cancel-assess",
+            )
+        assert op_repo.get_key(sid, "assess_version", "cancel-assess").status == "failed"  # type: ignore[union-attr]
+
+        clock.advance(700.0)
+        expired_sess = sessions_repo.get_session(sid)
+        assert expired_sess is not None
+        with pytest.raises(asyncio.CancelledError):
+            await finalize_session_impl(
+                db=db,
+                operational_repo=op_repo,
+                room_sync=room_sync,
+                clock=clock,
+                settings=settings,
+                session=expired_sess,
+                base_version_id=v3,
+                idempotency_key="cancel-fin",
+                rows=edited_v2,
+            )
+        assert op_repo.get_key(sid, "finalize", "cancel-fin").status == "failed"  # type: ignore[union-attr]
+
+    # 6. finalize_session_impl ignores stale pending proposal on older base_version_id
+    #    while still blocking pending proposal on current base_version_id
+    room2 = await room_sync.create_room(study_session_id="st-f1", menu_started_flow=True)
+    await room_sync.join_room(
+        room_code=room2["roomCode"], study_session_id="st-f2", menu_started_flow=True
+    )
+    c2 = await lifecycle.create_formal_session(
+        rows=VALID_ROWS,
+        initial_draft_method="partial_completion",
+        language="en",
+        idempotency_key="f-guard-2",
+        match_id=room2["matchId"],
+        player_number=1,
+    )
+    sid2 = c2["sessionId"]
+    boot2 = parse_qs(urlparse(c2["launchUrl"]).fragment)["bootstrap"][0]
+    acc2 = (await lifecycle.authorize_browser_access(sid2, boot2))["accessToken"]
+    p2_init = await lifecycle.update_language(sid2, acc2, language="en")
+    sv1 = p2_init["currentVersionId"]
+    p2_v2 = await stage.save_version(
+        sid2, acc2, base_version_id=sv1, rows=edited_v2, idempotency_key="sv2"
+    )
+    sv2 = p2_v2["currentVersionId"]
+    # Insert a stale pending proposal on old sv1 AND verify current sv2 pending still blocks
+    dialogue_repo.insert_turn(
+        turn_id="t-old", session_id=sid2, role="assistant", content="old offer",
+        version_id=sv1, request_id="r-old", created_at=clock.utc_now(),
+    )
+    dialogue_repo.insert_proposal(
+        proposal_id="prop-old-stale", session_id=sid2, assistant_turn_id="t-old",
+        base_version_id=sv1, status="pending", proposal={"summary": "stale"},
+        created_at=clock.utc_now(), idempotency_key="pk-old",
+    )
+    dialogue_repo.insert_turn(
+        turn_id="t-cur", session_id=sid2, role="assistant", content="cur offer",
+        version_id=sv2, request_id="r-cur", created_at=clock.utc_now(),
+    )
+    dialogue_repo.insert_proposal(
+        proposal_id="prop-cur-pending", session_id=sid2, assistant_turn_id="t-cur",
+        base_version_id=sv2, status="pending", proposal={"summary": "cur"},
+        created_at=clock.utc_now(), idempotency_key="pk-cur",
+    )
+    s2_obj = sessions_repo.get_session(sid2)
+    assert s2_obj is not None
+    with pytest.raises(ConflictError) as fin_err:
+        await finalize_session_impl(
+            db=db,
+            operational_repo=op_repo,
+            room_sync=room_sync,
+            clock=clock,
+            settings=settings,
+            session=s2_obj,
+            base_version_id=sv2,
+            idempotency_key="fin-blocked",
+        )
+    assert fin_err.value.code == "PENDING_PROPOSAL"
+    dialogue_repo.decide_proposal(
+        sid2, "prop-cur-pending", status="rejected", decision={"decision": "reject"},
+        candidate_version_id=None, decided_at=clock.utc_now(),
+    )
+    # Finalizing sv2 now succeeds despite stale pending proposal on older sv1, and supersedes it
+    await finalize_session_impl(
+        db=db,
+        operational_repo=op_repo,
+        room_sync=room_sync,
+        clock=clock,
+        settings=settings,
+        session=s2_obj,
+        base_version_id=sv2,
+        idempotency_key="fin-ok",
+    )
+    assert dialogue_repo.get_proposal(sid2, "prop-old-stale").status == "superseded"  # type: ignore[union-attr]

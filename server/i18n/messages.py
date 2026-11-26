@@ -519,6 +519,31 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
         "zh-CN": "已核对实际改动（共{count}格）：{details}。具体位置以地图高亮为准。",
     },
+    "proposal.solver_delta_both": {
+        "en": (
+            "Verified solvable candidate: minimum moves {before_steps} -> {after_steps}, "
+            "pushes {before_pushes} -> {after_pushes}."
+        ),
+        "zh-CN": (
+            "已验证可解候选：最少步数 {before_steps} → {after_steps}，"
+            "推动 {before_pushes} → {after_pushes}。"
+        ),
+    },
+    "proposal.solver_delta_steps": {
+        "en": "Verified solvable candidate: minimum moves {before_steps} -> {after_steps}.",
+        "zh-CN": "已验证可解候选：最少步数 {before_steps} → {after_steps}。",
+    },
+    "proposal.solver_delta_after_both": {
+        "en": (
+            "Verified solvable candidate: {after_steps} minimum moves, "
+            "{after_pushes} pushes."
+        ),
+        "zh-CN": "已验证可解候选：最少步数 {after_steps}，推动 {after_pushes}。",
+    },
+    "proposal.solver_delta_after_steps": {
+        "en": "Verified solvable candidate: {after_steps} minimum moves.",
+        "zh-CN": "已验证可解候选：最少步数 {after_steps}。",
+    },
     "intent.conflict_explanation": {
         "en": (
             "I read the new core direction as “{new_label}”, while the most recently confirmed "
@@ -746,6 +771,57 @@ def format_tradeoff_notice(
             )
         )
     return " ".join(part for part in parts if part)
+
+
+def _extract_solver_metrics(solver: Any) -> tuple[int | None, int | None]:
+    if solver is None:
+        return None, None
+    if isinstance(solver, Mapping):
+        steps = solver.get("solutionSteps")
+        pushes = solver.get("solutionPushes")
+    else:
+        steps = getattr(solver, "solution_steps", None)
+        pushes = getattr(solver, "solution_pushes", None)
+    valid_steps = steps if isinstance(steps, int) and not isinstance(steps, bool) else None
+    valid_pushes = pushes if isinstance(pushes, int) and not isinstance(pushes, bool) else None
+    return valid_steps, valid_pushes
+
+
+def format_solver_delta_notice(
+    before_solver: Mapping[str, Any] | None,
+    after_solver: Any,
+    language: str | None,
+) -> str:
+    """Format a deterministic bilingual solver delta notice from dict or SolveResult."""
+    locale = normalize_language(language)
+    before_steps, before_pushes = _extract_solver_metrics(before_solver)
+    after_steps, after_pushes = _extract_solver_metrics(after_solver)
+    if after_steps is None:
+        return ""
+    if before_steps is not None:
+        if before_pushes is not None and after_pushes is not None:
+            return get_message(
+                "proposal.solver_delta_both",
+                locale,
+                before_steps=before_steps,
+                after_steps=after_steps,
+                before_pushes=before_pushes,
+                after_pushes=after_pushes,
+            )
+        return get_message(
+            "proposal.solver_delta_steps",
+            locale,
+            before_steps=before_steps,
+            after_steps=after_steps,
+        )
+    if after_pushes is not None:
+        return get_message(
+            "proposal.solver_delta_after_both",
+            locale,
+            after_steps=after_steps,
+            after_pushes=after_pushes,
+        )
+    return get_message("proposal.solver_delta_after_steps", locale, after_steps=after_steps)
 
 
 def format_dg_fallback_summary(

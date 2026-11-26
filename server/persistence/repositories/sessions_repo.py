@@ -160,18 +160,23 @@ class SessionsRepository(_AttemptDraftMixin):
             if not session_ids:
                 return 0
             placeholders = ", ".join("?" for _ in session_ids)
-            conn.execute(
-                f"DELETE FROM audit_events WHERE session_id IN ({placeholders})",
-                session_ids,
-            )
-            conn.execute(
-                f"DELETE FROM idempotency_keys WHERE session_id IN ({placeholders})",
-                session_ids,
-            )
-            conn.execute(
-                f"DELETE FROM design_sessions WHERE session_id IN ({placeholders})",
-                session_ids,
-            )
+            for table in (
+                "conversation_turns",
+                "change_proposals",
+                "revision_challenges",
+                "play_attempts",
+                "draft_regenerations",
+                "binary_discovery_topics",
+                "component_recovery_tasks",
+                "audit_events",
+                "idempotency_keys",
+                "level_versions",
+                "design_sessions",
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE session_id IN ({placeholders})",
+                    session_ids,
+                )
             return len(session_ids)
 
     def insert_version(

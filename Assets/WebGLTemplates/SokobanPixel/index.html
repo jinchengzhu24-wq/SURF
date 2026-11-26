@@ -140,21 +140,20 @@
     <script>
       window.__SOKOBAN_UNITY_CONFIG__ = {
         buildUrl: "Build",
-        buildVersion: "?v=webgl-ui-20261120-1726",
-        loaderUrl: "Build/{{{ LOADER_FILENAME }}}?v=webgl-ui-20261120-1726",
-        dataUrl: "Build/{{{ DATA_FILENAME }}}?v=webgl-ui-20261120-1726",
-        frameworkUrl: "Build/{{{ FRAMEWORK_FILENAME }}}?v=webgl-ui-20261120-1726",
+        loaderUrl: "Build/{{{ LOADER_FILENAME }}}",
+        dataUrl: "Build/{{{ DATA_FILENAME }}}",
+        frameworkUrl: "Build/{{{ FRAMEWORK_FILENAME }}}",
 #if USE_THREADS
-        workerUrl: "Build/{{{ WORKER_FILENAME }}}?v=webgl-ui-20261120-1726",
+        workerUrl: "Build/{{{ WORKER_FILENAME }}}",
 #endif
 #if USE_WASM
-        codeUrl: "Build/{{{ CODE_FILENAME }}}?v=webgl-ui-20261120-1726",
+        codeUrl: "Build/{{{ CODE_FILENAME }}}",
 #endif
 #if MEMORY_FILENAME
-        memoryUrl: "Build/{{{ MEMORY_FILENAME }}}?v=webgl-ui-20261120-1726",
+        memoryUrl: "Build/{{{ MEMORY_FILENAME }}}",
 #endif
 #if SYMBOLS_FILENAME
-        symbolsUrl: "Build/{{{ SYMBOLS_FILENAME }}}?v=webgl-ui-20261120-1726",
+        symbolsUrl: "Build/{{{ SYMBOLS_FILENAME }}}",
 #endif
 #if BACKGROUND_FILENAME
         backgroundUrl: "Build/{{{ BACKGROUND_FILENAME.replace(/'/g, '%27') }}}",

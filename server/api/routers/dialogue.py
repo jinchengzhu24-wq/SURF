@@ -63,6 +63,7 @@ async def send_message(
         proposal_id=proposal_id,
         challenge_id=payload.challengeId,
         challenge_choice=choice,
+        exit_challenge=payload.exitChallenge,
         request_id=get_request_id(request),
         deadline=get_llm_deadline(request),
     )
@@ -84,6 +85,8 @@ async def choose_binary_proposal(
         topic_id=payload.topicId,
         question_id=payload.questionId,
         choice_id=payload.choiceId,
+        base_version_id=payload.baseVersionId,
+        display_language=payload.displayLanguage,
         idempotency_key=payload.idempotencyKey,
         request_id=get_request_id(request),
         deadline=get_llm_deadline(request),
@@ -100,7 +103,11 @@ async def cancel_binary_proposal(
 ) -> dict[str, Any]:
     validate_fields(payload, "idempotencyKey", "topicId", "baseVersionId")
     result = await container.proposal_service.cancel_binary_topic(
-        session_id, access_cookie, topic_id=payload.topicId, idempotency_key=payload.idempotencyKey
+        session_id,
+        access_cookie,
+        topic_id=payload.topicId,
+        base_version_id=payload.baseVersionId,
+        idempotency_key=payload.idempotencyKey,
     )
     return ensure_session_shape(result)
 
@@ -147,6 +154,7 @@ async def submit_intent_feedback(
         base_version_id=payload.baseVersionId,
         idempotency_key=payload.idempotencyKey,
         candidate_text=payload.candidateText,
+        source_turn_id=payload.sourceTurnId,
     )
     outcome = "rejected" if resolved_action == "reject" else "applied"
     return {"outcome": outcome, "session": ensure_session_shape(session_payload)}
@@ -163,12 +171,21 @@ async def retry_component_recovery(
 ) -> dict[str, Any]:
     validate_identifier(recovery_id, "recoveryId")
     validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    full_deadline = get_llm_deadline(request)
+    started_at = getattr(request.state, "llm_started_at", None)
+    if full_deadline is not None and isinstance(started_at, (int, float)):
+        recovery_deadline: float | None = min(full_deadline, float(started_at) + 10.0)
+    elif isinstance(started_at, (int, float)):
+        recovery_deadline = float(started_at) + 10.0
+    else:
+        recovery_deadline = full_deadline
     result = await container.recovery_service.retry_recovery(
         session_id,
         recovery_id,
         access_cookie,
+        base_version_id=payload.baseVersionId,
         idempotency_key=payload.idempotencyKey,
         request_id=get_request_id(request),
-        deadline=get_llm_deadline(request),
+        deadline=recovery_deadline,
     )
     return ensure_session_shape(result)

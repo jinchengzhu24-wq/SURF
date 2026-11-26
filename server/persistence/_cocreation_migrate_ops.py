@@ -130,6 +130,9 @@ def migrate_audit_and_ops(
 ) -> None:
     if "audit_events" not in tables:
         return
+    valid_sessions = {
+        str(row[0]) for row in dst.execute("SELECT session_id FROM design_sessions")
+    }
     existing_audits = {
         (row["session_id"], row["event_type"], row["created_at"], row["payload_json"])
         for row in dst.execute(
@@ -146,6 +149,8 @@ def migrate_audit_and_ops(
             row["payload_json"],
             row["created_at"],
         )
+        if sid not in valid_sessions:
+            continue
         if (sid, etype, created_at, pjson) not in existing_audits:
             dst.execute(
                 "INSERT INTO audit_events(session_id, event_type, payload_json, created_at) "
@@ -201,6 +206,8 @@ def migrate_audit_and_ops(
             )
 
     for (sid, topic_id), (state, updated_at) in latest_topics.items():
+        if sid not in valid_sessions:
+            continue
         cur = dst.execute(
             "INSERT INTO binary_discovery_topics(session_id, topic_id, state_json, updated_at) "
             "VALUES (?, ?, ?, ?) "
@@ -211,6 +218,8 @@ def migrate_audit_and_ops(
         stats["binary_topics"] += cur.rowcount
 
     for rec_id, (sid, kind, target_id, state, updated_at) in latest_recovery.items():
+        if sid not in valid_sessions:
+            continue
         cur = dst.execute(
             "INSERT INTO component_recovery_tasks("
             "recovery_id, session_id, target_kind, target_id, state_json, updated_at"

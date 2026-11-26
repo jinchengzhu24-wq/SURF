@@ -5,13 +5,36 @@ import { createCocreationApi, resolveApiPrefix } from "../api/cocreationApi";
 import { createUnityBridge } from "../bridge/unityBridge";
 import { AssistantBubble } from "../components/Chat/AssistantBubble";
 import { Composer } from "../components/Chat/Composer";
-import { REQUEST_COPY, en, localizeError, t, zhCN } from "../i18n";
+import { ProgressDrawer } from "../components/Chat/ProgressDrawer";
+import { ProposalCard } from "../components/Chat/ProposalCard";
+import { TooltipOverlay, hideTooltip } from "../components/Common/Tooltip";
+import { DraftPreview } from "../components/Landing/DraftPreview";
+import { MapPanel } from "../components/Workspace/MapPanel";
+import { StageSidebar } from "../components/Workspace/StageSidebar";
+import { TilePalette } from "../components/Workspace/TilePalette";
+import { REQUEST_COPY, en, formatTechnicalError, localizeError, t, zhCN } from "../i18n";
 import { createSafeStorage } from "../storage/safeStorage";
-import { composerText } from "../store/chatStore";
+import {
+  clearPendingMessage,
+  composerText,
+  translationFailures,
+} from "../store/chatStore";
 import { createDeadlineClock } from "../store/deadlineClock";
-import { draftRows, findCoordinateRoute } from "../store/editorStore";
-import { applySession, language, selectedVersionId, session, sessionId } from "../store/sessionStore";
+import { draftRows, editTile, findCoordinateRoute } from "../store/editorStore";
+import {
+  activeChallengeState,
+  applySession,
+  busy,
+  landingMode,
+  language,
+  selectedStageHasActiveDisagreement,
+  selectedVersionId,
+  session,
+  sessionId,
+} from "../store/sessionStore";
 import * as workflows from "../store/workflows";
+import { api } from "../store/workflows/shared";
+import { clearTranslationRetryTimer } from "../store/workflows/translationQueue";
 import type { Session, Turn } from "../types";
 
 const SAMPLE_ROWS = [
@@ -55,6 +78,12 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  clearTranslationRetryTimer();
+  clearPendingMessage();
+  busy.value = false;
+  translationFailures.value = new Set();
+  hideTooltip();
   cleanup();
   applySession(null);
   sessionId.value = "";
@@ -222,6 +251,96 @@ describe("cocreationApi prefixing and encoding", () => {
     await client.getSession("sess/with space");
     expect(fetched[0]).toBe("/cocreation/api/sessions/sess%2Fwith%20space");
   });
+
+  it("preserves top-level requestId and X-Request-ID inside error details and marks cancelDraftRegeneration safe to retry", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/cancel")) {
+        return new Response("upstream error", {
+          status: 502,
+          headers: { "X-Request-ID": "req-cancel-502" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          detail: { code: "UPSTREAM_ERROR", message: "Model failed", details: { attemptsUsed: 1 } },
+          requestId: "req-body-top",
+        }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json",
+            "X-Request-ID": "req-header-500",
+          },
+        },
+      );
+    });
+
+    const client = createCocreationApi({
+      apiPrefix: "",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(client.getSession("s1")).rejects.toMatchObject({
+      code: "UPSTREAM_ERROR",
+      details: expect.objectContaining({
+        attemptsUsed: 1,
+        httpStatus: 500,
+        requestId: "req-header-500",
+      }),
+    });
+
+    // Without X-Request-ID header, top-level requestId from JSON body is still preserved
+    fetchMock.mockImplementationOnce(async () =>
+      new Response(
+        JSON.stringify({
+          detail: { code: "UPSTREAM_ERROR", message: "Model failed" },
+          requestId: "req-only-body",
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await expect(client.getSession("s1")).rejects.toMatchObject({
+      details: expect.objectContaining({ requestId: "req-only-body" }),
+    });
+
+    await expect(client.cancelDraftRegeneration("s1", "req-1")).rejects.toMatchObject({
+      retryable: true,
+      details: expect.objectContaining({ requestId: "req-cancel-502", httpStatus: 502 }),
+    });
+
+    // Unified backend error envelope (top-level string detail + error/details objects)
+    fetchMock.mockImplementationOnce(async () =>
+      new Response(
+        JSON.stringify({
+          detail: "Outer wall breach",
+          error: {
+            code: "OPEN_OUTER_WALL",
+            message: "Outer wall breach",
+            details: { row: 0, column: 4, tile: "@" },
+            retryable: false,
+          },
+          code: "OPEN_OUTER_WALL",
+          message: "Outer wall breach",
+          details: { row: 0, column: 4, tile: "@" },
+          retryable: false,
+          requestId: "req-unified-env",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await expect(client.getSession("s1")).rejects.toMatchObject({
+      code: "OPEN_OUTER_WALL",
+      retryable: false,
+      details: expect.objectContaining({
+        row: 0,
+        column: 4,
+        tile: "@",
+        httpStatus: 400,
+        requestId: "req-unified-env",
+      }),
+    });
+  });
 });
 
 describe("unityBridge protocol v5 & safe URL validation", () => {
@@ -387,5 +506,413 @@ describe("Coordinate route BFS & Chat components", () => {
     expect(workflows.retryDelay(0)).toBe(2_000);
     expect(workflows.retryDelay(2)).toBe(8_000);
     expect(workflows.retryDelay(10)).toBe(60_000);
+  });
+
+  it("wires map/mini-map tile tooltips with aria-describedby restoration, challengeCard fallback, hypothesisId, and DraftPreview title", async () => {
+    vi.useFakeTimers();
+    const s = makeSession({
+      demoMode: false,
+      initialDraftMethod: "description_generation",
+      turns: [
+        {
+          turnId: "t_challenge",
+          versionId: "v1",
+          sequence: 1,
+          role: "assistant",
+          content: "Let us compare directions.",
+          language: "en",
+          guidance: {
+            challengeCard: {
+              status: "active",
+              subject: "ai_revision_challenge",
+              phase: "choice_pending",
+              challengeId: "ch_fallback_1",
+              userPosition: "Keep corridor tight",
+              coreDisagreement: "Box placement",
+              nextQuestion: "Use original plan?",
+            },
+          },
+        },
+      ],
+      proposals: [
+        {
+          proposalId: "prop_1",
+          baseVersionId: "v1",
+          status: "pending",
+          summary: "Move box",
+          proposedRows: SAMPLE_ROWS.slice(),
+          diff: [{ x: 4, y: 2, before: ".", after: "#" }],
+        },
+      ],
+      progressContexts: [
+        {
+          versionId: "v1",
+          questionRecords: [],
+          designInclinations: [
+            {
+              hypothesisId: "hyp_1",
+              statement: "Keep tight corridor",
+              confirmedAtStageNumber: 1,
+              evidenceTrail: [],
+            },
+          ],
+        },
+      ],
+    });
+    sessionId.value = s.sessionId;
+    selectedVersionId.value = "v1";
+    applySession(s);
+    draftRows.value = SAMPLE_ROWS.slice();
+    landingMode.value = "formal";
+
+    expect(selectedStageHasActiveDisagreement.value).toBe(true);
+    expect(activeChallengeState.value).toEqual({
+      challengeId: "ch_fallback_1",
+      status: "choice_pending",
+    });
+
+    const { container } = render(
+      <div>
+        <StageSidebar />
+        <AssistantBubble turn={s.turns[0]} />
+        <ProposalCard />
+        <ProgressDrawer />
+        <MapPanel />
+        <DraftPreview />
+        <TooltipOverlay />
+      </div>,
+    );
+
+    expect(container.querySelector(".disagreement-card")?.textContent).toContain("Use original plan?");
+    expect(container.querySelector(".progress-item-inclination")?.textContent).toContain("Keep tight corridor");
+
+    // Focus a tile in MapPanel -> TooltipOverlay opens immediately and sets aria-describedby="uiTooltip"
+    const tileBtn = container.querySelector<HTMLButtonElement>('.map-grid button[data-x="2"][data-y="2"]')!;
+    fireEvent.focusIn(tileBtn);
+    await Promise.resolve();
+    expect(tileBtn.getAttribute("aria-describedby")).toContain("uiTooltip");
+    expect(document.querySelector("#uiTooltip")?.textContent).toContain("P");
+
+    fireEvent.focusOut(tileBtn, { relatedTarget: document.body });
+    await Promise.resolve();
+    expect(tileBtn.getAttribute("aria-describedby")).toBeNull();
+
+    // Hover a tile in StageSidebar .mini-map -> stagePreview tooltip
+    const stageMiniCell = container.querySelector<HTMLElement>('.stage-card .mini-map i[data-x="2"][data-y="2"]')!;
+    const hoverEv1 = new Event("pointerover", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(hoverEv1, "pointerType", { value: "mouse" });
+    stageMiniCell.dispatchEvent(hoverEv1);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(document.querySelector("#uiTooltip")?.textContent).toContain(t("en", "help.tileStagePreview"));
+
+    // Hover a tile in ProposalCard .mini-map.proposal-map -> preview tooltip
+    const proposalMiniCell = container.querySelector<HTMLElement>('.proposal-map i[data-x="5"][data-y="2"]')!;
+    const hoverEv2 = new Event("pointerover", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(hoverEv2, "pointerType", { value: "mouse" });
+    proposalMiniCell.dispatchEvent(hoverEv2);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(document.querySelector("#uiTooltip")?.textContent).toContain(t("en", "help.tilePreview"));
+
+    // DraftPreview distinguishes formal vs demo preview titles on landing
+    applySession(makeSession({ languageLocked: false, demoMode: false, initialDraftMethod: "description_generation" }));
+    landingMode.value = "formal";
+    const { container: formalDraftContainer } = render(<DraftPreview />);
+    const formalTitle = formalDraftContainer.querySelector("#draftPreviewTitle")?.textContent;
+    expect(formalTitle).toContain(t("en", "description_generation"));
+
+    applySession(makeSession({ languageLocked: false, demoMode: true, initialDraftMethod: "algorithm_demo" }));
+    landingMode.value = "demo-preview";
+    const { container: demoDraftContainer } = render(<DraftPreview />);
+    const demoTitle = demoDraftContainer.querySelector("#draftPreviewTitle")?.textContent;
+    expect(demoTitle).toContain(t("en", "algorithm_demo"));
+    expect(formalTitle).not.toBe(demoTitle);
+
+    vi.useRealTimers();
+  });
+
+  it("gates Composer on choice_pending challenge, ProposalCard on active disagreement, and MapPanel/TilePalette during binary flow", async () => {
+    vi.useFakeTimers();
+
+    // 1. Challenge choice_pending disables Composer free-text input and ProposalCard accept/reject
+    const challengeSession = makeSession({
+      turns: [
+        {
+          turnId: "t_ch",
+          versionId: "v1",
+          sequence: 1,
+          role: "assistant",
+          content: "Compare both directions.",
+          language: "en",
+          guidance: {
+            challengeCard: {
+              status: "active",
+              subject: "ai_revision_challenge",
+              phase: "choice_pending",
+              challengeId: "ch_gate_1",
+              nextQuestion: "Use original plan?",
+            },
+          },
+        },
+      ],
+      proposals: [
+        {
+          proposalId: "prop_gate",
+          baseVersionId: "v1",
+          status: "pending",
+          summary: "Add wall",
+          proposedRows: SAMPLE_ROWS.slice(),
+          diff: [{ x: 4, y: 2, before: ".", after: "#" }],
+        },
+      ],
+      interactionState: {
+        versionId: "v1",
+        revision: 2,
+        proposalBlocked: true,
+        recoveries: [],
+      },
+    });
+    sessionId.value = challengeSession.sessionId;
+    selectedVersionId.value = "v1";
+    applySession(challengeSession);
+    draftRows.value = SAMPLE_ROWS.slice();
+
+    const { container: gateContainer } = render(
+      <div>
+        <Composer />
+        <ProposalCard />
+      </div>,
+    );
+    const textarea = gateContainer.querySelector<HTMLTextAreaElement>("#messageInput")!;
+    expect(textarea.disabled).toBe(true);
+    expect(textarea.getAttribute("placeholder")).toBe(t("en", "challengeChoicePlaceholder"));
+
+    const proposalBtns = gateContainer.querySelectorAll<HTMLButtonElement>(".proposal-actions button");
+    expect(proposalBtns).toHaveLength(2);
+    expect(proposalBtns[0].disabled).toBe(true);
+    expect(proposalBtns[1].disabled).toBe(true);
+    expect(gateContainer.querySelector(".proposal-card")?.textContent).toContain(
+      t("en", "proposalDisagreementActive"),
+    );
+
+    // 2. Binary discovery active + dirty draft blocks MapPanel/TilePalette/editTile and shows explicit reset hint
+    const binarySession = makeSession({
+      proposalFlowState: {
+        active: true,
+        status: "clarifying",
+        interactionMode: "binary_choice",
+        topicId: "topic_gate",
+      },
+    });
+    applySession(binarySession);
+    const dirtyRows = SAMPLE_ROWS.slice();
+    dirtyRows[1] = "#.#........#";
+    draftRows.value = dirtyRows;
+
+    // editTile must be ignored during active binary flow
+    editTile(4, 1);
+    expect(draftRows.value[1]).toBe("#.#........#");
+
+    const { container: mapContainer } = render(
+      <div>
+        <MapPanel />
+        <TooltipOverlay />
+      </div>,
+    );
+    expect(mapContainer.querySelector("#mapControlHint")?.textContent).toContain(
+      t("en", "hint.binaryDraftReset"),
+    );
+    const saveBtn = mapContainer.querySelector<HTMLButtonElement>(".map-actions .primary-button")!;
+    const discardBtn = mapContainer.querySelector<HTMLButtonElement>(".map-actions .secondary-button")!;
+    expect(saveBtn.disabled).toBe(true);
+    expect(discardBtn.disabled).toBe(false);
+
+    // TilePalette uses aria-disabled="true" so hover/focus still triggers blocked reason tooltip
+    const paletteBtn = mapContainer.querySelector<HTMLButtonElement>(".palette-button")!;
+    expect(paletteBtn.disabled).toBe(false);
+    expect(paletteBtn.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.focus(paletteBtn);
+    await Promise.resolve();
+    expect(document.querySelector("#uiTooltip")?.textContent).toContain(
+      t("en", "hint.binaryDraftReset"),
+    );
+    fireEvent.blur(paletteBtn);
+
+    vi.useRealTimers();
+  });
+
+  it("delegates DraftPreview tooltips with aria-hidden cells and restores StageSidebar card tooltip on mini-map exit", async () => {
+    vi.useFakeTimers();
+    const s = makeSession({ languageLocked: false, demoMode: true });
+    sessionId.value = s.sessionId;
+    selectedVersionId.value = "v1";
+    applySession(s);
+    landingMode.value = "demo-preview";
+
+    const { container } = render(
+      <div>
+        <DraftPreview />
+        <StageSidebar />
+        <TooltipOverlay />
+      </div>,
+    );
+
+    const previewCells = container.querySelectorAll<HTMLElement>(".draft-preview-cell");
+    expect(previewCells).toHaveLength(120);
+    for (const cell of previewCells) {
+      expect(cell.getAttribute("aria-hidden")).toBe("true");
+    }
+
+    const playerPreviewCell = container.querySelector<HTMLElement>(
+      '.draft-preview-cell[data-x="2"][data-y="2"]',
+    )!;
+    const cellHover = new Event("pointerover", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(cellHover, "pointerType", { value: "mouse" });
+    playerPreviewCell.dispatchEvent(cellHover);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(document.querySelector("#uiTooltip")?.textContent).toContain("P");
+
+    // StageSidebar: hover mini-map -> leave mini-map onto stage-card -> outer stage tooltip is restored
+    const stageCard = container.querySelector<HTMLButtonElement>(".stage-card")!;
+    const miniMap = stageCard.querySelector<HTMLElement>(".mini-map")!;
+    const miniCell = miniMap.querySelector<HTMLElement>('i[data-x="2"][data-y="2"]')!;
+    const miniHover = new Event("pointerover", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(miniHover, "pointerType", { value: "mouse" });
+    miniCell.dispatchEvent(miniHover);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(document.querySelector("#uiTooltip")?.textContent).toContain(
+      t("en", "help.tileStagePreview"),
+    );
+
+    fireEvent.pointerLeave(miniMap);
+    expect(document.querySelector("#uiTooltip")).toBeNull();
+
+    const cardTop = stageCard.querySelector<HTMLElement>(".stage-card-top")!;
+    const backToCard = new Event("pointerover", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(backToCard, "pointerType", { value: "mouse" });
+    cardTop.dispatchEvent(backToCard);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(document.querySelector("#uiTooltip")?.textContent).toContain(t("en", "help.stageBody"));
+
+    vi.useRealTimers();
+  });
+
+  it("maps newly added backend error codes, auto-refreshes stale actions, and retries missing translations on partial 200 OK", async () => {
+    const newCodes = [
+      "PENDING_PROPOSAL",
+      "TURN_NOT_FOUND",
+      "STALE_REVISION_BINDING",
+      "UNBOUND_REVISION",
+      "STALE_PROPOSAL",
+      "QUESTION_FEEDBACK_STALE",
+      "INTENT_HYPOTHESIS_STALE",
+      "DEADLINE_EXCEEDED",
+      "MODEL_OUTPUT_TRUNCATED",
+      "MODEL_JSON_INVALID",
+      "MODEL_SCHEMA_INVALID",
+      "MODEL_VALIDATION_FAILED",
+      "UPSTREAM_AUTHENTICATION_FAILED",
+      "UPSTREAM_REQUEST_REJECTED",
+    ];
+    for (const code of newCodes) {
+      expect(localizeError("en", { code })).not.toBe(t("en", "errors.GENERIC"));
+      expect(localizeError("zh-CN", { code })).not.toBe(t("zh-CN", "errors.GENERIC"));
+      expect(formatTechnicalError("en", { code })?.message).not.toBe(t("en", "errors.GENERIC"));
+      expect(formatTechnicalError("zh-CN", { code })?.message).not.toBe(
+        t("zh-CN", "errors.GENERIC"),
+      );
+    }
+
+    // Auto-refresh on STALE_PROPOSAL in decideProposal
+    const s = makeSession({
+      proposals: [
+        {
+          proposalId: "prop_stale",
+          baseVersionId: "v1",
+          status: "pending",
+          summary: "Move box",
+          proposedRows: SAMPLE_ROWS.slice(),
+          diff: [],
+        },
+      ],
+    });
+    sessionId.value = s.sessionId;
+    selectedVersionId.value = "v1";
+    applySession(s);
+
+    const refreshedSession = makeSession({
+      proposals: [{ ...s.proposals[0], status: "superseded" }],
+    });
+    vi.spyOn(api, "decideProposal").mockRejectedValueOnce({
+      code: "STALE_PROPOSAL",
+      message: "Stale",
+      retryable: false,
+    });
+    const getSessionSpy = vi.spyOn(api, "getSession").mockResolvedValue(refreshedSession);
+    await workflows.decideProposal(s.proposals[0], "accept");
+    expect(getSessionSpy).toHaveBeenCalledWith("sess_1");
+    expect(session.value?.proposals[0].status).toBe("superseded");
+
+    // Partial 200 OK from translateTurns only clears turns with targetLanguage and schedules bounded retry for missing ones
+    vi.useFakeTimers();
+    const transSession = makeSession({
+      language: "zh-CN",
+      turns: [
+        {
+          turnId: "t1",
+          versionId: "v1",
+          sequence: 1,
+          role: "assistant",
+          content: "First",
+          language: "en",
+        },
+        {
+          turnId: "t2",
+          versionId: "v1",
+          sequence: 2,
+          role: "assistant",
+          content: "Second",
+          language: "en",
+        },
+      ],
+    });
+    language.value = "zh-CN";
+    applySession(transSession);
+
+    const translateSpy = vi
+      .spyOn(api, "translateTurns")
+      .mockResolvedValueOnce({
+        ...transSession,
+        turns: [
+          {
+            ...transSession.turns[0],
+            translations: { "zh-CN": { body: "第一条" } },
+          },
+          transSession.turns[1],
+        ],
+      })
+      .mockResolvedValue({
+        ...transSession,
+        turns: [
+          {
+            ...transSession.turns[0],
+            translations: { "zh-CN": { body: "第一条" } },
+          },
+          {
+            ...transSession.turns[1],
+            translations: { "zh-CN": { body: "第二条" } },
+          },
+        ],
+      });
+
+    await workflows.ensureVisibleTranslations();
+    expect(translateSpy).toHaveBeenCalledTimes(1);
+    expect(translationFailures.value.has("t1:zh-CN")).toBe(false);
+    expect(translationFailures.value.has("t2:zh-CN")).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(translateSpy).toHaveBeenCalledTimes(2);
+    expect(translationFailures.value.has("t2:zh-CN")).toBe(false);
+
+    vi.useRealTimers();
   });
 });

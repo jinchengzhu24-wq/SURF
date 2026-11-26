@@ -13,6 +13,7 @@ from server.core.clock import FakeClock
 from server.core.grid import parse_grid
 from server.core.llm_client import LLMValidationError, TransportResponse, UpstreamLLMError
 from server.core.solver import solve_min_pushes as real_solve_min_pushes
+from server.core.solver import solve_min_steps
 from server.llm import (
     BinaryDiscoveryPipeline,
     ChatPipeline,
@@ -760,6 +761,7 @@ async def test_level_plan_pipeline_honors_zero_water_and_preferences() -> None:
     assert res.plan["minWaterAreas"] == 0
     assert res.plan["maxWaterAreas"] == 0
     assert res.plan["archetype"] == "goal_room"
+    assert transport.calls[0]["max_tokens"] == 4096
 
 
 def test_grounding_precompiled_regexes_coordinate_links_and_visible_language() -> None:
@@ -796,3 +798,738 @@ def test_grounding_precompiled_regexes_coordinate_links_and_visible_language() -
     assert validate_visible_language("在 Stage 1 里讨论 Sokoban 布局和 P/B1/T1。", "zh-CN") == []
     leaks = validate_visible_language("查看 designContextPatch 和 stageSnapshot。", "zh-CN")
     assert len(leaks) == 2
+
+
+def test_compute_route_features_and_evaluate_requirements() -> None:
+    """Verify witness route features (alternations/firstRuns/entityPositions) & metric eval."""
+    rows = [
+        "############",
+        "#..........#",
+        "#..p.......#",
+        "#....s..t..#",
+        "#..........#",
+        "#....s..t..#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "############",
+    ]
+    grid = parse_grid(rows)
+    bindings = {
+        "identityStatus": "exact",
+        "entities": [
+            {"id": "P", "label": "P", "kind": "player", "row": 3, "column": 4},
+            {"id": "B1", "label": "B1", "kind": "box", "row": 4, "column": 6},
+            {"id": "B2", "label": "B2", "kind": "box", "row": 6, "column": 6},
+            {"id": "T1", "label": "T1", "kind": "target", "row": 4, "column": 9},
+            {"id": "T2", "label": "T2", "kind": "target", "row": 6, "column": 9},
+        ],
+    }
+    clock = FakeClock()
+    solve_res = solve_min_steps(grid, deadline_seconds=2.5, clock=clock)
+    features = _proposal_eval.compute_route_features(
+        grid,
+        solve_res,
+        entity_bindings=bindings,
+        need_min_pushes=False,
+        deadline_seconds=2.5,
+        clock=clock,
+    )
+    assert features["routeMode"] == "verified_route_summary"
+    assert features["pushBlocks"] >= 2
+    assert features["longestPushRun"] >= 1
+    assert set(features["firstRuns"]) == {"B1", "B2"}
+    assert set(features["interruptions"]) == {"B1", "B2"}
+    assert features["entityPositions"]["B1"] == (4, 6)
+    assert features["entityPositions"]["B2"] == (6, 6)
+
+    outcomes = _proposal_eval.evaluate_requirements(
+        grid.rows,
+        grid.rows,
+        {
+            "requirements": [
+                {
+                    "requirementId": "req-alt-1",
+                    "component": "gameplay",
+                    "property": "boxAlternations",
+                    "relation": "decrease",
+                    "strength": "goal",
+                    "entities": [],
+                    "value": None,
+                    "unit": "none",
+                    "priorityEvidenceSpan": "",
+                    "focused": False,
+                    "sourceTurnId": "t1",
+                    "evidenceSpan": "fewer alternations",
+                    "statement": "Fewer box alternations",
+                    "scope": "all",
+                }
+            ]
+        },
+        {**features, "boxAlternations": 2},
+        {**features, "boxAlternations": 0},
+    )
+    assert outcomes[0]["passed"] is True
+
+
+async def test_normalize_requirement_record_prunes_protected_invariants_in_compile() -> None:
+    """Verify redundant platform-protected invariants are pruned while editable goals remain."""
+    normalized, notes = proposal_mod.normalize_requirement_record(
+        {
+            "requirements": [
+                {
+                    "component": "player",
+                    "property": "count",
+                    "relation": "preserve",
+                    "strength": "constraint",
+                    "entities": ["P"],
+                    "sourceTurnId": "turn-1",
+                    "evidenceSpan": "keep the player and boxes",
+                    "statement": "Preserve player count",
+                    "scope": "all",
+                },
+                {
+                    "component": "box",
+                    "property": "distance",
+                    "relation": "decrease",
+                    "strength": "goal",
+                    "entities": ["box", "B1"],
+                    "sourceTurnId": "turn-1",
+                    "evidenceSpan": "move B1 closer",
+                    "statement": "Move B1 closer to its target",
+                    "scope": "all",
+                },
+                {
+                    "component": "wall",
+                    "property": "count",
+                    "relation": "decrease",
+                    "strength": "goal",
+                    "entities": [],
+                    "sourceTurnId": "turn-1",
+                    "evidenceSpan": "simplify the middle",
+                    "statement": "Remove a middle wall",
+                    "scope": "all",
+                },
+            ],
+            "automaticBindings": [
+                {"entity": "box", "role": "box", "row": 1, "column": 1},
+                {"entity": "B1", "role": "box", "row": 3, "column": 5},
+            ],
+            "exactTransitions": [],
+        },
+        user_turns=[
+            {
+                "id": "turn-1",
+                "content": "keep the player and boxes, move B1 closer, simplify the middle",
+            }
+        ],
+        snapshot={"entities": [{"id": "B1", "role": "box", "row": 3, "column": 5}]},
+    )
+    assert "dropped_platform_protection" in notes
+    assert len(normalized["requirements"]) == 2
+    assert normalized["requirements"][0]["entities"] == ["B1"]
+    assert len(normalized["automaticBindings"]) == 1
+    assert normalized["automaticBindings"][0]["entity"] == "B1"
+
+    clock = FakeClock()
+    transport = FakeAsyncTransport(
+        [
+            {
+                "requirements": [
+                    {
+                        "component": "target",
+                        "property": "count",
+                        "relation": "preserve",
+                        "strength": "invariant",
+                        "entities": ["T1"],
+                        "value": None,
+                        "unit": "none",
+                        "priorityEvidenceSpan": "",
+                        "focused": False,
+                        "sourceTurnId": "t1",
+                        "evidenceSpan": "keep targets",
+                        "statement": "Keep target count",
+                        "scope": "all",
+                    },
+                    {
+                        "component": "water",
+                        "property": "count",
+                        "relation": "decrease",
+                        "strength": "goal",
+                        "entities": [],
+                        "value": None,
+                        "unit": "none",
+                        "priorityEvidenceSpan": "",
+                        "focused": False,
+                        "sourceTurnId": "t1",
+                        "evidenceSpan": "Reduce water",
+                        "statement": "Remove a water tile",
+                        "scope": "all",
+                    },
+                ],
+                "automaticBindings": [],
+                "exactTransitions": [],
+            }
+        ]
+    )
+    pipeline = ProposalPipeline(transport, model="kimi-k2.6", clock=clock)
+    compiled = await pipeline.compile_requirements(
+        grid_or_rows=SAMPLE_ROWS,
+        designer_turns=[{"id": "t1", "content": "Reduce water"}],
+    )
+    assert len(compiled["requirements"]) == 1
+    assert compiled["requirements"][0]["component"] == "water"
+
+
+async def test_chat_pipeline_strips_unbound_revision_offer_in_ordinary_chat() -> None:
+    clock = FakeClock()
+    grid = parse_grid(SAMPLE_ROWS)
+    payload = _chat_payload("We can open the center lane.")
+    payload["revisionOffer"] = {
+        "summary": "Remove center wall",
+        "rationale": "Clears the middle passage.",
+        "objective": "Open lane",
+        "changes": [
+            {"row": 4, "column": 6, "before": "#", "after": ".", "operation": "remove_wall"}
+        ],
+        "preserve": ["boxes", "targets", "player"],
+        "expectedEffect": "Shorter route",
+    }
+    transport = FakeAsyncTransport([payload])
+    pipeline = ChatPipeline(transport, model="kimi-k2.6", clock=clock)
+    reply = await pipeline.generate_chat_reply(
+        conversation=[{"role": "user", "content": "Any thoughts?"}],
+        grid_or_rows=grid,
+        language="en",
+    )
+    assert reply.guidance["proposalOffer"] is None
+    assert transport.calls[0]["max_tokens"] == 3200
+
+
+async def test_binary_discovery_merges_strategies_normalizes_reqs_checks_lang_and_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock(monotonic_time=10.0)
+    grid = parse_grid(SAMPLE_ROWS)
+
+    # First question attempt 1 leaks an internal token in question -> retried;
+    # attempt 2 includes a redundant platform-protected invariant in initialRequirements -> pruned!
+    t1 = FakeAsyncTransport(
+        [
+            {
+                "action": "ask",
+                "question": "Should we inspect stageSnapshot or clear water?",
+                "note": "Both options are safe.",
+                "branches": [
+                    {
+                        "label": "Clear center wall",
+                        "strategy": {
+                            "effect": "open_route",
+                            "focus": {"row": 4, "column": 6, "radius": 1},
+                            "operators": ["remove_wall"],
+                            "preserve": ["water", "boxes", "targets", "player"],
+                            "editBudget": 1,
+                            "metricGoals": [],
+                            "requiredTransitions": [],
+                            "anchorEntities": [],
+                            "playObjective": None,
+                            "displayReason": None,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "internal_walls",
+                            "focus": {"row": 4, "column": 6, "radius": 1},
+                            "corridor": None,
+                        },
+                    },
+                    {
+                        "label": "Clear center water",
+                        "strategy": {
+                            "effect": "open_route",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "operators": ["remove_water"],
+                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "editBudget": 1,
+                            "metricGoals": [],
+                            "requiredTransitions": [],
+                            "anchorEntities": [],
+                            "playObjective": None,
+                            "displayReason": None,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "corridor": None,
+                        },
+                    },
+                ],
+                "planStrategies": [],
+                "protectedEntities": [],
+                "initialRequirements": {
+                    "requirements": [
+                        {
+                            "component": "gameplay",
+                            "property": "experience",
+                            "relation": "seek",
+                            "strength": "goal",
+                            "entities": [],
+                            "value": None,
+                            "unit": "none",
+                            "priorityEvidenceSpan": "",
+                            "focused": False,
+                            "sourceTurnId": "t1",
+                            "evidenceSpan": "open up the center",
+                            "statement": "Open center",
+                            "scope": "all",
+                        }
+                    ],
+                    "automaticBindings": [],
+                    "exactTransitions": [],
+                },
+            },
+            {
+                "action": "ask",
+                "question": "Which obstacle should we clear first?",
+                "note": "Both keep the map solvable.",
+                "branches": [
+                    {
+                        "label": "Clear center wall",
+                        "strategy": {
+                            "effect": "open_route",
+                            "focus": {"row": 4, "column": 6, "radius": 1},
+                            "operators": ["remove_wall"],
+                            "preserve": ["water", "boxes", "targets", "player"],
+                            "editBudget": 1,
+                            "metricGoals": [],
+                            "requiredTransitions": [],
+                            "anchorEntities": [],
+                            "playObjective": None,
+                            "displayReason": None,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "internal_walls",
+                            "focus": {"row": 4, "column": 6, "radius": 1},
+                            "corridor": None,
+                        },
+                    },
+                    {
+                        "label": "Clear center water",
+                        "strategy": {
+                            "effect": "open_route",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "operators": ["remove_water"],
+                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "editBudget": 1,
+                            "metricGoals": [],
+                            "requiredTransitions": [],
+                            "anchorEntities": [],
+                            "playObjective": None,
+                            "displayReason": None,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "corridor": None,
+                        },
+                    },
+                ],
+                "planStrategies": [],
+                "protectedEntities": [],
+                "initialRequirements": {
+                    "requirements": [
+                        {
+                            "component": "box",
+                            "property": "positions",
+                            "relation": "preserve",
+                            "strength": "invariant",
+                            "entities": ["B1"],
+                            "value": None,
+                            "unit": "none",
+                            "priorityEvidenceSpan": "",
+                            "focused": False,
+                            "sourceTurnId": "t1",
+                            "evidenceSpan": "open up the center",
+                            "statement": "Keep box fixed",
+                            "scope": "all",
+                        },
+                        {
+                            "component": "gameplay",
+                            "property": "experience",
+                            "relation": "seek",
+                            "strength": "goal",
+                            "entities": [],
+                            "value": None,
+                            "unit": "none",
+                            "priorityEvidenceSpan": "",
+                            "focused": False,
+                            "sourceTurnId": "t1",
+                            "evidenceSpan": "open up the center",
+                            "statement": "Open center",
+                            "scope": "all",
+                        },
+                    ],
+                    "automaticBindings": [],
+                    "exactTransitions": [],
+                },
+            },
+        ]
+    )
+    b1 = BinaryDiscoveryPipeline(t1, model="kimi-k2.6", clock=clock)
+    res1 = await b1.run_step(
+        grid_or_rows=grid,
+        initial_request="open up the center",
+        initial_designer_turns=[{"id": "t1", "content": "Please open up the center"}],
+        language="en",
+        deadline=10.0 + 116.0,
+    )
+    assert res1.attempts_used == 2
+    assert t1.calls[0]["max_tokens"] == 4096
+    assert t1.calls[0]["timeout_seconds"] == pytest.approx(70.0)
+    assert len(res1.initial_requirements["requirements"]) == 1
+
+    # Question 2: prior selected choice removes wall (and preserves water);
+    # current branch removes water (and preserves walls) -> must merge operators & focus!
+    prior_choice = {
+        "questionId": "q1",
+        "choiceId": "c1",
+        "label": "Clear center wall",
+        "promise": {
+            "kind": "reduce_obstacles",
+            "component": "internal_walls",
+            "focus": {"row": 4, "column": 6, "radius": 1},
+            "corridor": None,
+        },
+        "strategy": {
+            "effect": "open_route",
+            "focus": {"row": 4, "column": 6, "radius": 1},
+            "operators": ["remove_wall"],
+            "preserve": ["water", "boxes", "targets", "player"],
+            "editBudget": 1,
+            "metricGoals": [],
+            "requiredTransitions": [],
+            "anchorEntities": [],
+            "playObjective": None,
+            "displayReason": None,
+        },
+    }
+    t2 = FakeAsyncTransport(
+        [
+            {
+                "action": "ask",
+                "question": "Also adjust water or adjust bottom?",
+                "note": "Second step.",
+                "branches": [
+                    {
+                        "label": "Also clear water",
+                        "strategy": {
+                            "effect": "open_route",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "operators": ["remove_water"],
+                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "editBudget": 1,
+                            "metricGoals": [],
+                            "requiredTransitions": [],
+                            "anchorEntities": [],
+                            "playObjective": None,
+                            "displayReason": None,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "corridor": None,
+                        },
+                    },
+                    {
+                        "label": "Clear water widely",
+                        "strategy": {
+                            "effect": "open_route",
+                            "focus": None,
+                            "operators": ["remove_water"],
+                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "editBudget": 2,
+                            "metricGoals": [],
+                            "requiredTransitions": [],
+                            "anchorEntities": [],
+                            "playObjective": None,
+                            "displayReason": None,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "water",
+                            "focus": None,
+                            "corridor": None,
+                        },
+                    },
+                ],
+                "planStrategies": [],
+                "protectedEntities": [],
+                "initialRequirements": None,
+            }
+        ]
+    )
+    b2 = BinaryDiscoveryPipeline(t2, model="kimi-k2.6", clock=clock)
+    res2 = await b2.run_step(
+        grid_or_rows=grid,
+        initial_request="open up the center",
+        initial_designer_turns=[{"id": "t1", "content": "Please open up the center"}],
+        question_count=1,
+        selected_choices=[prior_choice],
+        verified_initial_requirements=res1.initial_requirements,
+        language="en",
+        deadline=10.0 + 50.0,
+    )
+    assert len(res2.branch_candidates) == 2
+    # model_deadline = deadline - 20.0 = 40.0; timeout = min(70, 40 - 10) = 30.0
+    assert t2.calls[0]["timeout_seconds"] == pytest.approx(30.0)
+
+
+async def test_proposal_pipeline_merges_mutually_exclusive_branches_and_enforces_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock(monotonic_time=5.0)
+    grid = parse_grid(SAMPLE_ROWS)
+    captured_search_deadlines: list[float | None] = []
+    real_search = proposal_mod.search_revision_plan
+
+    def _spy_search(*args: Any, **kwargs: Any) -> Any:
+        captured_search_deadlines.append(kwargs.get("deadline"))
+        return real_search(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_mod, "search_revision_plan", _spy_search)
+
+    # LLM MapOperations returns a candidate violating preserved_components ("walls") -> rejected;
+    # fallback deterministic beam search uses merged joint strategy (remove_wall + remove_water)!
+    t = FakeAsyncTransport(
+        [
+            {
+                "candidates": [
+                    {
+                        "strategyIndex": 1,
+                        "rationale": "Try removing wall despite preserved_components",
+                        "operations": [
+                            {"row": 4, "column": 6, "op": "remove_wall", "from": "#", "to": "."}
+                        ],
+                    }
+                ]
+            }
+        ]
+    )
+    pipeline = ProposalPipeline(t, model="kimi-k2.6", clock=clock)
+    precompiled = [
+        {
+            "effect": "open_route",
+            "focus": {"row": 4, "column": 6, "radius": 1},
+            "operators": ["remove_wall"],
+            "preserve": ["water", "boxes", "targets", "player"],
+            "editBudget": 1,
+            "metricGoals": [],
+            "requiredTransitions": [],
+            "anchorEntities": [],
+            "playObjective": None,
+            "displayReason": None,
+        },
+        {
+            "effect": "open_route",
+            "focus": {"row": 5, "column": 6, "radius": 1},
+            "operators": ["remove_water"],
+            "preserve": ["walls", "boxes", "targets", "player"],
+            "editBudget": 1,
+            "metricGoals": [],
+            "requiredTransitions": [],
+            "anchorEntities": [],
+            "playObjective": None,
+            "displayReason": None,
+        },
+    ]
+    promises = [
+        {
+            "kind": "reduce_obstacles",
+            "component": "internal_walls",
+            "focus": {"row": 4, "column": 6, "radius": 1},
+            "corridor": None,
+        },
+        {
+            "kind": "reduce_obstacles",
+            "component": "water",
+            "focus": {"row": 5, "column": 6, "radius": 1},
+            "corridor": None,
+        },
+    ]
+    res = await pipeline.generate_proposal(
+        grid_or_rows=grid,
+        authorized_brief="Clear wall and water",
+        precompiled_strategies=precompiled,
+        binary_promises=promises,
+        deadline=5.0 + 60.0,
+    )
+    assert res.source == "deterministic_beam_search"
+    assert len(res.changes) == 2
+    assert captured_search_deadlines == [pytest.approx(25.0)]
+
+    # Verify preserved_components rejects LLM MapOperationsPayload editing preserved component
+    t_pres = FakeAsyncTransport(
+        [
+            {
+                "strategies": [
+                    {
+                        "effect": "open_route",
+                        "focus": None,
+                        "operators": ["remove_wall", "remove_water"],
+                        "preserve": ["boxes", "targets", "player"],
+                        "editBudget": 2,
+                        "metricGoals": [],
+                        "requiredTransitions": [],
+                        "anchorEntities": [],
+                        "playObjective": None,
+                        "displayReason": None,
+                    }
+                ]
+            },
+            {
+                "candidates": [
+                    {
+                        "strategyIndex": 1,
+                        "rationale": "Touches wall even though walls preserved",
+                        "operations": [
+                            {"row": 4, "column": 6, "op": "remove_wall", "from": "#", "to": "."}
+                        ],
+                    }
+                ]
+            },
+        ]
+    )
+    p_pres = ProposalPipeline(t_pres, model="kimi-k2.6", clock=clock)
+    res_pres = await p_pres.generate_proposal(
+        grid_or_rows=grid,
+        authorized_brief="Open route without touching walls",
+        preserved_components=["walls"],
+    )
+    assert res_pres.source == "deterministic_beam_search"
+    assert all(ch.before != "#" for ch in res_pres.changes)
+
+
+async def test_pipeline_max_tokens_budgets() -> None:
+    clock = FakeClock()
+    grid = parse_grid(SAMPLE_ROWS)
+
+    dg_t = FakeAsyncTransport(
+        [
+            {
+                "summary": (
+                    "We can keep the opening punchy with independent pushes. "
+                    "Key spots stay together in one room."
+                ),
+                "recommendedDifficulty": "Easy",
+                "difficultyRationale": (
+                    "Quick start and independent pushes align cleanly with Easy complexity."
+                ),
+                "recommendedLayout": "Compact",
+                "layoutRationale": "Focused spots and short paths suit a Compact layout.",
+            }
+        ]
+    )
+    await DGGuidePipeline(dg_t, model="deepseek-v4-flash", clock=clock).create_summary(
+        {
+            "firstMovePreference": "quick_start",
+            "pushPlanningPreference": "easy_to_adjust",
+            "spacePreference": "focused_area",
+            "routeRhythmPreference": "short_routes",
+            "language": "en",
+        }
+    )
+    assert dg_t.calls[0]["max_tokens"] == 2048
+
+    u_t = FakeAsyncTransport(
+        [
+            {
+                "acts": ["evaluation"],
+                "elements": ["internal_walls"],
+                "mapRelated": True,
+                "directionSufficient": True,
+                "routeTarget": "ordinary",
+                "evidenceSpan": "center",
+                "changes": [],
+                "humanEditEngagement": None,
+            },
+            {
+                "comparisons": [
+                    {"directionId": "d1", "relation": "aligned", "explanation": "Aligned."}
+                ]
+            },
+        ]
+    )
+    up = UnderstandingPipeline(u_t, model="kimi-k2.6", clock=clock)
+    await up.route_turn("Check the center")
+    await up.classify_manual_edit_conflict(
+        directions=[{"id": "d1", "fact": "Keep open"}],
+        effect_evidence=[{"id": "e1", "fact": "Removed wall"}],
+    )
+    assert u_t.calls[0]["max_tokens"] == 1024
+    assert u_t.calls[1]["max_tokens"] == 2400
+
+    tr_t = FakeAsyncTransport(
+        [
+            {
+                "translations": [
+                    {
+                        "turnId": f"t{i}",
+                        "body": f"译文{i}",
+                        "uiCueTexts": [],
+                        "proposalVerifiedActions": ["动作"] if i == 0 else None,
+                    }
+                    for i in range(4)
+                ]
+            },
+            {"accepted": True, "reason": "OK"},
+        ]
+    )
+    # 4 items -> min(8192, max(3200, 1400 * 4)) = 5600; verification -> 600
+    tr_items = [
+        {
+            "turnId": f"t{i}",
+            "body": f"Line {i}",
+            "uiCueTexts": [],
+            **({"proposalVerifiedActions": ["Do"]} if i == 0 else {}),
+        }
+        for i in range(4)
+    ]
+    await TranslationPipeline(tr_t, model="kimi-k2.6", clock=clock).translate_turns(
+        tr_items, target_language="zh-CN"
+    )
+    assert tr_t.calls[0]["max_tokens"] == 5600
+    assert tr_t.calls[1]["max_tokens"] == 600
+
+    prop_t = FakeAsyncTransport(
+        [
+            {
+                "requirements": [
+                    {
+                        "component": "wall",
+                        "property": "count",
+                        "relation": "decrease",
+                        "strength": "goal",
+                        "entities": [],
+                        "value": None,
+                        "unit": "none",
+                        "priorityEvidenceSpan": "",
+                        "focused": False,
+                        "sourceTurnId": "t1",
+                        "evidenceSpan": "Reduce wall",
+                        "statement": "Remove wall",
+                        "scope": "all",
+                    }
+                ],
+                "automaticBindings": [],
+                "exactTransitions": [],
+            }
+        ]
+    )
+    await ProposalPipeline(prop_t, model="kimi-k2.6", clock=clock).compile_requirements(
+        grid_or_rows=grid,
+        designer_turns=[{"id": "t1", "content": "Reduce wall"}],
+    )
+    assert prop_t.calls[0]["max_tokens"] == 3600

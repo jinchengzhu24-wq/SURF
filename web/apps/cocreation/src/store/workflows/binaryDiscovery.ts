@@ -26,6 +26,7 @@ import {
   canEditSelected,
   findVersion,
   isDeadlineExpired,
+  language,
   selectedVersionId,
   session,
   sessionId,
@@ -108,7 +109,7 @@ export async function submitBinaryAction(action: PendingBinaryAction): Promise<v
             topicId: action.topicId,
             questionId: action.questionId,
             choiceId: action.choiceId,
-            displayLanguage: action.displayLanguage,
+            displayLanguage: action.displayLanguage || language.value || "zh-CN",
             idempotencyKey: action.idempotencyKey,
           });
     applySession(updated);
@@ -203,7 +204,7 @@ export async function retryBinaryProposal(): Promise<void> {
     topicId: action.topicId || s.proposalFlowState?.topicId || "",
     questionId: action.questionId,
     choiceId: action.choiceId,
-    displayLanguage: action.displayLanguage,
+    displayLanguage: action.displayLanguage || language.value || "zh-CN",
     idempotencyKey: action.idempotencyKey,
   });
 }

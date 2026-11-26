@@ -10,6 +10,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from server.container import build_cocreation_transport
 from server.core.clock import SYSTEM_CLOCK, Clock
 from server.core.llm_client import AsyncOpenAITransport, LLMError
 from server.core.solver import solve_min_steps
@@ -173,11 +174,7 @@ async def run_live_async(
         settings = load_settings()
         if not settings.has_cocreation_llm_config:
             raise ValueError("Co-creation Kimi/Moonshot credentials are required for --live.")
-        transport = AsyncOpenAITransport(
-            api_key=settings.cocreation_llm_api_key.get_secret_value(),
-            base_url=settings.cocreation_llm_base_url,
-            default_timeout_seconds=settings.cocreation_llm_timeout_seconds,
-        )
+        transport = build_cocreation_transport(settings)
         owns_transport = True
         active_pipeline = UnderstandingPipeline(
             transport, model=settings.cocreation_llm_model, clock=clock

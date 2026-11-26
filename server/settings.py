@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, PrivateAttr, SecretStr, field_validator
 from pydantic_settings import NoDecode
 
 from server.core.settings import BaseSokobanSettings, parse_allowed_origins
@@ -24,6 +24,26 @@ DEFAULT_STATIC_DIR = PROJECT_ROOT / "web" / "dist"
 DEFAULT_WEBGL_DIR = PROJECT_ROOT / "WebGLBuild"
 
 DEFAULT_TOKEN_SECRET = "development-only-change-before-deployment"
+PLACEHOLDER_TOKEN_SECRET = "replace-with-a-long-random-production-secret"
+PLACEHOLDER_DELETE_PASSWORD = "replace-with-dashboard-delete-password"
+PLACEHOLDER_API_KEYS: frozenset[str] = frozenset(
+    {
+        "your_deepseek_api_key_here",
+        "your_kimi_api_key_here",
+        "your_llm_api_key_here",
+    }
+)
+_INSECURE_TOKEN_SECRETS = frozenset({DEFAULT_TOKEN_SECRET, PLACEHOLDER_TOKEN_SECRET})
+_INSECURE_DELETE_PASSWORDS = frozenset({PLACEHOLDER_DELETE_PASSWORD})
+_SECRET_ENV_ALIASES: tuple[str, ...] = (
+    "DEEPSEEK_API_KEY",
+    "COCREATION_LLM_API_KEY",
+    "KIMI_API_KEY",
+    "MOONSHOT_API_KEY",
+    "TOKEN_SECRET",
+    "COCREATION_TOKEN_SECRET",
+    "DASHBOARD_DELETE_PASSWORD",
+)
 DEFAULT_PUBLIC_BASE_URL = "https://sokobanaidemo.top/cocreation"
 DEFAULT_WEBGL_BASE_URL = "https://sokobanaidemo.top/game/"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -240,6 +260,8 @@ class SokobanSettings(BaseSokobanSettings):
             "COCREATION_BINARY_DISCOVERY_ENABLED", "binary_discovery_enabled"
         ),
     )
+    _extra_env_secrets: tuple[str, ...] = PrivateAttr(default=())
+    _isolated_env: bool = PrivateAttr(default=False)
 
     @field_validator("deepseek_base_url", mode="before")
     @classmethod
@@ -297,23 +319,47 @@ class SokobanSettings(BaseSokobanSettings):
 
     @property
     def is_default_token_secret(self) -> bool:
-        return self.token_secret.get_secret_value() == DEFAULT_TOKEN_SECRET
+        value = self.token_secret.get_secret_value().strip()
+        return not value or value in _INSECURE_TOKEN_SECRETS
 
     @property
     def has_deepseek_config(self) -> bool:
-        return bool(self.deepseek_api_key.get_secret_value().strip())
+        value = self.deepseek_api_key.get_secret_value().strip()
+        return bool(value) and value not in PLACEHOLDER_API_KEYS
 
     @property
     def has_cocreation_llm_config(self) -> bool:
-        return bool(self.cocreation_llm_api_key.get_secret_value().strip())
+        value = self.cocreation_llm_api_key.get_secret_value().strip()
+        return bool(value) and value not in PLACEHOLDER_API_KEYS
+
+    @property
+    def is_placeholder_delete_password(self) -> bool:
+        value = self.dashboard_delete_password.get_secret_value().strip()
+        return value in _INSECURE_DELETE_PASSWORDS
+
+    def secret_values(self) -> tuple[str, ...]:
+        """Collect all configured secret values across fields and known env aliases."""
+        collected = list(super().secret_values())
+        collected.extend(self._extra_env_secrets)
+        if not self._isolated_env:
+            for key in _SECRET_ENV_ALIASES:
+                raw = str(os.environ.get(key) or "").strip()
+                if raw:
+                    collected.append(raw)
+        return tuple(dict.fromkeys(item for item in collected if item))
 
     def warn_if_default_token_secret(self) -> None:
-        """Emit a prominent startup warning when the default development TOKEN_SECRET is active."""
+        """Emit prominent startup warnings for default/placeholder security secrets."""
         if self.is_default_token_secret:
             logger.warning(
-                "SECURITY WARNING: TOKEN_SECRET is set to the default value "
+                "SECURITY WARNING: TOKEN_SECRET is set to the default/placeholder value "
                 "'%s'. Configure a strong random TOKEN_SECRET before deployment.",
-                DEFAULT_TOKEN_SECRET,
+                self.token_secret.get_secret_value(),
+            )
+        if self.is_placeholder_delete_password:
+            logger.warning(
+                "SECURITY WARNING: DASHBOARD_DELETE_PASSWORD is set to the example placeholder "
+                "value and will be treated as unconfigured (HTTP 503 on delete)."
             )
 
     def to_cocreation_app_settings(self) -> Any:
@@ -392,7 +438,15 @@ class SokobanSettings(BaseSokobanSettings):
         static_raw = str(source.get("SOKOBAN_STATIC_DIR") or "").strip()
         webgl_raw = str(source.get("SOKOBAN_WEBGL_BUILD_DIR") or "").strip()
 
-        return cls(
+        extra_env_secrets = tuple(
+            dict.fromkeys(
+                str(source.get(key) or "").strip()
+                for key in _SECRET_ENV_ALIASES
+                if str(source.get(key) or "").strip()
+            )
+        )
+
+        instance = cls(
             log_level=str(
                 source.get("LOG_LEVEL") or source.get("BACKEND_LOG_LEVEL") or "INFO"
             ).strip(),
@@ -471,6 +525,9 @@ class SokobanSettings(BaseSokobanSettings):
                 source.get("COCREATION_BINARY_DISCOVERY_ENABLED"), True
             ),
         )
+        instance._extra_env_secrets = extra_env_secrets
+        instance._isolated_env = env is not None
+        return instance
 
 
 def load_settings(
@@ -496,6 +553,9 @@ __all__ = [
     "DEFAULT_TOKEN_SECRET",
     "DEFAULT_WEBGL_BASE_URL",
     "DEFAULT_WEBGL_DIR",
+    "PLACEHOLDER_API_KEYS",
+    "PLACEHOLDER_DELETE_PASSWORD",
+    "PLACEHOLDER_TOKEN_SECRET",
     "PROJECT_ROOT",
     "SokobanSettings",
     "load_settings",

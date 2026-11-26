@@ -26,7 +26,7 @@ Menu → Questionnaire(Online1) → Online_Lobby → Match_Briefing
 - DG 使用四道中立问题，分别关注首步检查、推箱依赖、空间分布和路线节奏。Q1–Q2 提供难度建议，Q3–Q4 提供布局建议。Unity 显示对四题的整体伙伴式短英文反馈和两项可编辑建议，保留后端字段及研究记录，不另展示逐参数理由。反馈提示以两至三句、约 25–40 个英文词为目标，备用文案保持中立并保留玩家选择。
 - **DG 首版理解与关卡蓝图规划管线**（`POST /dg/guide/summary`、`POST /generate-level-plan`，实现于 `server/llm/pipelines/dg_guide.py` 与 `level_plan.py`）独占 DeepSeek 配置（`DEEPSEEK_*`）。确认后的 `dgContext` 和 `LevelDesignPlan` 只服务于首版规划与 Unity 地图生成，**禁止**传输、持久化或注入到共创模型上下文中。
 - **共创对话、Policy 2 提案发现、关卡修改与翻译管线**（实现于 `server/llm/pipelines/{chat,understanding,binary,proposal,translation}.py`）独占 Moonshot/Kimi 配置（`COCREATION_LLM_*`），**禁止**读取或回退到 `DEEPSEEK_*`。共创会话只接收首版地图及正式匹配所需的有限元数据。变更正式研究模型需要明确确认。默认值与本地配置见 [README](../README.md#本地开发)。
-- 研究者目标和实验条件不进入任何模型上下文。共创侧的设计推测和 `DesignContext` 语义记忆与用户最终自报告的 `designer_intentions` 独立记录；后者在确认最终 Stage 之后、对手挑战之前提交。
+- 研究者目标和实验条件不进入任何模型上下文。共创侧的设计推测和 `DesignContext` 语义记忆与用户最终自报告的设计意图（持久化于 `design_sessions.final_intention_json` 并同步至 `online_rooms` / `online_room_events`）独立记录；后者在确认最终 Stage 之后、对手挑战之前提交。
 
 ## 正式入场与草稿重生成
 

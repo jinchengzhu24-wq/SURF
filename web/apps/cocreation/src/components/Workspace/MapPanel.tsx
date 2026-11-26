@@ -12,6 +12,7 @@ import {
   validationError,
 } from "../../store/editorStore";
 import {
+  binaryFlowActive,
   busy,
   canEditSelected,
   currentPendingProposal,
@@ -29,7 +30,7 @@ import {
   saveManualStage,
 } from "../../store/workflows";
 import { TechnicalDetails } from "../Common/TechnicalDetails";
-import { tooltipHandlers } from "../Common/Tooltip";
+import { hideTooltip, showTooltip, tooltipHandlers } from "../Common/Tooltip";
 import { FinalActions } from "./FinalActions";
 import { IntentionForm } from "./IntentionForm";
 import { PlayAttempts } from "./PlayAttempts";
@@ -113,9 +114,11 @@ export function MapPanel(): JSX.Element | null {
 
   const canDiscardDraft =
     s.status === "active" && !unityPlayActive.value && !historical;
+  const binaryBlocked =
+    binaryFlowActive.value || s.proposalFlowState?.status === "planning";
 
   const playDisabled = interactionBusy || expired || dirty || pendingProposal;
-  const saveDisabled = !editable || !dirty || interactionBusy;
+  const saveDisabled = !editable || !dirty || interactionBusy || binaryBlocked;
   const discardDisabled = !canDiscardDraft || !dirty || interactionBusy;
   const restoreVisible = historical && s.status === "active";
   const restoreDisabled = interactionBusy || expired;
@@ -128,14 +131,27 @@ export function MapPanel(): JSX.Element | null {
         ? t(lang, "hint.playActive")
         : "";
 
+  const binaryBlockHint = binaryBlocked
+    ? dirty
+      ? t(lang, "hint.binaryDraftReset")
+      : t(lang, "hint.binaryProposal")
+    : "";
+
   const playHint = playDisabled
     ? (interactionBusy || expired ? commonBlockHint : "") ||
       (dirty ? t(lang, "hint.dirtyPlay") : pendingProposal ? t(lang, "hint.pending") : "")
     : "";
 
   const saveHint = saveDisabled
-    ? commonBlockHint || (historical ? t(lang, "hint.history") : "")
+    ? commonBlockHint || (historical ? t(lang, "hint.history") : binaryBlockHint)
     : "";
+
+  const mapDisabled = !editable || interactionBusy || binaryBlocked;
+  const mapBlockedStatus =
+    commonBlockHint ||
+    (historical
+      ? t(lang, "hint.history")
+      : binaryBlockHint || (busy.value ? t(lang, "hint.busy") : ""));
 
   const modeText =
     (s.status !== "active"
@@ -199,10 +215,30 @@ export function MapPanel(): JSX.Element | null {
                 rows={rows}
                 mode="editor"
                 diff={version.diff}
-                disabled={!editable || interactionBusy}
+                disabled={mapDisabled}
                 tileNameMap={tileNameMap}
                 className="map-grid"
                 onTileClick={({ x, y }) => editTile(x, y)}
+                onTileInspect={(info) => {
+                  if (!info) {
+                    hideTooltip();
+                    return;
+                  }
+                  showTooltip(
+                    info.anchor,
+                    {
+                      kind: "tile",
+                      tile: info.tile,
+                      mode: "map",
+                      row: info.coord.y + 1,
+                      column: info.coord.x + 1,
+                      entityLabel: info.entityLabel,
+                      disabled: mapDisabled,
+                      status: mapDisabled ? mapBlockedStatus || undefined : undefined,
+                    },
+                    info.immediate,
+                  );
+                }}
               />
               <svg
                 class="map-overlay"

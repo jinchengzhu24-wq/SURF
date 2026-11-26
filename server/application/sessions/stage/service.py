@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -19,7 +20,7 @@ from server.domain.sessions import describe_diff, summarize_stage_changes
 from server.i18n.messages import format_verified_diff_summary
 from server.llm.pipelines.chat import ChatPipeline
 from server.llm.pipelines.understanding import UnderstandingPipeline
-from server.persistence.database import SQLiteDatabase, dump_json
+from server.persistence.database import SQLiteDatabase, dump_json, load_json
 from server.persistence.repositories._mappers import row_to_session, row_to_version
 from server.persistence.repositories.operational_repo import OperationalRepository
 from server.persistence.repositories.sessions_repo import SessionsRepository
@@ -33,12 +34,16 @@ from ..config import (
     next_version_number_tx,
     solve_stage_async,
 )
-from ..lifecycle.tokens import request_digest
+from ..lifecycle.tokens import is_deadline_expired, request_digest, utc_plus_seconds_iso
 from ..read_model import SessionReadModelService
 from .draft_ops import _DraftRegenLifecycleMixin
 from .entity_bindings import build_entity_bindings, derive_entity_transitions
 from .play_ops import _PlayLifecycleMixin
-from .stage_ops import assess_version_impl, restore_version_impl
+from .stage_ops import (
+    assess_version_impl,
+    restore_version_impl,
+    supersede_active_stage_artifacts_tx,
+)
 
 
 class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
@@ -80,7 +85,7 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
         summary: str = "",
     ) -> dict[str, Any]:
         """Validate & solve OUTSIDE write_tx, then save manual Stage via optimistic CAS."""
-        session = self._require_active_session(session_id, access_token)
+        self._require_browser_session(session_id, access_token)
         sig = request_digest({"baseVersionId": base_version_id, "rows": list(rows)})
         claim = self._operational_repo.claim_key(
             session_id,
@@ -88,6 +93,7 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
             idempotency_key,
             request_hash=sig,
             created_at=self._clock.utc_now(),
+            stale_before_iso=utc_plus_seconds_iso(self._clock, -150),
         )
         if claim.outcome == "conflict":
             raise IdempotencyConflictError("IDEMPOTENCY_CONFLICT")
@@ -97,8 +103,15 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
             raise ConflictError("SAVE_IN_PROGRESS", "error.version_conflict")
 
         try:
+            session = self._require_active_session(session_id, access_token)
             if session.current_version_id != base_version_id:
                 raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
+            if any(
+                t.state.get("status") == "clarifying"
+                and t.state.get("versionId") in (None, base_version_id)
+                for t in self._operational_repo.list_topics(session_id)
+            ):
+                raise ConflictError("PROPOSAL_CHOICE_REQUIRED", "error.version_conflict")
             solved = await solve_stage_async(rows, clock=self._clock)
             now_iso = self._clock.utc_now()
             clean_summary = str(summary or "").strip()[:1000] or "Designer saved an edited stage"
@@ -112,8 +125,26 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
                 cur_session = row_to_session(cur_row)
                 if cur_session.status != "active":
                     raise ConflictError("SESSION_LOCKED", "error.session_locked")
+                if is_deadline_expired(cur_session.deadline_at, now=self._clock.utc_datetime()):
+                    raise ConflictError(
+                        "SESSION_DEADLINE_EXPIRED", "error.session_deadline_expired"
+                    )
                 if cur_session.current_version_id != base_version_id:
                     raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
+                topic_rows = conn.execute(
+                    "SELECT state_json FROM binary_discovery_topics WHERE session_id = ?",
+                    (session_id,),
+                ).fetchall()
+                for trow in topic_rows:
+                    tstate = load_json(trow["state_json"], None)
+                    if (
+                        isinstance(tstate, dict)
+                        and tstate.get("status") == "clarifying"
+                        and tstate.get("versionId") in (None, base_version_id)
+                    ):
+                        raise ConflictError(
+                            "PROPOSAL_CHOICE_REQUIRED", "error.version_conflict"
+                        )
 
                 base_row = conn.execute(
                     "SELECT * FROM level_versions WHERE session_id = ? AND version_id = ?",
@@ -172,6 +203,7 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
                 )
                 if cas.rowcount == 0:
                     raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
+                supersede_active_stage_artifacts_tx(conn, session_id, now_iso)
 
                 if closes_manual and prev_dis is not None:
                     append_audit_event_tx(
@@ -238,6 +270,11 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
             self._operational_repo.complete_key(
                 session_id, "save_version", idempotency_key, response={"versionId": new_vid}
             )
+        except asyncio.CancelledError:
+            self._operational_repo.complete_key(
+                session_id, "save_version", idempotency_key, status="failed"
+            )
+            raise
         except Exception:
             self._operational_repo.complete_key(
                 session_id, "save_version", idempotency_key, status="failed"
@@ -255,7 +292,7 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Solve restored Stage OUTSIDE write_tx, then create child Stage via optimistic CAS."""
-        session = self._require_active_session(session_id, access_token)
+        session = self._require_browser_session(session_id, access_token)
         await restore_version_impl(
             db=self._db,
             sessions_repo=self._sessions_repo,
@@ -280,11 +317,13 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """Generate Stage opening / manual-edit review OUTSIDE write_tx, then commit atomically."""
-        session = self._require_active_session(session_id, access_token)
+        session = self._require_browser_session(session_id, access_token)
         await assess_version_impl(
             db=self._db,
             sessions_repo=self._sessions_repo,
+            operational_repo=self._operational_repo,
             chat_pipeline=self._chat_pipeline,
+            understanding_pipeline=self._understanding_pipeline,
             room_sync=self._room_sync,
             clock=self._clock,
             session=session,
@@ -294,6 +333,33 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
             deadline=deadline,
         )
         return await self._read_model.get_session_payload(session_id)
+
+    async def sweep_expired_operations(self, session_id: str | None = None) -> None:
+        """Sweep timed-out draft regenerations and interrupted play attempts."""
+        for regen in self._sessions_repo.list_active_draft_regenerations():
+            if session_id is not None and regen.session_id != session_id:
+                continue
+            self._expire_regen_if_needed(regen.session_id, regen)
+
+        now_iso = self._clock.utc_now()
+        cutoff_iso = utc_plus_seconds_iso(self._clock, -self._settings.interrupted_after_seconds)
+        if session_id is not None:
+            self._sessions_repo.expire_interrupted_attempts(
+                session_id, cutoff_iso=cutoff_iso, now_iso=now_iso
+            )
+            return
+
+        with self._db.read_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT session_id FROM play_attempts "
+                "WHERE status IN ('issued', 'loaded', 'started') "
+                "AND COALESCE(first_move_at, loaded_at, issued_at) <= ?",
+                (cutoff_iso,),
+            ).fetchall()
+        for row in rows:
+            self._sessions_repo.expire_interrupted_attempts(
+                str(row["session_id"]), cutoff_iso=cutoff_iso, now_iso=now_iso
+            )
 
 
 __all__ = ["StageService"]

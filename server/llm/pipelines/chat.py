@@ -166,14 +166,7 @@ def _sanitize_and_project_guidance(
             follow_up = q
 
     offer_dict: dict[str, Any] | None = None
-    if payload.revision_offer is not None:
-        raw_offer = payload.revision_offer.model_dump(by_alias=True)
-        raw_offer["summary"] = sanitize_visible_text(raw_offer["summary"], language)
-        raw_offer["rationale"] = sanitize_visible_text(raw_offer["rationale"], language)
-        if _is_grounded(raw_offer["summary"], grid, entity_bindings) and _is_grounded(
-            raw_offer["rationale"], grid, entity_bindings
-        ):
-            offer_dict = raw_offer
+    # Ordinary chat (non-proposal route) must never emit unbound revisionOffer cards.
 
     disagreement_dict: dict[str, Any] | None = None
     if payload.disagreement is not None:
@@ -234,7 +227,7 @@ class ChatPipeline:
         clock: Clock | None = None,
         extra_body: Mapping[str, Any] | None = None,
         temperature: float = 0.4,
-        max_tokens: int = 2400,
+        max_tokens: int = 3200,
     ) -> None:
         self.transport = transport
         self.model = model

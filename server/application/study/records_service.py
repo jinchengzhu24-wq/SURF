@@ -137,9 +137,9 @@ class StudyRecordsService:
             )
         payload = self._validate_and_enrich(record_type, raw_payload)
         created_at = str(payload["serverReceivedAt"])
-        match_id = _first_non_empty(payload, "matchId", "studySessionId")
+        match_id = _first_non_empty(payload, "matchId")
         participant_id = _first_non_empty(
-            payload, "participantId", "playerId", "studySessionId", "userId"
+            payload, "participantId", "playerId", "studySessionId", "sessionId", "userId"
         )
         round_id = _first_non_empty(payload, "gameRoundId", "roundId", "ideaId")
 

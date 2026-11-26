@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from server.application.sessions import RoomSyncWriter, append_audit_event_tx
 from server.core.clock import Clock
 from server.domain.errors import ConflictError
+from server.domain.memory import ensure_design_context, set_active_disagreement
 from server.domain.proposals import render_protected_refusal
 from server.llm.pipelines.chat import ChatPipeline
 from server.llm.pipelines.understanding import TurnRoutingResult
@@ -17,6 +19,8 @@ from server.persistence.models import SessionReadModel
 from .._shared import (
     apply_turn_context_patch,
     build_play_summary,
+    build_turn_cards,
+    emit_dashboard_node_tx,
     emit_turn_room_event_tx,
     insert_turn_tx,
     require_current_version_tx,
@@ -49,6 +53,11 @@ class OrdinaryChatHandler:
         request_id: str,
         routing: TurnRoutingResult | None = None,
         deadline: float | None = None,
+        human_edit_engaged: bool = False,
+        human_edit_recovery_needed: bool = False,
+        active_disagreement: Mapping[str, Any] | None = None,
+        recovery_task: Mapping[str, Any] | None = None,
+        complete_idempotency_scope: str | None = None,
     ) -> dict[str, Any]:
         """Run ChatPipeline OUTSIDE write_tx (or emit deterministic refusal), then commit."""
         session = read_model.session
@@ -98,6 +107,7 @@ class OrdinaryChatHandler:
             )
             reply_text = chat_res.assistant_message
             guidance = dict(chat_res.guidance or {})
+            guidance.pop("proposalOffer", None)
             patch = dict(chat_res.design_context_patch) if chat_res.design_context_patch else None
             model = chat_res.model
             attempts_used = chat_res.attempts_used
@@ -106,10 +116,12 @@ class OrdinaryChatHandler:
         now_iso = self._clock.utc_now()
         user_turn_id = uuid.uuid4().hex
         assistant_turn_id = uuid.uuid4().hex
+        claims = (guidance.get("_intentDecision") or {}).get("claims")
+        rec_id: str | None = None
 
         with self._db.write_tx() as conn:
             cur_session, cur_ver = require_current_version_tx(
-                conn, session.session_id, current_ver.version_id
+                conn, session.session_id, current_ver.version_id, clock=self._clock
             )
             updated_ctx, intent_audit = apply_turn_context_patch(
                 cur_ver.design_context,
@@ -119,7 +131,29 @@ class OrdinaryChatHandler:
                 assistant_turn_id=assistant_turn_id,
                 user_text=user_text,
                 guidance=guidance,
+                semantic_claims=claims,
             )
+            dis_acknowledged_payload: dict[str, Any] | None = None
+            if (
+                human_edit_engaged
+                and isinstance(active_disagreement, Mapping)
+                and active_disagreement.get("subject") == "human_edit"
+            ):
+                dis_acknowledged_payload = {
+                    **dict(active_disagreement),
+                    "status": "acknowledged",
+                    "displayCard": False,
+                    "resolution": None,
+                }
+                guidance["disagreement"] = dis_acknowledged_payload
+                cleared_state = set_active_disagreement(
+                    ensure_design_context(updated_ctx),
+                    None,
+                    cur_ver.version_id,
+                    assistant_turn_id,
+                )
+                updated_ctx = cleared_state.to_wire_dict()
+
             insert_turn_tx(
                 conn,
                 turn_id=user_turn_id,
@@ -152,6 +186,18 @@ class OrdinaryChatHandler:
                     "WHERE session_id = ? AND version_id = ?",
                     (dump_json(updated_ctx), cur_session.session_id, cur_ver.version_id),
                 )
+            if dis_acknowledged_payload is not None:
+                append_audit_event_tx(
+                    conn,
+                    cur_session.session_id,
+                    "disagreement_acknowledged",
+                    {
+                        "versionId": cur_ver.version_id,
+                        "turnId": assistant_turn_id,
+                        "disagreement": dis_acknowledged_payload,
+                    },
+                    now_iso,
+                )
             if intent_audit is not None:
                 append_audit_event_tx(
                     conn,
@@ -164,6 +210,42 @@ class OrdinaryChatHandler:
                     },
                     now_iso,
                 )
+                if intent_audit.get("evidenceId"):
+                    append_audit_event_tx(
+                        conn,
+                        cur_session.session_id,
+                        "intent_evidence_recorded",
+                        {
+                            "evidenceId": intent_audit["evidenceId"],
+                            "kind": "expressed_direction",
+                            "versionId": cur_ver.version_id,
+                            "turnId": user_turn_id,
+                            "observation": user_text[:500],
+                        },
+                        now_iso,
+                    )
+            append_audit_event_tx(
+                conn,
+                cur_session.session_id,
+                "reply_delivery_outcome",
+                {
+                    "messageKey": idempotency_key,
+                    "requestId": request_id or idempotency_key,
+                    "task": "ordinary_chat",
+                    "baseVersionId": cur_ver.version_id,
+                    "modelGenerationSucceeded": model != "deterministic",
+                    "reliableBodyDelivered": True,
+                    "fullQualityPassed": not human_edit_recovery_needed,
+                    "latencyMs": latency_ms,
+                    **(
+                        {"component": "human_edit_engagement"}
+                        if human_edit_recovery_needed
+                        else {}
+                    ),
+                },
+                now_iso,
+            )
+            cards = build_turn_cards(guidance)
             emit_turn_room_event_tx(
                 conn,
                 self._room_sync,
@@ -173,10 +255,90 @@ class OrdinaryChatHandler:
                 assistant_turn_id=assistant_turn_id,
                 user_text=user_text,
                 assistant_text=reply_text,
+                cards=cards,
                 now_iso=now_iso,
             )
-        return {
-            "userTurnId": user_turn_id,
-            "assistantTurnId": assistant_turn_id,
-            "versionId": current_ver.version_id,
-        }
+            if intent_audit is not None:
+                emit_dashboard_node_tx(
+                    conn,
+                    self._room_sync,
+                    session=cur_session,
+                    version=cur_ver,
+                    node_id=f"intent:{intent_audit['hypothesisId']}",
+                    node_type="intent",
+                    node_status="tentative",
+                    entries=[
+                        {
+                            "entryId": f"player:{user_turn_id}",
+                            "kind": "player_message",
+                            "text": user_text,
+                            "label": "Player",
+                            "occurredAt": now_iso,
+                            "language": cur_session.language,
+                        },
+                        {
+                            "entryId": f"llm:{assistant_turn_id}",
+                            "kind": "llm_message",
+                            "text": reply_text,
+                            "label": "LLM",
+                            "occurredAt": now_iso,
+                            "language": cur_session.language,
+                        },
+                        {
+                            "entryId": f"card:{assistant_turn_id}:intent",
+                            "kind": "card",
+                            "text": intent_audit["statement"],
+                            "label": "Card",
+                            "occurredAt": now_iso,
+                            "language": cur_session.language,
+                        },
+                    ],
+                    now_iso=now_iso,
+                )
+            if recovery_task is not None:
+                rec_id = str(recovery_task["recoveryId"])
+                rec_state = {
+                    **dict(recovery_task["state"]),
+                    "sourceUserTurnId": user_turn_id,
+                    "deliveredAssistantTurnId": assistant_turn_id,
+                }
+                conn.execute(
+                    "INSERT INTO component_recovery_tasks("
+                    "recovery_id, session_id, target_kind, target_id, state_json, updated_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(recovery_id) DO UPDATE SET "
+                    "target_kind = excluded.target_kind, "
+                    "target_id = excluded.target_id, "
+                    "state_json = excluded.state_json, "
+                    "updated_at = excluded.updated_at",
+                    (
+                        rec_id,
+                        cur_session.session_id,
+                        str(recovery_task["targetKind"]),
+                        str(recovery_task["targetId"]),
+                        dump_json(rec_state),
+                        now_iso,
+                    ),
+                )
+
+            result_payload: dict[str, Any] = {
+                "userTurnId": user_turn_id,
+                "assistantTurnId": assistant_turn_id,
+                "versionId": current_ver.version_id,
+            }
+            if rec_id is not None:
+                result_payload["recoveryId"] = rec_id
+            if complete_idempotency_scope:
+                conn.execute(
+                    "UPDATE idempotency_keys SET status = 'completed', response_json = ? "
+                    "WHERE session_id = ? AND scope = ? AND idempotency_key = ?",
+                    (
+                        dump_json(result_payload),
+                        cur_session.session_id,
+                        complete_idempotency_scope,
+                        idempotency_key,
+                    ),
+                )
+        if complete_idempotency_scope:
+            return {**result_payload, "_idempotencyCompleted": True}
+        return result_payload

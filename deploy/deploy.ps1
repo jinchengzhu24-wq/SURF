@@ -79,7 +79,7 @@ function Copy-FilteredDirectory {
 
         [string[]]$ExcludeDirNames = @("__pycache__", ".pytest_cache", ".ruff_cache", "data"),
 
-        [string[]]$ExcludeFileExtensions = @(".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".sqlite3")
+        [string[]]$ExcludeFileExtensions = @(".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm")
     )
 
     New-Item -ItemType Directory -Path $DestinationDir -Force | Out-Null
@@ -143,9 +143,9 @@ $sshCommonArgs = @(
 )
 
 if (-not $SkipWebBuild) {
-    if ($PSCmdlet.ShouldProcess($webDir, "Build web workspaces (npm run build)")) {
+    if ($PSCmdlet.ShouldProcess($webDir, "Build all web workspaces (@sokoban/dashboard, @sokoban/cocreation, @sokoban/webgl-bridge)")) {
         Invoke-CheckedCommand -FilePath "npm" -ArgumentList @("--prefix", $webDir, "run", "build") `
-            -Description "Building web frontends in $webDir"
+            -Description "Building web workspaces (@sokoban/dashboard, @sokoban/cocreation, @sokoban/webgl-bridge) in $webDir"
     }
 }
 
@@ -196,6 +196,12 @@ trap cleanup EXIT
 
 mkdir -p "$REMOTE_DIR" "$REMOTE_DIR/server/data"
 tar -xzf "$REMOTE_ARCHIVE" -C "$REMOTE_DIR"
+
+if [ "$(id -u)" -eq 0 ]; then
+    chown -R sokoban:sokoban "$REMOTE_DIR/server" "$REMOTE_DIR/server/data" "$REMOTE_DIR/web/dist" "$REMOTE_DIR/deploy"
+elif command -v sudo >/dev/null 2>&1; then
+    sudo chown -R sokoban:sokoban "$REMOTE_DIR/server" "$REMOTE_DIR/server/data" "$REMOTE_DIR/web/dist" "$REMOTE_DIR/deploy"
+fi
 
 if [ -x "$REMOTE_DIR/.venv/bin/python" ]; then
     "$REMOTE_DIR/.venv/bin/python" -c "import subprocess, sys, tomllib; deps = tomllib.load(open('$REMOTE_DIR/pyproject.toml', 'rb'))['project']['dependencies']; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', *deps])"

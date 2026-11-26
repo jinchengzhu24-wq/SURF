@@ -6,6 +6,7 @@ import asyncio
 import logging
 import mimetypes
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
@@ -30,6 +31,18 @@ from server.api.routers import (
     study,
 )
 from server.container import AppContainer, build_container
+from server.core.llm_client import (
+    DeadlineExceededError as CoreDeadlineExceededError,
+)
+from server.core.llm_client import (
+    LLMError as CoreLLMError,
+)
+from server.core.llm_client import (
+    LLMValidationError as CoreLLMValidationError,
+)
+from server.core.llm_client import (
+    UpstreamLLMError as CoreUpstreamLLMError,
+)
 from server.core.settings import redact_secrets
 from server.domain.errors import (
     AuthError,
@@ -58,6 +71,10 @@ _NO_CACHE_PATHS = frozenset(
         "/cocreation",
         "/cocreation/",
         "/cocreation/index.html",
+        "/game",
+        "/game/",
+        "/game/index.html",
+        "/game/TemplateData/sokoban-bridge.js",
     }
 )
 
@@ -82,6 +99,34 @@ def _domain_error_status(exc: DomainError) -> int:
     return 503 if exc.retryable else 400
 
 
+def _core_llm_error_status(exc: CoreLLMError) -> int:
+    if isinstance(exc, CoreDeadlineExceededError):
+        return 504
+    if isinstance(exc, CoreUpstreamLLMError):
+        if exc.code == "CONFIGURATION_ERROR":
+            return 503
+        if exc.provider_status == 429:
+            return 503
+        if exc.provider_status == 504:
+            return 504
+        return 502
+    if isinstance(exc, CoreLLMValidationError):
+        return 502
+    return 502
+
+
+def _redact_value(value: Any, secrets_tuple: tuple[str, ...]) -> Any:
+    if isinstance(value, str):
+        return redact_secrets(value, secrets_tuple)
+    if isinstance(value, Mapping):
+        return {str(k): _redact_value(v, secrets_tuple) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item, secrets_tuple) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_value(item, secrets_tuple) for item in value]
+    return value
+
+
 def _error_envelope(
     *,
     status_code: int,
@@ -90,6 +135,7 @@ def _error_envelope(
     details: dict[str, Any],
     retryable: bool,
     request_id: str,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     safe_error = {
         "code": str(code),
@@ -97,9 +143,17 @@ def _error_envelope(
         "details": dict(details),
         "retryable": bool(retryable),
     }
+    response_headers = {"X-Request-ID": request_id}
+    if headers:
+        for key, value in headers.items():
+            if value is not None:
+                response_headers[str(key)] = str(value)
     return JSONResponse(
         status_code=status_code,
         content={
+            # Top-level string `detail` satisfies Unity JsonUtility PlainErrorEnvelope /
+            # OnlineErrorResponse / DescriptionGenerationController alongside ui-core.
+            "detail": safe_error["message"],
             "error": safe_error,
             "code": safe_error["code"],
             "message": safe_error["message"],
@@ -107,7 +161,7 @@ def _error_envelope(
             "retryable": safe_error["retryable"],
             "requestId": request_id,
         },
-        headers={"X-Request-ID": request_id},
+        headers=response_headers,
     )
 
 
@@ -118,6 +172,7 @@ async def _room_reaper_loop(container: AppContainer, interval_seconds: float) ->
         await asyncio.sleep(interval)
         try:
             await container.online_room_service.reap_expired_rooms()
+            await container.stage_service.sweep_expired_operations()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -198,13 +253,62 @@ def create_app(
         if not raw_message or raw_message == exc.message_key:
             raw_message = get_message(exc.message_key, "en")
         safe_message = redact_secrets(raw_message, secrets_tuple)[:400]
+        safe_details = _redact_value(dict(exc.details), secrets_tuple)
+        status_code = _domain_error_status(exc)
+        if status_code >= 500:
+            logger.warning(
+                "Domain error request_id=%s code=%s status=%s detail=%s details=%s",
+                req_id,
+                exc.code,
+                status_code,
+                safe_message,
+                safe_details,
+            )
+        attempts_used = safe_details.get("attemptsUsed")
+        headers = (
+            {"X-LLM-Attempts-Used": str(attempts_used)}
+            if isinstance(attempts_used, int)
+            and not isinstance(attempts_used, bool)
+            and attempts_used > 0
+            else None
+        )
         return _error_envelope(
-            status_code=_domain_error_status(exc),
+            status_code=status_code,
             code=exc.code,
             message=safe_message,
-            details=dict(exc.details),
+            details=safe_details,
             retryable=exc.retryable,
             request_id=req_id,
+            headers=headers,
+        )
+
+    @application.exception_handler(CoreLLMError)
+    async def handle_core_llm_error(request: Request, exc: CoreLLMError) -> JSONResponse:
+        req_id = str(getattr(request.state, "request_id", "") or uuid.uuid4().hex)
+        safe_message = redact_secrets(str(exc), active_settings.secret_values())[:400]
+        logger.warning(
+            "Structured LLM request failed request_id=%s code=%s provider_status=%s detail=%s",
+            req_id,
+            exc.code,
+            exc.provider_status,
+            safe_message,
+        )
+        details: dict[str, Any] = (
+            {"providerStatus": exc.provider_status} if exc.provider_status is not None else {}
+        )
+        headers = (
+            {"X-LLM-Attempts-Used": str(exc.attempts_used)}
+            if exc.attempts_used > 0
+            else None
+        )
+        return _error_envelope(
+            status_code=_core_llm_error_status(exc),
+            code=exc.code,
+            message=safe_message,
+            details=details,
+            retryable=exc.retryable,
+            request_id=req_id,
+            headers=headers,
         )
 
     @application.exception_handler(RequestValidationError)

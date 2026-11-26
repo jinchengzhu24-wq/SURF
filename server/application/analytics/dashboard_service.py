@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from server.core.clock import SYSTEM_CLOCK, Clock
@@ -13,7 +14,9 @@ from server.persistence.repositories.rooms_repo import RoomsRepository
 
 from ._projection import build_matchmaking_projection, clean_id
 
+logger = logging.getLogger(__name__)
 _UNSET = object()
+_PLACEHOLDER_DELETE_PASSWORDS = frozenset({"replace-with-dashboard-delete-password"})
 
 
 class DashboardService:
@@ -28,13 +31,21 @@ class DashboardService:
         source_label: str = "sqlite:online_room_events",
     ) -> None:
         self._repo = rooms_repo
-        self._delete_password = str(delete_password or "").strip()
+        raw_password = str(delete_password or "").strip()
+        if raw_password in _PLACEHOLDER_DELETE_PASSWORDS:
+            logger.warning(
+                "SECURITY WARNING: DASHBOARD_DELETE_PASSWORD is set to an example "
+                "placeholder and will be treated as unconfigured (HTTP 503 on delete)."
+            )
+            self._delete_password = ""
+        else:
+            self._delete_password = raw_password
         self._clock = clock if clock is not None else SYSTEM_CLOCK
         self._source_label = source_label
 
     def verify_delete_password(self, supplied_password: str | None) -> bool:
         """Verify X-Delete-Password with constant-time comparison."""
-        if not self._delete_password:
+        if not self._delete_password or self._delete_password in _PLACEHOLDER_DELETE_PASSWORDS:
             raise DomainError(
                 "DELETE_PASSWORD_NOT_CONFIGURED",
                 "error.configuration",

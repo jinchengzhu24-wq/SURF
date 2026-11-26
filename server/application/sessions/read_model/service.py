@@ -5,22 +5,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from server.core.clock import SYSTEM_CLOCK, Clock
+from server.core.clock import SYSTEM_CLOCK, Clock, parse_iso
 from server.domain.errors import AuthError, NotFoundError
 from server.persistence.models import (
     AuditEventRecord,
     DesignSessionRecord,
+    DraftRegenerationRecord,
     SessionReadModel,
 )
 from server.persistence.repositories.dialogue_repo import DialogueRepository
 from server.persistence.repositories.operational_repo import OperationalRepository
 from server.persistence.repositories.sessions_repo import SessionsRepository
 
-from ..config import CoCreationAppSettings
+from ..config import CoCreationAppSettings, append_audit_event_tx
 from ..lifecycle.tokens import (
     is_deadline_expired,
     remaining_deadline_seconds,
     token_matches,
+    utc_plus_seconds_iso,
 )
 from .progress import (
     build_draft_preview,
@@ -58,11 +60,82 @@ class SessionReadModelService:
         self._clock = clock
         self._settings = settings or CoCreationAppSettings()
 
+    def _is_regen_expired(self, regen: DraftRegenerationRecord) -> bool:
+        if regen.status not in {"pending", "claimed"}:
+            return False
+        lease_at = regen.requested_at if regen.status == "pending" else regen.updated_at
+        age = (self._clock.utc_datetime() - parse_iso(lease_at)).total_seconds()
+        limit = (
+            self._settings.draft_regeneration_pending_timeout_seconds
+            if regen.status == "pending"
+            else self._settings.draft_regeneration_claimed_timeout_seconds
+        )
+        return age >= limit
+
+    def _expire_read_time_operations(
+        self, read_model: SessionReadModel, *, include_attempts: bool = True
+    ) -> SessionReadModel:
+        session_id = read_model.session.session_id
+        expired_regens = [r for r in read_model.draft_regenerations if self._is_regen_expired(r)]
+        cutoff_iso = utc_plus_seconds_iso(self._clock, -self._settings.interrupted_after_seconds)
+        expired_attempts = (
+            any(
+                a.status in {"issued", "loaded", "started"}
+                and (a.first_move_at or a.loaded_at or a.issued_at) <= cutoff_iso
+                for a in read_model.play_attempts
+            )
+            if include_attempts
+            else False
+        )
+        if not expired_regens and not expired_attempts:
+            return read_model
+
+        now_iso = self._clock.utc_now()
+        db = getattr(self._sessions_repo, "_db", None)
+        for regen in expired_regens:
+            failure_code = (
+                "unity_unavailable" if regen.status == "pending" else "generation_timed_out"
+            )
+            if db is not None:
+                with db.write_tx() as conn:
+                    cur = conn.execute(
+                        "UPDATE draft_regenerations "
+                        "SET status = 'timed_out', failure_code = ?, updated_at = ? "
+                        "WHERE request_id = ? AND status = ?",
+                        (failure_code, now_iso, regen.request_id, regen.status),
+                    )
+                    if cur.rowcount > 0:
+                        append_audit_event_tx(
+                            conn,
+                            session_id,
+                            "draft_regeneration_timed_out",
+                            {
+                                "requestId": regen.request_id,
+                                "phase": regen.status,
+                                "failureCode": failure_code,
+                            },
+                            now_iso,
+                        )
+            else:
+                self._sessions_repo.update_draft_regeneration(
+                    regen.request_id,
+                    status="timed_out",
+                    failure_code=failure_code,
+                    updated_at=now_iso,
+                )
+        if expired_attempts:
+            self._sessions_repo.expire_interrupted_attempts(
+                session_id, cutoff_iso=cutoff_iso, now_iso=now_iso
+            )
+        refreshed = self._sessions_repo.load_session_read_model(session_id)
+        return refreshed if refreshed is not None else read_model
+
     async def get_session_payload(self, session_id: str) -> dict[str, Any]:
         """Load and project the full public session payload with zero N+1 queries."""
         read_model = self._sessions_repo.load_session_read_model(session_id)
         if read_model is None:
             raise NotFoundError("SESSION_NOT_FOUND", "error.session_not_found")
+        read_model = self._expire_read_time_operations(read_model, include_attempts=True)
         events = self._dialogue_repo.list_events(session_id)
         topic_rec = self._operational_repo.get_latest_topic(session_id)
         recovery_tasks = self._operational_repo.list_tasks(session_id)
@@ -85,7 +158,8 @@ class SessionReadModelService:
             secret_bytes=self._settings.token_secret_bytes,
         ):
             raise AuthError("INVALID_INTEGRATION_TOKEN", "error.session_access_denied")
-        return self._project_integration_status(session, read_model)
+        read_model = self._expire_read_time_operations(read_model, include_attempts=False)
+        return self._project_integration_status(read_model.session, read_model)
 
     def _project_integration_status(
         self,

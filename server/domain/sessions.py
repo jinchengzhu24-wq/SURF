@@ -65,11 +65,11 @@ class IdentityConfidence(StrEnum):
 
 class PlayAttemptStatus(StrEnum):
     ISSUED = "issued"
-    BOOTSTRAPPED = "bootstrapped"
-    PLAYING = "playing"
+    LOADED = "loaded"
+    STARTED = "started"
     COMPLETED = "completed"
     ABANDONED = "abandoned"
-    EXPIRED = "expired"
+    INTERRUPTED = "interrupted"
 
 
 class DraftRegenerationStatus(StrEnum):

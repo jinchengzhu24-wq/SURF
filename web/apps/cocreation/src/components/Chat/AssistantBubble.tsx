@@ -116,9 +116,14 @@ export function AssistantBubble({ turn }: AssistantBubbleProps): JSX.Element {
   const guidance = guidanceForDisplay(localizedGuidance, proposal, lang);
   const question = String(guidance.followUpQuestion || "").trim();
   const uiCues = Array.isArray(guidance.uiCues) ? guidance.uiCues : [];
+  const rawDisagreement = guidance.disagreement || guidance.challengeCard;
   const activeDisagreement =
-    guidance.disagreement?.status === "active" && guidance.disagreement.displayCard !== false
-      ? guidance.disagreement
+    rawDisagreement &&
+    (rawDisagreement.status === "active" ||
+      rawDisagreement.status === "choice_pending" ||
+      (!rawDisagreement.status && Boolean(rawDisagreement.challengeId))) &&
+    rawDisagreement.displayCard !== false
+      ? rawDisagreement
       : null;
 
   const body = assistantBodyWithoutCues(localizedContent, uiCues, question);
@@ -181,7 +186,10 @@ export function AssistantBubble({ turn }: AssistantBubbleProps): JSX.Element {
       ) : null}
 
       {activeDisagreement ? (
-        <DisagreementCard disagreement={activeDisagreement} />
+        <DisagreementCard
+          disagreement={activeDisagreement}
+          challengeState={guidance.challengeState}
+        />
       ) : question && !guidance.discussionCardMode ? (
         <section class="discussion-focus">
           <span class="discussion-focus-label">{t(lang, "cue.question")}</span>

@@ -113,7 +113,7 @@ def import_study_logs(db: SQLiteDatabase, study_logs_dir: Path | str) -> dict[st
                     or _fallback_iso()
                 )
                 participant_id = _first_non_empty(
-                    record, "participantId", "playerId", "studySessionId", "userId"
+                    record, "participantId", "playerId", "studySessionId", "sessionId", "userId"
                 )
                 round_id = _first_non_empty(record, "gameRoundId", "roundId", "ideaId")
                 conn.execute(
@@ -122,7 +122,7 @@ def import_study_logs(db: SQLiteDatabase, study_logs_dir: Path | str) -> dict[st
                     ") VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         record_type,
-                        _first_non_empty(record, "matchId", "studySessionId"),
+                        _first_non_empty(record, "matchId"),
                         participant_id,
                         round_id,
                         payload_json,

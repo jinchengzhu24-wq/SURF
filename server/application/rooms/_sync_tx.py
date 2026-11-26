@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Mapping
 from typing import Any
@@ -17,6 +18,8 @@ from ._helpers import (
     map_persistence_error,
     to_public_room_payload,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def record_cocreation_event_on_conn(
@@ -38,6 +41,22 @@ def record_cocreation_event_on_conn(
 
     try:
         row = _RoomEventsMixin._load_room_for_write(conn, match_id)
+    except PersistenceError as exc:
+        if exc.code == "ROOM_NOT_FOUND":
+            logger.warning(
+                "Skipping room co-creation event sync because online_rooms row was not found "
+                "(match_id=%s, player_slot=%s)",
+                match_id,
+                player_slot,
+            )
+            return {
+                "status": "ok",
+                "recorded": False,
+                "ignored": True,
+                "event": None,
+            }, False
+        map_persistence_error(exc)
+    try:
         players: list[dict[str, Any]] = load_json(row["players_json"], [])
         player = _RoomEventsMixin._find_player(players, player_slot)
     except PersistenceError as exc:
@@ -173,6 +192,17 @@ def record_designer_intention_on_conn(
 
     try:
         row = _RoomEventsMixin._load_room_for_write(conn, match_id)
+    except PersistenceError as exc:
+        if exc.code == "ROOM_NOT_FOUND":
+            logger.warning(
+                "Skipping room designer intention sync because online_rooms row was not found "
+                "(match_id=%s, player_slot=%s)",
+                match_id,
+                player_slot,
+            )
+            return {"status": "ok", "recorded": False, "ignored": True}
+        map_persistence_error(exc)
+    try:
         players: list[dict[str, Any]] = load_json(row["players_json"], [])
         player = _RoomEventsMixin._find_player(players, player_slot)
     except PersistenceError as exc:

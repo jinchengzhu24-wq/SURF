@@ -166,12 +166,12 @@ export const selectedStageHasActiveDisagreement = computed<boolean>(() => {
   let latestStatus: string | null = null;
   for (const turn of selectedStageTurns.value) {
     if (turn.role !== "assistant") continue;
-    const disagreement = turn.guidance?.disagreement;
+    const disagreement = turn.guidance?.disagreement || turn.guidance?.challengeCard;
     if (disagreement && typeof disagreement === "object") {
       latestStatus = disagreement.status || null;
     }
   }
-  return latestStatus === "active";
+  return latestStatus === "active" || latestStatus === "choice_pending";
 });
 
 export const selectedStageHasPendingIntentConflict = computed<boolean>(() =>
@@ -186,7 +186,16 @@ export const selectedStageHasPendingIntentConflict = computed<boolean>(() =>
 export const activeChallengeState = computed<ChallengeState | null>(() => {
   const turns = selectedStageTurns.value;
   for (let i = turns.length - 1; i >= 0; i -= 1) {
-    const challenge = turns[i]?.guidance?.challengeState;
+    const guidance = turns[i]?.guidance;
+    const card = guidance?.challengeCard;
+    const challenge: ChallengeState | null =
+      guidance?.challengeState ??
+      (card?.challengeId
+        ? {
+            challengeId: card.challengeId,
+            status: card.phase === "choice_pending" ? "choice_pending" : card.status || "active",
+          }
+        : null);
     if (!challenge?.challengeId) continue;
     if (challenge.status === "resolved") return null;
     return challenge;

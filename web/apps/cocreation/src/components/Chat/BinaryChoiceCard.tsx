@@ -10,7 +10,8 @@ export interface BinaryChoiceCardProps {
 }
 
 export function BinaryChoiceCard({ question, turn }: BinaryChoiceCardProps): JSX.Element {
-  const canChoose = canChooseBinary(question.questionId) && question.status === "pending";
+  const canChoose =
+    canChooseBinary(question.questionId) && (!question.status || question.status === "pending");
   const displayLanguage = question.sourceLanguage || turn.language || language.value;
 
   return (

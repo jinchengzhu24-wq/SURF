@@ -357,13 +357,43 @@ def build_proposal_flow_state(
             return model.public_flow()
         except ValueError:
             if topic_state.get("status") in BINARY_ACTIVE_STATUSES:
+                raw_pq = topic_state.get("pendingQuestion")
+                safe_pq: dict[str, Any] | None = None
+                if isinstance(raw_pq, Mapping):
+                    safe_pq = {
+                        k: v
+                        for k, v in raw_pq.items()
+                        if k != "_internalChoices" and not str(k).startswith("_")
+                    }
+                    if isinstance(safe_pq.get("choices"), list):
+                        safe_pq["choices"] = [
+                            {
+                                "choiceId": c.get("choiceId"),
+                                "letter": c.get("letter"),
+                                "label": c.get("label"),
+                            }
+                            for c in safe_pq["choices"]
+                            if isinstance(c, Mapping)
+                        ]
+                raw_count = topic_state.get("questionCount")
+                if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count > 0:
+                    q_count = raw_count
+                else:
+                    pq_num = (
+                        int(safe_pq.get("number") or 0)
+                        if isinstance(safe_pq, Mapping)
+                        and isinstance(safe_pq.get("number"), int)
+                        and not isinstance(safe_pq.get("number"), bool)
+                        else 0
+                    )
+                    q_count = max(len(topic_state.get("choices") or ()), pq_num)
                 return {
                     "active": True,
                     "status": topic_state.get("status"),
                     "topicId": topic_state.get("topicId"),
                     "interactionMode": "binary_choice",
-                    "clarificationQuestionCount": int(topic_state.get("questionCount") or 0),
-                    "pendingQuestion": topic_state.get("pendingQuestion"),
+                    "clarificationQuestionCount": q_count,
+                    "pendingQuestion": safe_pq,
                     "retryAction": topic_state.get("retryAction"),
                     "retryable": topic_state.get("status") == "retry_pending",
                     "failureCategory": topic_state.get("failureCode"),

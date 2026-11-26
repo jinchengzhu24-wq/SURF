@@ -6,30 +6,74 @@ import {
   updateSetSignal,
 } from "../chatStore";
 import { clearUnsavedMapDraft } from "../editorStore";
-import { applySession, busy, canEditSelected, language, session } from "../sessionStore";
-import { api, uniqueId, withBusy } from "./shared";
+import { applySession, busy, canEditSelected, language, selectedStageHasActiveDisagreement, session } from "../sessionStore";
+import { api, asStructuredError, uniqueId, withBusy } from "./shared";
 import { ensureAssessment, selectVersion } from "./versionActions";
+
+const PROPOSAL_STALE_ERROR_CODES = new Set([
+  "STALE_PROPOSAL",
+  "PROPOSAL_STALE",
+  "PROPOSAL_NOT_FOUND",
+  "VERSION_CONFLICT",
+  "PENDING_PROPOSAL",
+  "PROPOSAL_PENDING",
+  "DISAGREEMENT_ACTIVE",
+  "SESSION_DEADLINE_EXPIRED",
+]);
+
+const QUESTION_STALE_ERROR_CODES = new Set([
+  "QUESTION_FEEDBACK_STALE",
+  "STALE_QUESTION",
+  "VERSION_CONFLICT",
+  "SESSION_DEADLINE_EXPIRED",
+]);
+
+const INTENT_STALE_ERROR_CODES = new Set([
+  "INTENT_HYPOTHESIS_STALE",
+  "STALE_INTENT_CARD",
+  "INTENT_CONFLICT_PENDING",
+  "VERSION_CONFLICT",
+  "SESSION_DEADLINE_EXPIRED",
+]);
+
+async function refreshSessionAfterConflict(sid: string): Promise<void> {
+  try {
+    const latest = await api.getSession(sid);
+    applySession(latest);
+    selectVersion(latest.currentVersionId, { preserveSameStageDraft: true });
+  } catch {
+    // Keep original conflict error visible.
+  }
+}
 
 export async function decideProposal(
   proposal: Proposal,
   decision: "accept" | "reject",
 ): Promise<void> {
   const s = session.value;
-  if (!s) return;
+  if (!s || selectedStageHasActiveDisagreement.value) return;
   await withBusy(async () => {
-    const updated = await api.decideProposal(s.sessionId, proposal.proposalId, {
-      decision,
-      baseVersionId: s.currentVersionId,
-      idempotencyKey: uniqueId(decision),
-      reason: "",
-    });
-    applySession(updated);
-    if (decision === "accept") {
-      clearUnsavedMapDraft();
-      selectVersion(updated.currentVersionId, { forceReset: true });
-      await ensureAssessment(updated.currentVersionId);
-    } else {
-      selectVersion(updated.currentVersionId, { preserveSameStageDraft: true });
+    try {
+      const updated = await api.decideProposal(s.sessionId, proposal.proposalId, {
+        decision,
+        baseVersionId: s.currentVersionId,
+        idempotencyKey: uniqueId(decision),
+        reason: "",
+      });
+      applySession(updated);
+      if (decision === "accept") {
+        clearUnsavedMapDraft();
+        selectVersion(updated.currentVersionId, { forceReset: true });
+        await ensureAssessment(updated.currentVersionId);
+      } else {
+        selectVersion(updated.currentVersionId, { preserveSameStageDraft: true });
+      }
+    } catch (error) {
+      const err = asStructuredError(error);
+      if (err.code && PROPOSAL_STALE_ERROR_CODES.has(err.code)) {
+        await refreshSessionAfterConflict(s.sessionId);
+      }
+      throw error;
     }
   });
 }
@@ -46,13 +90,21 @@ export async function submitQuestionFeedback(
   updateSetSignal(questionFeedbackBusyKeys, (set) => set.add(feedbackKey));
   try {
     await withBusy(async () => {
-      const result = await api.submitQuestionFeedback(s.sessionId, item.questionId, {
-        action,
-        baseVersionId: s.currentVersionId,
-        idempotencyKey: uniqueId(`question-${action}`),
-      });
-      applySession(result.session);
-      selectVersion(result.session.currentVersionId, { preserveSameStageDraft: true });
+      try {
+        const result = await api.submitQuestionFeedback(s.sessionId, item.questionId, {
+          action,
+          baseVersionId: s.currentVersionId,
+          idempotencyKey: uniqueId(`question-${action}`),
+        });
+        applySession(result.session);
+        selectVersion(result.session.currentVersionId, { preserveSameStageDraft: true });
+      } catch (error) {
+        const err = asStructuredError(error);
+        if (err.code && QUESTION_STALE_ERROR_CODES.has(err.code)) {
+          await refreshSessionAfterConflict(s.sessionId);
+        }
+        throw error;
+      }
     });
   } finally {
     updateSetSignal(questionFeedbackBusyKeys, (set) => set.delete(feedbackKey));
@@ -74,17 +126,25 @@ export async function submitIntentFeedback(params: {
   let succeeded = false;
   try {
     await withBusy(async () => {
-      const result = await api.submitIntentFeedback(s.sessionId, params.intentState.hypothesisId, {
-        action: params.action,
-        candidateText: params.action === "revise" ? (params.candidateText ?? null) : null,
-        selectedHypothesisId: params.action === "keep" ? (params.selectedHypothesisId ?? null) : null,
-        sourceTurnId: params.turn.turnId,
-        baseVersionId: s.currentVersionId,
-        idempotencyKey: uniqueId(`intent-${params.action}`),
-      });
-      applySession(result.session);
-      selectVersion(result.session.currentVersionId, { preserveSameStageDraft: true });
-      succeeded = true;
+      try {
+        const result = await api.submitIntentFeedback(s.sessionId, params.intentState.hypothesisId, {
+          action: params.action,
+          candidateText: params.action === "revise" ? (params.candidateText ?? null) : null,
+          selectedHypothesisId: params.action === "keep" ? (params.selectedHypothesisId ?? null) : null,
+          sourceTurnId: params.turn.turnId,
+          baseVersionId: s.currentVersionId,
+          idempotencyKey: uniqueId(`intent-${params.action}`),
+        });
+        applySession(result.session);
+        selectVersion(result.session.currentVersionId, { preserveSameStageDraft: true });
+        succeeded = true;
+      } catch (error) {
+        const err = asStructuredError(error);
+        if (err.code && INTENT_STALE_ERROR_CODES.has(err.code)) {
+          await refreshSessionAfterConflict(s.sessionId);
+        }
+        throw error;
+      }
     });
   } finally {
     updateSetSignal(intentFeedbackBusyKeys, (set) => set.delete(busyKey));

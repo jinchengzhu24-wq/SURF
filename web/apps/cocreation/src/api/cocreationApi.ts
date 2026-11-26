@@ -114,14 +114,22 @@ function normalizeErrorDetails(detail: unknown): Record<string, unknown> | null 
   }
   const record = detail as Record<string, unknown>;
   if (record.details && typeof record.details === "object" && !Array.isArray(record.details)) {
-    return record.details as Record<string, unknown>;
+    const nested = record.details as Record<string, unknown>;
+    if (typeof record.requestId === "string" && record.requestId && !nested.requestId) {
+      return { ...nested, requestId: record.requestId };
+    }
+    return nested;
   }
   return record;
 }
 
 function isSafeRetryRequest(method: string, path: string, body: unknown): boolean {
   if (method === "GET") return true;
-  if (/\/translations\/(?:en|zh-CN)$/.test(path) || /\/language$/.test(path)) {
+  if (
+    /\/translations\/(?:en|zh-CN)$/.test(path) ||
+    /\/language$/.test(path) ||
+    /\/draft-regenerations\/[^/]+\/cancel$/.test(path)
+  ) {
     return true;
   }
   if (body && typeof body === "object" && !Array.isArray(body)) {
@@ -197,13 +205,22 @@ export function createCocreationApi(config: {
             ? safeRetry
             : error.retryable;
 
+        const detailRequestId =
+          typeof details?.requestId === "string" && details.requestId ? details.requestId : undefined;
+        const resolvedRequestId = error.requestId || detailRequestId;
+        const mergedDetails: Record<string, unknown> = {
+          ...(details ?? {}),
+          httpStatus: error.status,
+          ...(resolvedRequestId ? { requestId: resolvedRequestId } : {}),
+        };
+
         throw new CocreationApiError({
           status: error.status,
           code,
           message: error.message,
           url: error.url,
           retryable,
-          details: details ? { ...details, httpStatus: error.status } : { httpStatus: error.status },
+          details: mergedDetails,
           cause: error,
         });
       }

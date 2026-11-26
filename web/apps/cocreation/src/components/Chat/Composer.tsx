@@ -25,6 +25,7 @@ import {
 } from "../../store/chatStore";
 import { isDirty } from "../../store/editorStore";
 import {
+  activeChallengeState,
   binaryFlowActive,
   busy,
   canEditSelected,
@@ -68,6 +69,9 @@ export function Composer(): JSX.Element {
   const historical = isHistoricalStage.value;
   const intentConflictPending = selectedStageHasPendingIntentConflict.value;
   const disagreementActive = selectedStageHasActiveDisagreement.value;
+  const challengeStatus = activeChallengeState.value?.status;
+  const challengeChoicePending =
+    challengeStatus === "choice_pending" || challengeStatus === "awaiting_choice";
   const proposalLocked = proposalFlowActive.value;
   const binaryActive = binaryFlowActive.value;
 
@@ -86,23 +90,26 @@ export function Composer(): JSX.Element {
     interactionBusy ||
     !editable ||
     intentConflictPending ||
+    challengeChoicePending ||
     proposalPlanning ||
     proposalRetryPending ||
     binaryActive;
 
   const placeholder = intentConflictPending
     ? t(lang, "intentConflictPlaceholder")
-    : proposalPlanning
-      ? t(lang, "proposalPlanningPlaceholder")
-      : proposalRetryPending || binaryRetryPending
-        ? t(lang, "proposalRetryPlaceholder")
-        : binaryActive && flowStatus === "revision_needed"
-          ? t(lang, "binaryRevisionNeededPlaceholder")
-          : binaryActive
-            ? t(lang, "binaryChoicePlaceholder")
-            : flowStatus === "revision_needed"
-              ? t(lang, "proposalSupplementPlaceholder")
-              : t(lang, "messagePlaceholder");
+    : challengeChoicePending
+      ? t(lang, "challengeChoicePlaceholder")
+      : proposalPlanning
+        ? t(lang, "proposalPlanningPlaceholder")
+        : proposalRetryPending || binaryRetryPending
+          ? t(lang, "proposalRetryPlaceholder")
+          : binaryActive && flowStatus === "revision_needed"
+            ? t(lang, "binaryRevisionNeededPlaceholder")
+            : binaryActive
+              ? t(lang, "binaryChoicePlaceholder")
+              : flowStatus === "revision_needed"
+                ? t(lang, "proposalSupplementPlaceholder")
+                : t(lang, "messagePlaceholder");
 
   const proposalActive = proposalMode.value || proposalLocked;
   const proposalToggleDisabled =
@@ -193,11 +200,13 @@ export function Composer(): JSX.Element {
           ? t(lang, "hint.history")
           : intentConflictPending
             ? t(lang, "hint.conflict")
-            : proposalPlanning
-              ? t(lang, "proposalPlanningPlaceholder")
-              : proposalRetryPending
-                ? t(lang, "hint.retry")
-                : "")
+            : challengeChoicePending
+              ? t(lang, "challengeChoicePlaceholder")
+              : proposalPlanning
+                ? t(lang, "proposalPlanningPlaceholder")
+                : proposalRetryPending
+                  ? t(lang, "hint.retry")
+                  : "")
       : "";
 
   const isProposalWaiting =
@@ -391,6 +400,7 @@ export function Composer(): JSX.Element {
                 kind: "action",
                 helpKey: "chatRetry",
                 titleKey: "retry",
+                status: binaryChoiceDirtyBlocked ? t(lang, "hint.binaryDraftReset") : undefined,
               })}
             >
               {t(lang, "retry")}

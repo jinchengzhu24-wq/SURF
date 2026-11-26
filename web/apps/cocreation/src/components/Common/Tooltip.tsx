@@ -103,6 +103,52 @@ function queueTooltip(anchor: HTMLElement, descriptor: TooltipDescriptor, immedi
   }
 }
 
+export function showTooltip(
+  anchor: HTMLElement,
+  descriptor: TooltipDescriptor,
+  immediate = false,
+): void {
+  queueTooltip(anchor, descriptor, immediate);
+}
+
+/**
+ * Container-delegated pointer hover tooltip handlers for `.mini-map` previews.
+ */
+export function miniMapTooltipHandlers(mode: "preview" | "stagePreview") {
+  return {
+    onPointerOver: (event: PointerEvent) => {
+      if (event.pointerType === "touch") return;
+      const target = event.target;
+      const cell =
+        target instanceof Element ? target.closest<HTMLElement>("i[data-x][data-y]") : null;
+      if (!cell) {
+        hideTooltip();
+        return;
+      }
+      if (event.relatedTarget instanceof Node && cell.contains(event.relatedTarget)) return;
+      const x = Number(cell.dataset.x);
+      const y = Number(cell.dataset.y);
+      const tile = cell.dataset.tile;
+      if (!Number.isInteger(x) || !Number.isInteger(y) || typeof tile !== "string") return;
+      showTooltip(
+        cell,
+        {
+          kind: "tile",
+          tile,
+          mode,
+          row: y + 1,
+          column: x + 1,
+          entityLabel: cell.dataset.entityId || undefined,
+        },
+        false,
+      );
+    },
+    onPointerLeave: () => {
+      hideTooltip();
+    },
+  };
+}
+
 /**
  * Returns event handlers that explicitly bind a typed tooltip descriptor to a control.
  * Never performs reverse text lookup against rendered labels.
@@ -218,7 +264,15 @@ export function TooltipOverlay(): JSX.Element | null {
     const node = tipRef.current;
     if (!current || !node || !current.anchor.isConnected) return;
 
-    const rect = current.anchor.getBoundingClientRect();
+    const anchor = current.anchor;
+    const previousDescribedBy = anchor.getAttribute("aria-describedby");
+    const tokens = (previousDescribedBy || "").split(/\s+/).filter(Boolean);
+    const addedDescribedBy = !tokens.includes("uiTooltip");
+    if (addedDescribedBy) {
+      anchor.setAttribute("aria-describedby", [...tokens, "uiTooltip"].join(" "));
+    }
+
+    const rect = anchor.getBoundingClientRect();
     const box = node.getBoundingClientRect();
     const left = Math.max(
       8,
@@ -236,6 +290,15 @@ export function TooltipOverlay(): JSX.Element | null {
       "--help-anchor-x",
       `${Math.max(14, Math.min(rect.left + rect.width / 2 - left, box.width - 14))}px`,
     );
+
+    return () => {
+      if (!addedDescribedBy) return;
+      if (previousDescribedBy === null) {
+        anchor.removeAttribute("aria-describedby");
+      } else {
+        anchor.setAttribute("aria-describedby", previousDescribedBy);
+      }
+    };
   }, [current]);
 
   if (!current || !current.anchor.isConnected) return null;

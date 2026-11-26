@@ -14,10 +14,27 @@ from ._cocreation_migrate_ops import (
 )
 from .database import SQLiteDatabase, dump_json, load_json
 
+_LEGACY_CHALLENGE_STATUS_MAP: dict[str, str] = {
+    "review_pending": "awaiting_reason",
+    "reason_review": "awaiting_reason",
+    "choice_pending": "awaiting_choice",
+}
+
 
 def _src_tables(src: sqlite3.Connection) -> set[str]:
     rows = src.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     return {row[0] for row in rows}
+
+
+def _valid_session_ids(dst: sqlite3.Connection) -> set[str]:
+    return {str(row[0]) for row in dst.execute("SELECT session_id FROM design_sessions")}
+
+
+def _valid_session_versions(dst: sqlite3.Connection) -> set[tuple[str, str]]:
+    return {
+        (str(row[0]), str(row[1]))
+        for row in dst.execute("SELECT session_id, version_id FROM level_versions")
+    }
 
 
 def _migrate_core_tables(
@@ -27,12 +44,17 @@ def _migrate_core_tables(
     maps: dict[str, Any],
     stats: dict[str, int],
 ) -> None:
+    pending_regens: list[dict[str, Any]] = []
     if "design_sessions" in tables:
         for row in src.execute("SELECT * FROM design_sessions"):
             r = row_dict(row)
             sid = r["id"]
             intention = maps["intentions"].get(sid)
             locked_at = r.get("language_locked_at")
+            has_started = bool(r.get("current_version_id") or r.get("deadline_started_at"))
+            language_locked = 1 if (locked_at or r.get("language_locked") or has_started) else 0
+            if language_locked and not locked_at:
+                locked_at = r["created_at"]
             cur = dst.execute(
                 "INSERT OR IGNORE INTO design_sessions("
                 "session_id, match_id, player_slot, mode, language, language_locked, "
@@ -48,7 +70,7 @@ def _migrate_core_tables(
                 ")",
                 (
                     sid, r.get("match_id"), r.get("player_number"), r["initial_draft_method"],
-                    r["language"], 1 if locked_at else 0, locked_at, r["status"],
+                    r["language"], language_locked, locked_at, r["status"],
                     r["access_hash"], r["integration_hash"], r["bootstrap_hash"],
                     r.get("bootstrap_used_at"), r.get("creation_key"), r.get("current_version_id"),
                     r.get("deadline_started_at"), r.get("deadline_at"), r.get("final_version_id"),
@@ -61,28 +83,37 @@ def _migrate_core_tables(
             )
             stats["sessions"] += cur.rowcount
 
-            req_id = r.get("draft_regeneration_request_id")
-            if req_id:
-                rcur = dst.execute(
-                    "INSERT OR IGNORE INTO draft_regenerations("
-                    "request_id, session_id, idempotency_key, status, generation, "
-                    "failure_code, rows_json, validation_json, requested_at, updated_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        req_id, sid, r.get("draft_regeneration_key") or req_id,
-                        r.get("draft_regeneration_status") or "completed",
-                        int(r.get("draft_generation") or 1),
-                        r.get("draft_regeneration_failure_code"),
-                        r.get("draft_rows_json"), r.get("draft_validation_json"),
-                        r.get("draft_regeneration_requested_at") or r["created_at"],
-                        r.get("draft_regeneration_updated_at") or r["updated_at"],
-                    ),
-                )
-                stats["draft_regenerations"] += rcur.rowcount
+            if r.get("draft_regeneration_request_id"):
+                pending_regens.append(r)
+
+    valid_sessions = _valid_session_ids(dst)
+    for r in pending_regens:
+        sid = r["id"]
+        if sid not in valid_sessions:
+            continue
+        req_id = r["draft_regeneration_request_id"]
+        rcur = dst.execute(
+            "INSERT OR IGNORE INTO draft_regenerations("
+            "request_id, session_id, idempotency_key, status, generation, "
+            "failure_code, rows_json, validation_json, requested_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                req_id, sid, r.get("draft_regeneration_key") or req_id,
+                r.get("draft_regeneration_status") or "completed",
+                int(r.get("draft_generation") or 1),
+                r.get("draft_regeneration_failure_code"),
+                r.get("draft_rows_json"), r.get("draft_validation_json"),
+                r.get("draft_regeneration_requested_at") or r["created_at"],
+                r.get("draft_regeneration_updated_at") or r["updated_at"],
+            ),
+        )
+        stats["draft_regenerations"] += rcur.rowcount
 
     if "level_versions" in tables:
         for row in src.execute("SELECT * FROM level_versions ORDER BY stage_number"):
             r = row_dict(row)
+            if r["session_id"] not in valid_sessions:
+                continue
             assessment = maps["assessments"].get(r["id"])
             cur = dst.execute(
                 "INSERT OR IGNORE INTO level_versions("
@@ -100,9 +131,12 @@ def _migrate_core_tables(
             )
             stats["versions"] += cur.rowcount
 
+    valid_versions = _valid_session_versions(dst)
     if "conversation_turns" in tables:
         for row in src.execute("SELECT * FROM conversation_turns ORDER BY sequence_number"):
             r = row_dict(row)
+            if (r["session_id"], r["version_id"]) not in valid_versions:
+                continue
             translations = maps["translations"].get(r["id"])
             cur = dst.execute(
                 "INSERT OR IGNORE INTO conversation_turns("
@@ -129,9 +163,14 @@ def _migrate_proposals_challenges_attempts(
     maps: dict[str, Any],
     stats: dict[str, int],
 ) -> None:
+    valid_sessions = _valid_session_ids(dst)
+    valid_versions = _valid_session_versions(dst)
+
     if "change_proposals" in tables:
         for row in src.execute("SELECT * FROM change_proposals ORDER BY created_at"):
             r = row_dict(row)
+            if (r["session_id"], r["base_version_id"]) not in valid_versions:
+                continue
             dec = maps["decisions_by_proposal"].get(r["id"])
             decision_payload = (
                 {
@@ -168,6 +207,8 @@ def _migrate_proposals_challenges_attempts(
             stats["proposals"] += cur.rowcount
 
     for dec in maps["other_decisions"]:
+        if dec["session_id"] not in valid_sessions:
+            continue
         req_payload = {"decisionType": dec["decision_type"], "versionId": dec["version_id"]}
         resp_payload = {"versionId": dec["version_id"], "decisionId": dec["id"]}
         stats["idempotency_keys"] += insert_idempotency(
@@ -178,7 +219,11 @@ def _migrate_proposals_challenges_attempts(
     if "revision_challenges" in tables:
         for row in src.execute("SELECT * FROM revision_challenges"):
             r = row_dict(row)
+            if (r["session_id"], r["base_version_id"]) not in valid_versions:
+                continue
             reviews = maps["reviews_by_challenge"].get(r["challenge_id"], [])
+            raw_status = str(r["status"])
+            normalized_status = _LEGACY_CHALLENGE_STATUS_MAP.get(raw_status, raw_status)
             cur = dst.execute(
                 "INSERT OR IGNORE INTO revision_challenges("
                 "challenge_id, session_id, base_version_id, source_proposal_turn_id, "
@@ -187,7 +232,7 @@ def _migrate_proposals_challenges_attempts(
                 ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     r["challenge_id"], r["session_id"], r["base_version_id"],
-                    r["source_proposal_turn_id"], r["challenge_turn_id"], r["status"],
+                    r["source_proposal_turn_id"], r["challenge_turn_id"], normalized_status,
                     r.get("current_reason_turn_id"), dump_json(reviews),
                     r["created_at"], r["updated_at"],
                 ),
@@ -197,6 +242,8 @@ def _migrate_proposals_challenges_attempts(
     if "play_attempts" in tables:
         for row in src.execute("SELECT * FROM play_attempts"):
             r = row_dict(row)
+            if (r["session_id"], r["version_id"]) not in valid_versions:
+                continue
             min_moves = int(r["minimum_moves"]) if r.get("minimum_moves") is not None else -1
             min_pushes = int(r["minimum_pushes"]) if r.get("minimum_pushes") is not None else -1
             cur = dst.execute(

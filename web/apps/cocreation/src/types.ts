@@ -165,7 +165,7 @@ export interface BinaryQuestion {
   baseVersionId: string;
   question: string;
   note?: string;
-  status: "pending" | "answered" | "cancelled" | "expired" | string;
+  status?: "pending" | "answered" | "cancelled" | "expired" | string;
   selectedChoiceId?: string | null;
   sourceLanguage?: Language;
   choices: BinaryChoice[];
@@ -242,6 +242,21 @@ export interface ChallengeState {
   status: "active" | "choice_pending" | "resolved" | string;
 }
 
+export interface ChallengeCard {
+  status?: "active" | "choice_pending" | "resolved" | string;
+  displayCard?: boolean;
+  subject?: string;
+  phase?: "choice_pending" | string;
+  challengeId?: string;
+  userPosition?: string;
+  aiPosition?: string;
+  coreDisagreement?: string;
+  nextQuestion?: string;
+  question?: string;
+  summary?: string;
+  choices?: BinaryChoice[];
+}
+
 export interface TurnGuidance {
   move?: string | null;
   intentHypothesis?: string | null;
@@ -250,6 +265,7 @@ export interface TurnGuidance {
   proposalOffer?: ProposalOffer | null;
   proposalQuestion?: BinaryQuestion | null;
   disagreement?: Disagreement | null;
+  challengeCard?: ChallengeCard | null;
   discussionCardMode?: string | null;
   uiCues?: UiCue[];
   coordinateLinks?: CoordinateLink[];
@@ -348,6 +364,7 @@ export interface InclinationEvidence {
 }
 
 export interface DesignInclination {
+  hypothesisId?: string;
   inclinationId?: string;
   statement: string;
   confirmedAtStageNumber?: number;

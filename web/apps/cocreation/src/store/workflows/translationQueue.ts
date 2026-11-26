@@ -20,6 +20,38 @@ export function clearTranslationRetryTimer(): void {
   }
 }
 
+function recordBatchTranslationOutcomes(
+  capturedSessionId: string,
+  turnIds: readonly string[],
+  targetLanguage: Language,
+  missingIds: ReadonlySet<string>,
+): void {
+  let shouldScheduleRetry = false;
+  updateSetSignal(translationFailures, (set) => {
+    for (const id of turnIds) {
+      const key = `${id}:${targetLanguage}`;
+      if (missingIds.has(id)) {
+        set.add(key);
+        const nextAttempt = (translationRetryAttempts.get(key) ?? 0) + 1;
+        translationRetryAttempts.set(key, nextAttempt);
+        if (nextAttempt < 3) shouldScheduleRetry = true;
+      } else {
+        set.delete(key);
+        translationRetryAttempts.delete(key);
+      }
+    }
+  });
+
+  if (shouldScheduleRetry && translationRetryTimer === null) {
+    translationRetryTimer = globalThis.setTimeout(() => {
+      translationRetryTimer = null;
+      if (sessionId.value === capturedSessionId) {
+        void ensureVisibleTranslations();
+      }
+    }, 5_000);
+  }
+}
+
 async function translateVisibleBatch(
   capturedSessionId: string,
   batch: Turn[],
@@ -43,13 +75,10 @@ async function translateVisibleBatch(
       }),
     };
 
-    updateSetSignal(translationFailures, (set) => {
-      for (const id of turnIds) {
-        const key = `${id}:${targetLanguage}`;
-        set.delete(key);
-        translationRetryAttempts.delete(key);
-      }
-    });
+    const stillMissing = new Set(
+      turnIds.filter((id) => !translatedById.get(id)?.translations?.[targetLanguage]),
+    );
+    recordBatchTranslationOutcomes(capturedSessionId, turnIds, targetLanguage, stillMissing);
   } catch (error) {
     if (sessionId.value !== capturedSessionId || !session.value) return;
     const err = asStructuredError(error);
@@ -73,30 +102,12 @@ async function translateVisibleBatch(
       // Retain source text and original retry target.
     }
 
-    let shouldScheduleRetry = false;
-    updateSetSignal(translationFailures, (set) => {
-      for (const id of turnIds) {
-        const key = `${id}:${targetLanguage}`;
-        if (remaining.includes(id)) {
-          set.add(key);
-          const nextAttempt = (translationRetryAttempts.get(key) ?? 0) + 1;
-          translationRetryAttempts.set(key, nextAttempt);
-          if (nextAttempt < 3) shouldScheduleRetry = true;
-        } else {
-          set.delete(key);
-          translationRetryAttempts.delete(key);
-        }
-      }
-    });
-
-    if (shouldScheduleRetry && translationRetryTimer === null) {
-      translationRetryTimer = globalThis.setTimeout(() => {
-        translationRetryTimer = null;
-        if (sessionId.value === capturedSessionId) {
-          void ensureVisibleTranslations();
-        }
-      }, 5_000);
-    }
+    recordBatchTranslationOutcomes(
+      capturedSessionId,
+      turnIds,
+      targetLanguage,
+      new Set(remaining),
+    );
   } finally {
     translatingBatchKeys.delete(requestKey);
     translationRemainingCount.value = Math.max(0, translationRemainingCount.value - batch.length);

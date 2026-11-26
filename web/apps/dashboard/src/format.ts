@@ -296,6 +296,21 @@ export function findOpeningForStage(
   );
 }
 
+export function openingIsConsumed(
+  match: MatchRecord,
+  opening: CoCreationFlowEvent | null | undefined,
+): boolean {
+  if (!opening || !opening.assistantTurnId) return false;
+  const player = (match.players ?? []).find(
+    (item) => item.playerNumber === opening.playerNumber,
+  );
+  return (player?.coCreationFlow ?? []).some(
+    (event) =>
+      event.eventType === "turn" &&
+      event.openingAssistantTurnId === opening.assistantTurnId,
+  );
+}
+
 export function formatChallengeOutcome(outcome: string | null | undefined): string {
   if (outcome === "timed_out") return "Timed out";
   if (outcome === "completed") return "Completed";

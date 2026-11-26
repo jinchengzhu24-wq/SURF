@@ -68,6 +68,7 @@ from .requirements import (
     component_positions,
     evaluate_requirements,
     goal_rank,
+    normalize_requirement_record,
     preflight_requirements,
     validate_requirement_record,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "connected_outer_shell",
     "evaluate_requirements",
     "goal_rank",
+    "normalize_requirement_record",
     "parse_binary_step",
     "parse_revision_plan",
     "preflight_requirements",

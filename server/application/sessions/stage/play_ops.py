@@ -16,6 +16,7 @@ from server.domain.errors import (
 )
 from server.persistence.database import SQLiteDatabase
 from server.persistence.models import DesignSessionRecord
+from server.persistence.repositories._mappers import row_to_play_attempt
 from server.persistence.repositories.sessions_repo import SessionsRepository
 
 from ..config import CoCreationAppSettings, append_audit_event_tx
@@ -103,10 +104,14 @@ class _PlayLifecycleMixin:
             if existing.ticket_used_at is not None:
                 raise ConflictError("PLAY_TICKET_USED", "error.version_conflict")
             ticket = generate_random_token()
-            self._sessions_repo.update_play_attempt(
-                existing.attempt_id,
-                ticket_hash=hash_token(ticket, secret_bytes=secret_bytes),
-            )
+            with self._db.write_tx() as conn:
+                cur = conn.execute(
+                    "UPDATE play_attempts SET ticket_hash = ? "
+                    "WHERE attempt_id = ? AND ticket_used_at IS NULL",
+                    (hash_token(ticket, secret_bytes=secret_bytes), existing.attempt_id),
+                )
+                if cur.rowcount == 0:
+                    raise ConflictError("PLAY_TICKET_USED", "error.version_conflict")
             return {
                 "attemptId": existing.attempt_id,
                 "playUrl": build_play_url(
@@ -119,20 +124,51 @@ class _PlayLifecycleMixin:
         ticket = generate_random_token()
         now_iso = self._clock.utc_now()
         expires_iso = utc_plus_seconds_iso(self._clock, self._settings.play_ticket_lifetime_seconds)
-        self._sessions_repo.create_play_attempt(
-            attempt_id=attempt_id,
-            session_id=session_id,
-            version_id=version_id,
-            mode=session.mode,
-            language=session.language,
-            ticket_hash=hash_token(ticket, secret_bytes=secret_bytes),
-            ticket_expires_at=expires_iso,
-            issued_at=now_iso,
-            minimum_moves=int(version.solver.get("solutionSteps", -1)),
-            minimum_pushes=int(version.solver.get("solutionPushes", -1)),
-            idempotency_key=idempotency_key,
-        )
         with self._db.write_tx() as conn:
+            cur_row = conn.execute(
+                "SELECT * FROM play_attempts WHERE session_id = ? AND idempotency_key = ?",
+                (session_id, idempotency_key),
+            ).fetchone()
+            if cur_row is not None:
+                existing_rec = row_to_play_attempt(cur_row)
+                if existing_rec.version_id != version_id:
+                    raise IdempotencyConflictError("IDEMPOTENCY_CONFLICT")
+                if existing_rec.ticket_used_at is not None:
+                    raise ConflictError("PLAY_TICKET_USED", "error.version_conflict")
+                cur = conn.execute(
+                    "UPDATE play_attempts SET ticket_hash = ? "
+                    "WHERE attempt_id = ? AND ticket_used_at IS NULL",
+                    (hash_token(ticket, secret_bytes=secret_bytes), existing_rec.attempt_id),
+                )
+                if cur.rowcount == 0:
+                    raise ConflictError("PLAY_TICKET_USED", "error.version_conflict")
+                return {
+                    "attemptId": existing_rec.attempt_id,
+                    "playUrl": build_play_url(
+                        existing_rec.attempt_id,
+                        ticket,
+                        webgl_base_url=self._settings.webgl_base_url,
+                    ),
+                }
+            conn.execute(
+                "INSERT INTO play_attempts("
+                "attempt_id, session_id, version_id, mode, language, status, ticket_hash, "
+                "ticket_expires_at, issued_at, minimum_moves, minimum_pushes, idempotency_key"
+                ") VALUES (?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?)",
+                (
+                    attempt_id,
+                    session_id,
+                    version_id,
+                    session.mode,
+                    session.language,
+                    hash_token(ticket, secret_bytes=secret_bytes),
+                    expires_iso,
+                    now_iso,
+                    int(version.solver.get("solutionSteps", -1)),
+                    int(version.solver.get("solutionPushes", -1)),
+                    idempotency_key,
+                ),
+            )
             append_audit_event_tx(
                 conn,
                 session_id,
@@ -173,13 +209,20 @@ class _PlayLifecycleMixin:
 
         attempt_token = generate_random_token()
         now_iso = self._clock.utc_now()
-        self._sessions_repo.update_play_attempt(
-            attempt_id,
-            ticket_used_at=now_iso,
-            attempt_token_hash=hash_token(attempt_token, secret_bytes=secret_bytes),
-            loaded_at=now_iso,
-            status="loaded",
-        )
+        with self._db.write_tx() as conn:
+            cur = conn.execute(
+                "UPDATE play_attempts "
+                "SET ticket_used_at = ?, attempt_token_hash = ?, loaded_at = ?, status = 'loaded' "
+                "WHERE attempt_id = ? AND ticket_used_at IS NULL",
+                (
+                    now_iso,
+                    hash_token(attempt_token, secret_bytes=secret_bytes),
+                    now_iso,
+                    attempt_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ConflictError("PLAY_TICKET_USED", "error.version_conflict")
         return {
             "attemptId": attempt_id,
             "sessionId": attempt.session_id,

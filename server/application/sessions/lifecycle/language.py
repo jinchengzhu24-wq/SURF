@@ -68,6 +68,8 @@ async def update_language_impl(
             if cur_session.language != language:
                 raise ConflictError("LANGUAGE_LOCKED", "error.language_locked")
             return
+        if cur_session.draft_generation != session.draft_generation:
+            raise ConflictError("DRAFT_GENERATION_CONFLICT", "error.version_conflict")
 
         if cur_session.current_version_id is None:
             active_regen = conn.execute(

@@ -258,3 +258,304 @@ async def test_async_openai_transport_pools_by_key_and_closes_cleanly() -> None:
     with pytest.raises(UpstreamLLMError) as exc_info:
         empty_transport.get_client()
     assert exc_info.value.code == "CONFIGURATION_ERROR"
+
+
+class JsonObjectFakeTransport(FakeTransport):
+    response_format_mode = "json_object"
+
+
+class PromptOnlyFakeTransport(FakeTransport):
+    response_format_mode = "prompt_only"
+
+
+async def test_call_structured_prompt_only_mode_omits_response_format_and_keeps_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_schema = json.dumps(
+        SampleSchema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+    )
+
+    transport = PromptOnlyFakeTransport(
+        [
+            TransportResponse(content="not json"),
+            TransportResponse(
+                content='```json\n{"move_hint": "prompt ok", "score": 9}\n```'
+            ),
+        ]
+    )
+    result = await call_structured(
+        transport,
+        task="dg_guide",
+        model="deepseek-v4-flash",
+        messages=[
+            {"role": "system", "content": "Follow the contract."},
+            {"role": "user", "content": "Guide?"},
+        ],
+        response_model=SampleSchema,
+        max_attempts=2,
+        clock=FakeClock(),
+    )
+    assert result.attempts_used == 2
+    assert result.parsed == SampleSchema(move_hint="prompt ok", score=9)
+    for call in transport.calls:
+        assert call["response_format"] is None
+        assert call["messages"][0]["role"] == "system"
+        assert "Follow the contract." in call["messages"][0]["content"]
+        assert expected_schema in call["messages"][0]["content"]
+
+    captured_kwargs: list[dict[str, Any]] = []
+
+    class _FakeMessage:
+        content = json.dumps({"move_hint": "ds ok", "score": 5})
+
+    class _FakeChoice:
+        message = _FakeMessage()
+        finish_reason = "stop"
+
+    class _FakeResponse:
+        choices = [_FakeChoice()]
+        usage = None
+
+    class _FakeCompletions:
+        async def create(self, **kwargs: Any) -> _FakeResponse:
+            captured_kwargs.append(kwargs)
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    real_transport = AsyncOpenAITransport(
+        api_key="ds-test-12345678901234",
+        base_url="https://api.deepseek.com",
+        response_format_mode="prompt_only",
+        default_extra_body={"thinking": {"type": "disabled"}},
+    )
+    monkeypatch.setattr(real_transport, "get_client", lambda **_kw: _FakeClient())
+
+    res = await call_structured(
+        real_transport,
+        task="level_plan",
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "Plan?"}],
+        response_model=SampleSchema,
+        max_attempts=1,
+        temperature=0.6,
+        clock=FakeClock(),
+    )
+    assert res.parsed == SampleSchema(move_hint="ds ok", score=5)
+    assert len(captured_kwargs) == 1
+    assert "response_format" not in captured_kwargs[0]
+    assert captured_kwargs[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+async def test_call_structured_json_object_mode_appends_schema_and_keeps_it_on_repair() -> None:
+    expected_schema = json.dumps(
+        SampleSchema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+    )
+
+    transport = JsonObjectFakeTransport(
+        [
+            TransportResponse(content="{not valid json"),
+            TransportResponse(content=json.dumps({"move_hint": "step left", "score": 7})),
+        ]
+    )
+    result = await call_structured(
+        transport,
+        task="hint_gen",
+        model="kimi-k2.6",
+        messages=[
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Hint?"},
+        ],
+        response_model=SampleSchema,
+        max_attempts=2,
+        clock=FakeClock(),
+    )
+    assert result.attempts_used == 2
+    assert result.parsed == SampleSchema(move_hint="step left", score=7)
+    for call in transport.calls:
+        assert call["response_format"] == {"type": "json_object"}
+        assert call["messages"][0]["role"] == "system"
+        assert "Be concise." in call["messages"][0]["content"]
+        assert expected_schema in call["messages"][0]["content"]
+
+    no_sys_transport = JsonObjectFakeTransport(
+        [TransportResponse(content=json.dumps({"move_hint": "up", "score": 3}))]
+    )
+    res_no_sys = await call_structured(
+        no_sys_transport,
+        task="hint_gen",
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "Hint?"}],
+        response_model=SampleSchema,
+        max_attempts=1,
+        clock=FakeClock(),
+    )
+    assert res_no_sys.parsed == SampleSchema(move_hint="up", score=3)
+    first_messages = no_sys_transport.calls[0]["messages"]
+    assert first_messages[0]["role"] == "system"
+    assert expected_schema in first_messages[0]["content"]
+    assert first_messages[1] == {"role": "user", "content": "Hint?"}
+
+
+async def test_async_openai_transport_applies_provider_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_kwargs: list[dict[str, Any]] = []
+
+    class _FakeMessage:
+        content = json.dumps({"move_hint": "ok", "score": 1})
+
+    class _FakeChoice:
+        message = _FakeMessage()
+        finish_reason = "stop"
+
+    class _FakeUsage:
+        prompt_tokens = 10
+        completion_tokens = 5
+        total_tokens = 15
+
+    class _FakeResponse:
+        choices = [_FakeChoice()]
+        usage = _FakeUsage()
+
+    class _FakeCompletions:
+        async def create(self, **kwargs: Any) -> _FakeResponse:
+            captured_kwargs.append(kwargs)
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    transport = AsyncOpenAITransport(
+        api_key="sk-test-12345678901234",
+        base_url="https://api.moonshot.cn/v1",
+        response_format_mode="json_object",
+        default_extra_body={"thinking": {"type": "disabled"}},
+        fixed_temperature=0.6,
+        use_max_completion_tokens=True,
+    )
+    monkeypatch.setattr(transport, "get_client", lambda **_kw: _FakeClient())
+
+    resp = await transport.complete(
+        model="kimi-k2.6",
+        messages=[{"role": "user", "content": "hi"}],
+        response_format={"type": "json_object"},
+        temperature=0.35,
+        max_tokens=2400,
+        extra_body={"foo": "bar"},
+    )
+    assert resp.finish_reason == "stop"
+    assert resp.total_tokens == 15
+    assert len(captured_kwargs) == 1
+    sent = captured_kwargs[0]
+    assert sent["temperature"] == 0.6
+    assert sent["max_completion_tokens"] == 2400
+    assert "max_tokens" not in sent
+    assert sent["response_format"] == {"type": "json_object"}
+    assert sent["extra_body"] == {"thinking": {"type": "disabled"}, "foo": "bar"}
+
+
+async def test_call_structured_unwraps_single_json_fence_and_rejects_bad_roots() -> None:
+    json_fenced = JsonObjectFakeTransport(
+        [
+            TransportResponse(
+                content='  ```json\r\n{"move_hint": "push up", "score": 11}\r\n```  '
+            )
+        ]
+    )
+    res_json_fence = await call_structured(
+        json_fenced,
+        task="hint_gen",
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "Hint?"}],
+        response_model=SampleSchema,
+        max_attempts=1,
+        clock=FakeClock(),
+    )
+    assert res_json_fence.parsed == SampleSchema(move_hint="push up", score=11)
+
+    bare_fenced = JsonObjectFakeTransport(
+        [TransportResponse(content='```\n{"move_hint": "push down", "score": 12}\n```')]
+    )
+    res_bare_fence = await call_structured(
+        bare_fenced,
+        task="hint_gen",
+        model="kimi-k2.6",
+        messages=[{"role": "user", "content": "Hint?"}],
+        response_model=SampleSchema,
+        max_attempts=1,
+        clock=FakeClock(),
+    )
+    assert res_bare_fence.parsed == SampleSchema(move_hint="push down", score=12)
+
+    prose_wrapped = JsonObjectFakeTransport(
+        [
+            TransportResponse(
+                content='Here is the JSON:\n```json\n{"move_hint": "push up", "score": 11}\n```'
+            )
+        ]
+    )
+    with pytest.raises(LLMValidationError) as exc_prose:
+        await call_structured(
+            prose_wrapped,
+            task="hint_gen",
+            model="kimi-k2.6",
+            messages=[{"role": "user", "content": "Hint?"}],
+            response_model=SampleSchema,
+            max_attempts=1,
+            clock=FakeClock(),
+        )
+    assert exc_prose.value.code == "MODEL_JSON_INVALID"
+
+    for bad_root in ('["push up", 11]', "42", '"just a string"'):
+        non_dict = JsonObjectFakeTransport([TransportResponse(content=bad_root)])
+        with pytest.raises(LLMValidationError) as exc_non_dict:
+            await call_structured(
+                non_dict,
+                task="hint_gen",
+                model="kimi-k2.6",
+                messages=[{"role": "user", "content": "Hint?"}],
+                response_model=SampleSchema,
+                max_attempts=1,
+                clock=FakeClock(),
+            )
+        assert exc_non_dict.value.code == "MODEL_JSON_INVALID"
+
+
+async def test_call_structured_truncation_repair_omits_raw_and_supports_async_validator() -> None:
+    huge_partial = '{"move_hint":"' + ("x" * 1500)
+    transport = FakeTransport(
+        [
+            TransportResponse(content=huge_partial, finish_reason="length"),
+            TransportResponse(content=json.dumps({"move_hint": "concise", "score": 8})),
+        ]
+    )
+
+    async def _async_validator(parsed: SampleSchema) -> SampleSchema:
+        return SampleSchema(move_hint=parsed.move_hint.strip(), score=parsed.score)
+
+    res = await call_structured(
+        transport,
+        task="hint_gen",
+        model="kimi-k2.6",
+        messages=[{"role": "user", "content": "Hint?"}],
+        response_model=SampleSchema,
+        validator=_async_validator,
+        max_attempts=2,
+        clock=FakeClock(),
+    )
+    assert res.attempts_used == 2
+    assert res.parsed == SampleSchema(move_hint="concise", score=8)
+    repair_msgs = transport.calls[1]["messages"]
+    assert len(repair_msgs) == 3
+    assert len(repair_msgs[1]["content"]) < 300
+    assert huge_partial not in repair_msgs[1]["content"]
+    assert "truncated" in repair_msgs[2]["content"].lower()
+    assert "concise" in repair_msgs[2]["content"].lower()

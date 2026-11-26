@@ -10,11 +10,12 @@ import {
   canEditSelected,
   currentPendingProposal,
   language,
+  selectedStageHasActiveDisagreement,
   unityPlayActive,
 } from "../../store/sessionStore";
 import { decideProposal } from "../../store/workflows";
 import type { TileDiff } from "../../types";
-import { tooltipHandlers } from "../Common/Tooltip";
+import { miniMapTooltipHandlers, tooltipHandlers } from "../Common/Tooltip";
 
 export function formatVerifiedProposalSummary(
   lang: "en" | "zh-CN",
@@ -67,7 +68,9 @@ export function ProposalCard(): JSX.Element | null {
   if (!proposal) return null;
 
   const lang = language.value;
-  const disabled = busy.value || unityPlayActive.value;
+  const disagreementBlocked = selectedStageHasActiveDisagreement.value;
+  const disabled = busy.value || unityPlayActive.value || disagreementBlocked;
+  const blockedStatus = disagreementBlocked ? t(lang, "proposalDisagreementActive") : undefined;
   const summary = formatVerifiedProposalSummary(lang, proposal.diff);
   const colon = lang === "zh-CN" ? "：" : ": ";
   const entityLabels = buildEntityLabels(proposal.proposedRows);
@@ -93,7 +96,11 @@ export function ProposalCard(): JSX.Element | null {
             </li>
           ))}
         </ul>
-        <div class="mini-map proposal-map" style={{ gridTemplateColumns: "repeat(12, 1fr)" }}>
+        <div
+          class="mini-map proposal-map"
+          style={{ gridTemplateColumns: "repeat(12, 1fr)" }}
+          {...miniMapTooltipHandlers("preview")}
+        >
           {proposal.proposedRows.map((row, y) =>
             [...row].map((tile, x) => {
               const coordKey = `${x},${y}`;
@@ -102,6 +109,9 @@ export function ProposalCard(): JSX.Element | null {
                 <i
                   key={coordKey}
                   class={`${getTileClass(tile)}${changedSet.has(coordKey) ? " changed" : ""}`}
+                  data-x={x}
+                  data-y={y}
+                  data-tile={tile}
                   data-entity-id={entity}
                   role={entity ? "img" : undefined}
                   aria-label={entity ? formatEntityCoordinate(entity, x, y) : undefined}
@@ -121,6 +131,7 @@ export function ProposalCard(): JSX.Element | null {
               kind: "action",
               helpKey: "reject",
               titleKey: "reject",
+              status: blockedStatus,
             })}
           >
             {t(lang, "reject")}
@@ -135,11 +146,17 @@ export function ProposalCard(): JSX.Element | null {
               kind: "action",
               helpKey: "accept",
               titleKey: "accept",
+              status: blockedStatus,
             })}
           >
             {t(lang, "accept")}
           </button>
         </div>
+        {disagreementBlocked ? (
+          <p class="control-hint" role="status">
+            {t(lang, "proposalDisagreementActive")}
+          </p>
+        ) : null}
       </section>
     </div>
   );

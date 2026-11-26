@@ -33,5 +33,6 @@ async def decide_proposal(
         decision=payload.decision,
         base_version_id=payload.baseVersionId,
         idempotency_key=payload.idempotencyKey,
+        reason=payload.reason,
     )
     return ensure_session_shape(result)

@@ -30,7 +30,7 @@ Unity 赛前问卷 → 大厅与匹配 → DG 与首版生成
 | [Assets/Scripts/](Assets/Scripts/) · [Assets/Scenes/](Assets/Scenes/) | Unity 逻辑与场景，包括[地图生成](Assets/Scripts/Level/Generation/)和[在线匹配控制器](Assets/Scripts/Online/)。启用场景以 [EditorBuildSettings.asset](ProjectSettings/EditorBuildSettings.asset) 为准。 |
 | [WebGL 模板](Assets/WebGLTemplates/SokobanPixel/) · [BrowserNavigation.jslib](Assets/Plugins/WebGL/BrowserNavigation.jslib) | Unity WebGL 页面、`TemplateData/sokoban-bridge.js`（协议版本 5）、房间码叠加层与游戏页 Dashboard 密码入口。 |
 | [server/core/](server/core/) | 共享纯 Python 3.12 核心库（无 FastAPI/SQL 依赖；Unity [Packages/](Packages/) 仅保留 `manifest.json` 与 `packages-lock.json`）：12×10 网格校验与操作、BFS/推箱求解器、演示/布局生成器、异步结构化 LLM 客户端、时钟与配置脱敏。 |
-| [server/](server/) | 统一 FastAPI 后端（`server/main.py` `create_app` 工厂、`settings.py`、`container.py`）：`api/routers/`、`application/{rooms,study,analytics,sessions,dialogue}/`（含 `sessions/{lifecycle,stage,read_model}/`）、`domain/`（含 `{proposals,memory,blueprints}/`）、`i18n/`、`llm/`（原生异步结构化 JSON 管线）、`persistence/`（统一 SQLite WAL 仓储与迁移 CLI）、`evaluations/` 与 `tools/{reliability_report,semantic_eval}.py`。 |
+| [server/](server/) | 统一 FastAPI 后端（`server/main.py` `create_app` 工厂、`settings.py`、`container.py`）：`api/routers/`、`application/{rooms,study,analytics,sessions,dialogue}/`（含 `sessions/{lifecycle,stage,read_model}/`）、`domain/`（含 `{proposals,memory,blueprints,rooms}/`）、`i18n/`、`llm/`（原生异步结构化 JSON 管线）、`persistence/`（统一 SQLite WAL 仓储与迁移 CLI）、`evaluations/` 与 `tools/{reliability_report,semantic_eval}.py`。 |
 | [web/](web/) | 前端 npm workspace：`packages/ui-core`、`apps/dashboard`（输出 `web/dist/dashboard`，保留 `Sokoban_Tutorial_Bilingual.pdf`）、`apps/cocreation`（输出 `web/dist/cocreation`，工作流拆分于 `src/store/workflows/`）和 `apps/webgl-bridge`。 |
 | [deploy/](deploy/) | 统一生产部署与容器配置：`nginx-sokoban.conf`、`sokoban.service`、`Dockerfile`、`compose.yaml`、`deploy.ps1`。 |
 | [tests/](tests/) | 统一 pytest 回归与集成测试套件（`tests/core/`、`tests/server/` 与端到端测试）。 |
@@ -55,6 +55,8 @@ uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 # 3. 启动统一 8000 服务（工厂模式）
 & .\.venv\Scripts\python.exe -m uvicorn server.main:create_app --factory --port 8000
 ```
+
+其中 `npm --prefix web run build` 会同时构建 `@sokoban/dashboard`（输出 `web/dist/dashboard`）、`@sokoban/cocreation`（输出 `web/dist/cocreation`），并把 `@sokoban/webgl-bridge` 产出到 `Assets/WebGLTemplates/SokobanPixel/TemplateData/sokoban-bridge.js`。
 
 如需将历史 JSONL 研究日志或旧版共创 SQLite 数据导入统一数据库，运行独立迁移 CLI：
 

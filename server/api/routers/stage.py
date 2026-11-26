@@ -12,6 +12,7 @@ from server.api.deps import (
     ensure_session_shape,
     get_llm_deadline,
     get_request_id,
+    rewrite_loopback_url,
     validate_identifier,
 )
 from server.api.schemas import (
@@ -21,6 +22,7 @@ from server.api.schemas import (
     RestoreRequest,
     VersionRequest,
 )
+from server.settings import DEFAULT_PUBLIC_BASE_URL, DEFAULT_WEBGL_BASE_URL
 
 router = APIRouter()
 
@@ -89,13 +91,29 @@ async def create_play_attempt(
     session_id: str,
     version_id: str,
     payload: PlayAttemptRequest,
+    request: Request,
     container: ContainerDep,
     access_cookie: AccessCookie = None,
 ) -> dict[str, Any]:
     validate_identifier(payload.idempotencyKey, "idempotencyKey")
-    return await container.stage_service.create_play_attempt(
+    result = await container.stage_service.create_play_attempt(
         session_id, version_id, access_cookie, idempotency_key=payload.idempotencyKey
     )
+    if "playUrl" in result and isinstance(result["playUrl"], str):
+        result["playUrl"] = rewrite_loopback_url(
+            result["playUrl"],
+            request,
+            configured_base_url=container.settings.webgl_base_url,
+            default_base_url=DEFAULT_WEBGL_BASE_URL,
+        )
+    if "returnUrl" in result and isinstance(result["returnUrl"], str):
+        result["returnUrl"] = rewrite_loopback_url(
+            result["returnUrl"],
+            request,
+            configured_base_url=container.settings.public_base_url,
+            default_base_url=DEFAULT_PUBLIC_BASE_URL,
+        )
+    return result
 
 
 @router.post("/sessions/{session_id}/draft-regenerations")

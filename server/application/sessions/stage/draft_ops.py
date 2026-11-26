@@ -11,6 +11,7 @@ from server.core.clock import Clock, parse_iso
 from server.domain.errors import AuthError, ConflictError, IdempotencyConflictError, ValidationError
 from server.persistence.database import SQLiteDatabase, dump_json
 from server.persistence.models import DesignSessionRecord, DraftRegenerationRecord
+from server.persistence.repositories._mappers import row_to_draft_regeneration, row_to_session
 from server.persistence.repositories.sessions_repo import SessionsRepository
 
 from ..config import CoCreationAppSettings, append_audit_event_tx, solve_stage_async
@@ -68,25 +69,39 @@ class _DraftRegenLifecycleMixin:
             return latest
         failure_code = "unity_unavailable" if latest.status == "pending" else "generation_timed_out"
         now_iso = self._clock.utc_now()
-        updated = self._sessions_repo.update_draft_regeneration(
-            latest.request_id,
-            status="timed_out",
-            failure_code=failure_code,
-            updated_at=now_iso,
-        )
         with self._db.write_tx() as conn:
-            append_audit_event_tx(
-                conn,
-                session_id,
-                "draft_regeneration_timed_out",
-                {
-                    "requestId": latest.request_id,
-                    "phase": latest.status,
-                    "failureCode": failure_code,
-                },
-                now_iso,
+            cur = conn.execute(
+                "UPDATE draft_regenerations "
+                "SET status = 'timed_out', failure_code = ?, updated_at = ? "
+                "WHERE request_id = ? AND status = ?",
+                (failure_code, now_iso, latest.request_id, latest.status),
             )
-        return updated
+            if cur.rowcount > 0:
+                append_audit_event_tx(
+                    conn,
+                    session_id,
+                    "draft_regeneration_timed_out",
+                    {
+                        "requestId": latest.request_id,
+                        "phase": latest.status,
+                        "failureCode": failure_code,
+                    },
+                    now_iso,
+                )
+            row = conn.execute(
+                "SELECT * FROM draft_regenerations WHERE request_id = ?",
+                (latest.request_id,),
+            ).fetchone()
+        return row_to_draft_regeneration(row) if row is not None else latest
+
+    def _has_regen_idempotency_key(self, session_id: str, idempotency_key: str) -> bool:
+        with self._db.read_conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM draft_regenerations "
+                "WHERE session_id = ? AND idempotency_key = ? LIMIT 1",
+                (session_id, idempotency_key),
+            ).fetchone()
+            return row is not None
 
     async def request_draft_regeneration(
         self,
@@ -100,7 +115,10 @@ class _DraftRegenLifecycleMixin:
         latest = self._expire_regen_if_needed(
             session_id, self._sessions_repo.get_latest_draft_regeneration(session_id)
         )
-        if latest is not None and latest.idempotency_key == idempotency_key:
+        if (
+            (latest is not None and latest.idempotency_key == idempotency_key)
+            or self._has_regen_idempotency_key(session_id, idempotency_key)
+        ):
             return await self._read_model.get_session_payload(session_id)
         if latest is not None and latest.status in {"pending", "claimed"}:
             raise ConflictError("DRAFT_REGENERATION_ACTIVE", "error.draft_regeneration_active")
@@ -110,53 +128,107 @@ class _DraftRegenLifecycleMixin:
             solved = await solve_stage_async(list(generated.rows), clock=self._clock)
             now_iso = self._clock.utc_now()
             req_id = uuid.uuid4().hex
-            next_gen = session.draft_generation + 1
-            self._sessions_repo.create_draft_regeneration(
-                request_id=req_id,
-                session_id=session_id,
-                idempotency_key=idempotency_key,
-                status="completed",
-                generation=next_gen,
-                requested_at=now_iso,
-                rows=list(solved.rows),
-                validation=solved.as_dict(),
-            )
-            self._sessions_repo.update_session(
-                session_id,
-                draft_rows=list(solved.rows),
-                draft_validation=solved.as_dict(),
-                draft_generation=next_gen,
-                updated_at=now_iso,
-            )
             with self._db.write_tx() as conn:
-                append_audit_event_tx(
-                    conn,
-                    session_id,
-                    "draft_regeneration_completed",
-                    {"requestId": req_id, "generation": next_gen, "mode": "algorithm_demo"},
-                    now_iso,
-                )
+                cur_row = conn.execute(
+                    "SELECT * FROM design_sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                if cur_row is None:
+                    raise ConflictError("SESSION_LOCKED", "error.session_locked")
+                cur_session = row_to_session(cur_row)
+                self._require_draft_preview(cur_session)
+                dup = conn.execute(
+                    "SELECT 1 FROM draft_regenerations "
+                    "WHERE session_id = ? AND idempotency_key = ? LIMIT 1",
+                    (session_id, idempotency_key),
+                ).fetchone()
+                if dup is None:
+                    active = conn.execute(
+                        "SELECT 1 FROM draft_regenerations "
+                        "WHERE session_id = ? AND status IN ('pending', 'claimed') LIMIT 1",
+                        (session_id,),
+                    ).fetchone()
+                    if active is not None:
+                        raise ConflictError(
+                            "DRAFT_REGENERATION_ACTIVE", "error.draft_regeneration_active"
+                        )
+                    next_gen = cur_session.draft_generation + 1
+                    conn.execute(
+                        "INSERT INTO draft_regenerations("
+                        "request_id, session_id, idempotency_key, status, generation, "
+                        "rows_json, validation_json, requested_at, updated_at"
+                        ") VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?)",
+                        (
+                            req_id,
+                            session_id,
+                            idempotency_key,
+                            next_gen,
+                            dump_json(list(solved.rows)),
+                            dump_json(solved.as_dict()),
+                            now_iso,
+                            now_iso,
+                        ),
+                    )
+                    conn.execute(
+                        "UPDATE design_sessions SET draft_rows_json = ?, "
+                        "draft_validation_json = ?, draft_generation = ?, updated_at = ? "
+                        "WHERE session_id = ?",
+                        (
+                            dump_json(list(solved.rows)),
+                            dump_json(solved.as_dict()),
+                            next_gen,
+                            now_iso,
+                            session_id,
+                        ),
+                    )
+                    append_audit_event_tx(
+                        conn,
+                        session_id,
+                        "draft_regeneration_completed",
+                        {"requestId": req_id, "generation": next_gen, "mode": "algorithm_demo"},
+                        now_iso,
+                    )
             return await self._read_model.get_session_payload(session_id)
 
         now_iso = self._clock.utc_now()
         req_id = uuid.uuid4().hex
-        next_gen = session.draft_generation + 1
-        self._sessions_repo.create_draft_regeneration(
-            request_id=req_id,
-            session_id=session_id,
-            idempotency_key=idempotency_key,
-            status="pending",
-            generation=next_gen,
-            requested_at=now_iso,
-        )
         with self._db.write_tx() as conn:
-            append_audit_event_tx(
-                conn,
-                session_id,
-                "draft_regeneration_requested",
-                {"requestId": req_id, "generation": next_gen, "mode": "unity"},
-                now_iso,
-            )
+            cur_row = conn.execute(
+                "SELECT * FROM design_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if cur_row is None:
+                raise ConflictError("SESSION_LOCKED", "error.session_locked")
+            cur_session = row_to_session(cur_row)
+            self._require_draft_preview(cur_session)
+            dup = conn.execute(
+                "SELECT 1 FROM draft_regenerations "
+                "WHERE session_id = ? AND idempotency_key = ? LIMIT 1",
+                (session_id, idempotency_key),
+            ).fetchone()
+            if dup is None:
+                active = conn.execute(
+                    "SELECT 1 FROM draft_regenerations "
+                    "WHERE session_id = ? AND status IN ('pending', 'claimed') LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                if active is not None:
+                    raise ConflictError(
+                        "DRAFT_REGENERATION_ACTIVE", "error.draft_regeneration_active"
+                    )
+                next_gen = cur_session.draft_generation + 1
+                conn.execute(
+                    "INSERT INTO draft_regenerations("
+                    "request_id, session_id, idempotency_key, status, generation, "
+                    "requested_at, updated_at"
+                    ") VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                    (req_id, session_id, idempotency_key, next_gen, now_iso, now_iso),
+                )
+                append_audit_event_tx(
+                    conn,
+                    session_id,
+                    "draft_regeneration_requested",
+                    {"requestId": req_id, "generation": next_gen, "mode": "unity"},
+                    now_iso,
+                )
         return await self._read_model.get_session_payload(session_id)
 
     async def cancel_draft_regeneration(
@@ -252,9 +324,16 @@ class _DraftRegenLifecycleMixin:
             raise ConflictError("DRAFT_REGENERATION_NOT_CLAIMED", "error.stale_draft_regeneration")
 
         now_iso = self._clock.utc_now()
-        next_gen = session.draft_generation + 1
         with self._db.write_tx() as conn:
-            conn.execute(
+            cur_row = conn.execute(
+                "SELECT * FROM design_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if cur_row is None:
+                raise ConflictError("SESSION_LOCKED", "error.session_locked")
+            cur_session = row_to_session(cur_row)
+            self._require_draft_preview(cur_session)
+            next_gen = cur_session.draft_generation + 1
+            cur = conn.execute(
                 "UPDATE draft_regenerations SET status = 'completed', generation = ?, "
                 "rows_json = ?, validation_json = ?, failure_code = NULL, updated_at = ? "
                 "WHERE request_id = ? AND status = 'claimed'",
@@ -266,6 +345,23 @@ class _DraftRegenLifecycleMixin:
                     request_id,
                 ),
             )
+            if cur.rowcount == 0:
+                existing_row = conn.execute(
+                    "SELECT * FROM draft_regenerations WHERE request_id = ?", (request_id,)
+                ).fetchone()
+                if existing_row is not None:
+                    existing_rec = row_to_draft_regeneration(existing_row)
+                    if existing_rec.status == "completed":
+                        if existing_rec.rows != list(solved.rows):
+                            raise IdempotencyConflictError("IDEMPOTENCY_CONFLICT")
+                        return {
+                            "sessionId": session_id,
+                            "requestId": request_id,
+                            "status": "completed",
+                        }
+                raise ConflictError(
+                    "DRAFT_REGENERATION_NOT_CLAIMED", "error.stale_draft_regeneration"
+                )
             conn.execute(
                 "UPDATE design_sessions SET draft_rows_json = ?, draft_validation_json = ?, "
                 "draft_generation = ?, updated_at = ? WHERE session_id = ?",

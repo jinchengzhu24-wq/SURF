@@ -1,58 +1,58 @@
 @layer base, layout, components, responsive;
 
-:root {
-  color-scheme: light;
-
-  /* Pixel-adventure terrain, wood, stone, metal, and accent tokens */
-  --grass: #6f9d31;
-  --wood: #8b562c;
-  --wood-light: #bd8248;
-  --wood-dark: #4a2d1c;
-  --stone-light: #c8c9c3;
-  --stone-mid: #858c8e;
-  --stone-dark: #41494d;
-  --metal: #315a73;
-  --metal-light: #6e91a5;
-  --metal-dark: #152e3d;
-  --gold: #e7b747;
-  --gold-light: #ffe28c;
-  --ink: #20272a;
-  --paper: #f3f0e4;
-
-  /* Semantic surfaces and states */
-  --bg: var(--grass);
-  --surface: var(--paper);
-  --surface-soft: #e4e3dc;
-  --surface-tint: #d9ead0;
-  --border: #626b70;
-  --border-strong: #333b40;
-  --text: var(--ink);
-  --muted: #5b6463;
-  --brand: #385f78;
-  --brand-dark: #17384e;
-  --brand-soft: #c9dce5;
-  --green: #3e7d26;
-  --green-soft: #d9ebbd;
-  --amber: #9b681f;
-  --amber-soft: #f3dc8e;
-  --red: #a4412f;
-  --red-soft: #f0c6b9;
-  --purple: #67478c;
-  --purple-dark: #392752;
-  --purple-soft: #e0d5eb;
-
-  /* Typography, elevation, and tile sizing */
-  --font-sans: "Segoe UI", Arial, sans-serif;
-  --font-mono: Consolas, "Courier New", monospace;
-  --font-pixel: "SokobanPixel", Consolas, "Courier New", monospace;
-  --pixel-shadow: 4px 4px 0 rgba(31, 39, 32, 0.42);
-  --pixel-shadow-lg: 6px 6px 0 rgba(25, 34, 27, 0.52);
-  --shadow: var(--pixel-shadow);
-  --radius-pixel: 3px;
-  --tile-size: 28px;
-}
-
 @layer base {
+  :root {
+    color-scheme: light;
+
+    /* Pixel-adventure terrain, wood, stone, metal, and accent tokens */
+    --grass: #6f9d31;
+    --wood: #8b562c;
+    --wood-light: #bd8248;
+    --wood-dark: #4a2d1c;
+    --stone-light: #c8c9c3;
+    --stone-mid: #858c8e;
+    --stone-dark: #41494d;
+    --metal: #315a73;
+    --metal-light: #6e91a5;
+    --metal-dark: #152e3d;
+    --gold: #e7b747;
+    --gold-light: #ffe28c;
+    --ink: #20272a;
+    --paper: #f3f0e4;
+
+    /* Semantic surfaces and states */
+    --bg: var(--grass);
+    --surface: var(--paper);
+    --surface-soft: #e4e3dc;
+    --surface-tint: #d9ead0;
+    --border: #626b70;
+    --border-strong: #333b40;
+    --text: var(--ink);
+    --muted: #5b6463;
+    --brand: #385f78;
+    --brand-dark: #17384e;
+    --brand-soft: #c9dce5;
+    --green: #3e7d26;
+    --green-soft: #d9ebbd;
+    --amber: #9b681f;
+    --amber-soft: #f3dc8e;
+    --red: #a4412f;
+    --red-soft: #f0c6b9;
+    --purple: #67478c;
+    --purple-dark: #392752;
+    --purple-soft: #e0d5eb;
+
+    /* Typography, elevation, and tile sizing */
+    --font-sans: "Segoe UI", Arial, sans-serif;
+    --font-mono: Consolas, "Courier New", monospace;
+    --font-pixel: "SokobanPixel", Consolas, "Courier New", monospace;
+    --pixel-shadow: 4px 4px 0 rgba(31, 39, 32, 0.42);
+    --pixel-shadow-lg: 6px 6px 0 rgba(25, 34, 27, 0.52);
+    --shadow: var(--pixel-shadow);
+    --radius-pixel: 3px;
+    --tile-size: 28px;
+  }
+
   *,
   *::before,
   *::after {

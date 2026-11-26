@@ -1,10 +1,12 @@
-"""Shared session-auth, context, proposal-binding, and commit helpers for dialogue services."""
+"""Shared session-auth, context, proposal-binding, error, and commit helpers for dialogue."""
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import uuid
 from collections.abc import Mapping, Sequence
+from datetime import timedelta
 from typing import Any
 
 from server.application.sessions import (
@@ -16,9 +18,17 @@ from server.application.sessions import (
     is_deadline_expired,
     token_matches,
 )
-from server.core.clock import Clock
-from server.core.grid import map_fingerprint
-from server.domain.errors import AuthError, ConflictError, NotFoundError
+from server.core.clock import SYSTEM_CLOCK, Clock, utc_now_iso
+from server.core.grid import map_fingerprint, parse_grid
+from server.core.llm_client import LLMError
+from server.domain.errors import (
+    AuthError,
+    ConflictError,
+    DomainError,
+    IdempotencyConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from server.domain.memory import (
     add_open_question,
     apply_design_context_patch,
@@ -26,8 +36,9 @@ from server.domain.memory import (
     merge_intent_hypothesis,
     validate_design_context_patch,
 )
+from server.domain.rooms import NodeFlowEvent
 from server.domain.sessions import describe_diff, summarize_stage_changes
-from server.i18n.messages import format_verified_diff_summary
+from server.i18n.messages import format_verified_diff_summary, get_message
 from server.persistence.database import dump_json
 from server.persistence.models import (
     ConversationTurnRecord,
@@ -36,7 +47,40 @@ from server.persistence.models import (
     PlayAttemptRecord,
 )
 from server.persistence.repositories._mappers import row_to_session, row_to_version
+from server.persistence.repositories.operational_repo import OperationalRepository
 from server.persistence.repositories.sessions_repo import SessionsRepository
+
+ACTIVE_CHALLENGE_STATUSES: frozenset[str] = frozenset(
+    {
+        "awaiting_reason",
+        "awaiting_choice",
+        "review_pending",
+        "reason_review",
+        "choice_pending",
+    }
+)
+
+
+def stale_before_iso(clock: Clock, seconds: float = 150.0) -> str:
+    """Return an ISO timestamp `seconds` before the current clock time."""
+    return utc_now_iso(clock.utc_datetime() - timedelta(seconds=seconds))
+
+
+def classify_failure(exc: Exception) -> tuple[str, bool, dict[str, Any]]:
+    """Classify core LLMError, DomainError, TimeoutError, or internal errors for audit logs."""
+    if isinstance(exc, LLMError):
+        details: dict[str, Any] = {
+            "attemptsUsed": exc.attempts_used,
+            "requestId": exc.request_id,
+        }
+        if exc.provider_status is not None:
+            details["providerStatus"] = exc.provider_status
+        return exc.code, exc.retryable, details
+    if isinstance(exc, DomainError):
+        return exc.code, exc.retryable, dict(exc.details)
+    if isinstance(exc, TimeoutError):
+        return "DEADLINE_EXCEEDED", True, {}
+    return "INTERNAL_ERROR", True, {}
 
 
 def require_browser_session(
@@ -78,12 +122,31 @@ def require_active_session(
     return session
 
 
+def check_completed_idempotency(
+    operational_repo: OperationalRepository,
+    session_id: str,
+    scope: str,
+    idempotency_key: str,
+    request_hash: str,
+) -> bool:
+    """Return True if an identical completed key exists; raise on digest mismatch."""
+    existing = operational_repo.get_key(session_id, scope, idempotency_key)
+    if existing is None or existing.status != "completed":
+        return False
+    if existing.request_hash != request_hash:
+        raise IdempotencyConflictError("IDEMPOTENCY_CONFLICT")
+    return True
+
+
 def require_current_version_tx(
     conn: sqlite3.Connection,
     session_id: str,
     base_version_id: str,
+    *,
+    clock: Clock | None = None,
 ) -> tuple[DesignSessionRecord, LevelVersionRecord]:
-    """Inside write_tx, verify active session and CAS match against base_version_id."""
+    """Inside write_tx, verify active session, deadline, and CAS match against base_version_id."""
+    active_clock = clock if clock is not None else SYSTEM_CLOCK
     s_row = conn.execute(
         "SELECT * FROM design_sessions WHERE session_id = ?", (session_id,)
     ).fetchone()
@@ -92,6 +155,8 @@ def require_current_version_tx(
     cur_session = row_to_session(s_row)
     if cur_session.status != "active":
         raise ConflictError("SESSION_LOCKED", "error.session_locked")
+    if is_deadline_expired(cur_session.deadline_at, now=active_clock.utc_datetime()):
+        raise ConflictError("SESSION_DEADLINE_EXPIRED", "error.session_locked")
     if cur_session.current_version_id != base_version_id:
         raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
     v_row = conn.execute(
@@ -101,6 +166,30 @@ def require_current_version_tx(
     if v_row is None:
         raise NotFoundError("VERSION_NOT_FOUND", "error.version_conflict")
     return cur_session, row_to_version(v_row)
+
+
+def apply_transitions_to_rows(
+    base_rows: Sequence[str],
+    transitions: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Deterministically apply bound cell transitions onto a playable Stage grid."""
+    grid = parse_grid(base_rows, validate_playable=True)
+    cells = [list(row) for row in grid.rows]
+    for t in transitions:
+        r, c = t.get("row"), t.get("column")
+        if (
+            isinstance(r, bool)
+            or isinstance(c, bool)
+            or not isinstance(r, int)
+            or not isinstance(c, int)
+            or not (1 <= r <= len(cells))
+            or not (1 <= c <= len(cells[r - 1]))
+        ):
+            raise ValidationError("INVALID_REVISION_BINDING", "error.version_conflict")
+        if cells[r - 1][c - 1] != t.get("from"):
+            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
+        cells[r - 1][c - 1] = str(t["to"])
+    return ["".join(row) for row in cells]
 
 
 def build_play_summary(
@@ -147,26 +236,72 @@ def build_proposal_offer_and_binding(
     summary: str,
     language: str,
     rationale: str = "",
+    available_actions: Sequence[str] | None = None,
+    solve_result: Mapping[str, Any] | None = None,
+    request_text: str | Sequence[str] | None = None,
+    answer_texts: Sequence[str] | None = None,
+    verified_actions: Sequence[str] | None = None,
+    binary_compact: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Construct Policy-2 proposalOffer and conservative execution binding."""
+    """Construct Policy-2 proposalOffer (with optional v2 presentation) and execution binding."""
     clean_rows = list(candidate_rows)
     diff = describe_diff(base_version.rows, clean_rows)
     transitions = derive_entity_transitions(base_version.rows, clean_rows)
     change_summary = summarize_stage_changes(base_version.rows, clean_rows).to_wire_dict()
     verified_diff = format_verified_diff_summary(diff, language)
-    offer = {
-        "summary": summary.strip(),
-        "rationale": rationale.strip() or summary.strip(),
+    clean_summary = summary.strip()
+    clean_rationale = rationale.strip() or clean_summary
+    offer: dict[str, Any] = {
+        "summary": clean_summary,
+        "rationale": clean_rationale,
         "verifiedDiff": verified_diff,
         "changeSummary": change_summary,
     }
+    if available_actions is not None:
+        offer["availableActions"] = list(available_actions)
+    if solve_result is not None or request_text is not None or binary_compact:
+        changes_v2 = [
+            {
+                "row": item["row"],
+                "column": item["column"],
+                "before": item["from"],
+                "after": item["to"],
+            }
+            for item in transitions
+        ]
+        presentation: dict[str, Any] = {
+            "schemaVersion": 2,
+            "summary": clean_summary,
+            "rationale": clean_rationale,
+            "changes": changes_v2,
+            "reason": clean_rationale,
+        }
+        if binary_compact:
+            presentation["binaryCompact"] = True
+            presentation["verifiedActions"] = list(verified_actions or ())
+        if request_text:
+            presentation["requestText"] = (
+                list(request_text) if isinstance(request_text, (list, tuple)) else str(request_text)
+            )
+        if answer_texts:
+            presentation["answerTexts"] = [str(a) for a in answer_texts if str(a).strip()]
+        if isinstance(solve_result, Mapping):
+            steps = solve_result.get("solutionSteps")
+            pushes = solve_result.get("solutionPushes")
+            if isinstance(steps, int) and isinstance(pushes, int):
+                presentation["solution"] = {
+                    "minimumMoves": steps,
+                    "pushesOnMinimumMoveSolution": pushes,
+                }
+        offer["proposalPresentation"] = presentation
+
     binding = {
         "baseVersionId": base_version.version_id,
         "mapFingerprint": map_fingerprint(base_version.rows),
         "entityBindingFingerprint": (base_version.entity_bindings or {}).get("bindingFingerprint"),
-        "status": "ready",
+        "status": "active",
         "executionBrief": {
-            "summary": summary.strip(),
+            "summary": clean_summary,
             "requiredTransitions": transitions,
             "changeSummary": change_summary,
             "verifiedDiff": verified_diff,
@@ -203,22 +338,28 @@ def apply_turn_context_patch(
     assistant_turn_id: str,
     user_text: str,
     guidance: dict[str, Any],
+    evidence_ids: Sequence[str] | None = None,
+    semantic_claims: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Apply validated LLM DesignContext patch, open question, and intent hypothesis."""
+    """Apply optional DesignContext patch, open question, and intent hypothesis safely."""
     state = ensure_design_context(design_context)
     intent_audit: dict[str, Any] | None = None
+    extra_hyp = ""
     if isinstance(patch, Mapping):
         raw_patch = dict(patch)
         extra_questions = list(raw_patch.pop("newOpenQuestions", ()) or ())
         extra_hyp = str(raw_patch.pop("intentHypothesis", "") or "").strip()
-        validated = validate_design_context_patch(_normalize_patch_for_memory(raw_patch))
-        state = apply_design_context_patch(
-            state,
-            validated,
-            user_text=user_text,
-            stage_id=version_id,
-            turn_id=user_turn_id,
-        )
+        try:
+            validated = validate_design_context_patch(_normalize_patch_for_memory(raw_patch))
+            state = apply_design_context_patch(
+                state,
+                validated,
+                user_text=user_text,
+                stage_id=version_id,
+                turn_id=user_turn_id,
+            )
+        except ValueError:
+            pass
         for q_text in extra_questions:
             clean_q = str(q_text or "").strip()
             if clean_q:
@@ -228,8 +369,7 @@ def apply_turn_context_patch(
                     stage_id=version_id,
                     turn_id=assistant_turn_id,
                 )
-    else:
-        extra_hyp = ""
+
     follow_up = str(guidance.get("followUpQuestion") or "").strip()
     if follow_up:
         state = add_open_question(
@@ -239,21 +379,38 @@ def apply_turn_context_patch(
             turn_id=assistant_turn_id,
             source_kind="visible_output",
         )
+
     hyp_stmt = (extra_hyp or str(guidance.get("intentHypothesis") or "")).strip()
     if hyp_stmt:
+        resolved_evidence_ids = (
+            [str(eid) for eid in evidence_ids if str(eid).strip()]
+            if evidence_ids is not None
+            else [f"ie_{uuid.uuid4().hex}"]
+        )
+        claims = (
+            semantic_claims
+            if semantic_claims is not None
+            else ((guidance.get("_intentDecision") or {}).get("claims") or ())
+        )
         state, hyp_id = merge_intent_hypothesis(
             state,
             hyp_stmt,
+            evidence_ids=resolved_evidence_ids,
             stage_id=version_id,
             turn_id=assistant_turn_id,
             displayed=True,
+            semantic_claims=claims,
             source_user_turn_id=user_turn_id,
         )
         if hyp_id:
             guidance["_intentHypothesisId"] = hyp_id
             guidance["intentHypothesis"] = hyp_stmt
-            guidance["_intentReview"] = {"interactionMode": "full"}
-            intent_audit = {"hypothesisId": hyp_id, "statement": hyp_stmt}
+            guidance["_intentReviewState"] = {"interactionMode": "full"}
+            intent_audit = {
+                "hypothesisId": hyp_id,
+                "statement": hyp_stmt,
+                "evidenceId": resolved_evidence_ids[0] if resolved_evidence_ids else None,
+            }
     return state.to_wire_dict(), intent_audit
 
 
@@ -311,6 +468,41 @@ def insert_turn_tx(
     return seq
 
 
+def build_turn_cards(guidance: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Build bounded CoCreationCard entries from turn guidance for TurnFlowEvent."""
+    if not isinstance(guidance, Mapping):
+        return []
+    cards: list[dict[str, str]] = []
+    dis = guidance.get("disagreement")
+    if (
+        isinstance(dis, Mapping)
+        and dis.get("status") == "active"
+        and dis.get("displayCard") is not False
+    ):
+        text = str(dis.get("coreDisagreement") or dis.get("nextQuestion") or "").strip()
+        if text:
+            cards.append({"type": "discussion", "text": text[:4000]})
+    elif guidance.get("followUpQuestion"):
+        q = str(guidance["followUpQuestion"]).strip()
+        if q:
+            cards.append({"type": "discussion", "text": q[:4000]})
+    offer = guidance.get("proposalOffer")
+    if isinstance(offer, Mapping) and offer.get("summary"):
+        cards.append({"type": "proposal", "text": str(offer["summary"]).strip()[:4000]})
+    pq = guidance.get("proposalQuestion")
+    if isinstance(pq, Mapping) and pq.get("question"):
+        cards.append({"type": "question", "text": str(pq["question"]).strip()[:4000]})
+    if guidance.get("intentHypothesis"):
+        cards.append({"type": "intent", "text": str(guidance["intentHypothesis"]).strip()[:4000]})
+    for cue in guidance.get("uiCues") or ():
+        if isinstance(cue, Mapping) and cue.get("type") and cue.get("text"):
+            ctype = str(cue["type"]).strip().lower().replace("-", "_")[:40]
+            ctext = str(cue["text"]).strip()[:4000]
+            if ctype and ctext:
+                cards.append({"type": ctype, "text": ctext})
+    return cards[:8]
+
+
 def emit_turn_room_event_tx(
     conn: sqlite3.Connection,
     room_sync: RoomSyncWriter | None,
@@ -330,6 +522,11 @@ def emit_turn_room_event_tx(
     clean_assistant = str(assistant_text or "").strip()
     if not clean_user or not clean_assistant:
         return
+    clean_cards = [
+        {"type": str(c.get("type") or "card")[:40], "text": str(c.get("text") or "").strip()[:4000]}
+        for c in cards
+        if str(c.get("text") or "").strip()
+    ][:8]
     event = {
         "eventId": f"turn:{assistant_turn_id}",
         "eventType": "turn",
@@ -339,7 +536,7 @@ def emit_turn_room_event_tx(
         "userText": clean_user[:2000],
         "assistantText": clean_assistant[:12000],
         "language": session.language,
-        "cards": [dict(c) for c in cards],
+        "cards": clean_cards,
     }
     emit_room_cocreation_event_tx(
         conn,
@@ -353,6 +550,111 @@ def emit_turn_room_event_tx(
     )
 
 
+def emit_dashboard_node_tx(
+    conn: sqlite3.Connection,
+    room_sync: RoomSyncWriter | None,
+    *,
+    session: DesignSessionRecord,
+    version: LevelVersionRecord,
+    node_id: str,
+    node_type: str,
+    node_status: str,
+    entries: Sequence[Mapping[str, Any]],
+    now_iso: str,
+    node_parent_id: str | None = None,
+) -> None:
+    """Emit a validated NodeFlowEvent snapshot into online rooms inside write_tx."""
+    if session.is_demo or not session.match_id or session.player_slot not in (1, 2):
+        return
+    valid_entries = [
+        {
+            "entryId": str(e["entryId"])[:160],
+            "kind": str(e["kind"]),
+            "text": str(e["text"]).strip()[:12000],
+            "label": str(e.get("label") or "").strip()[:160],
+            "occurredAt": str(e.get("occurredAt") or now_iso),
+            **(
+                {"language": e["language"]}
+                if e.get("language") in {"en", "zh-CN"}
+                else {}
+            ),
+        }
+        for e in entries
+        if str(e.get("text") or "").strip()
+    ][-96:]
+    if not valid_entries:
+        return
+    fp = hashlib.sha256(
+        dump_json(
+            {"nodeId": node_id, "status": node_status, "entries": valid_entries}
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    payload = {
+        "eventId": f"node:{node_id}:{fp}"[:160],
+        "eventType": "node",
+        "playerNumber": session.player_slot or 1,
+        "sessionId": session.session_id,
+        "nodeId": node_id[:160],
+        "nodeType": node_type,
+        "nodeStatus": node_status[:64],
+        "nodeParentId": node_parent_id[:160] if node_parent_id else None,
+        "nodeEntries": valid_entries,
+        "versionId": version.version_id,
+        "stageNumber": version.version_number,
+    }
+    validated = NodeFlowEvent.model_validate(payload).model_dump(by_alias=True)
+    emit_room_cocreation_event_tx(
+        conn,
+        room_sync,
+        match_id=session.match_id,
+        player_slot=session.player_slot,
+        is_demo=session.is_demo,
+        session_id=session.session_id,
+        event=validated,
+        now_iso=now_iso,
+    )
+
+
+def deterministic_proposal_failure_text(language: str) -> str:
+    """Return bilingual explanation when proposal search is exhausted."""
+    reason = get_message("requirements.conflict.default", language)
+    return get_message("requirements.failure_wrapper", language, reason=reason)
+
+
+async def generate_safe_failure_analysis(
+    proposal_pipeline: Any,
+    *,
+    rows: Sequence[str],
+    designer_turns: Sequence[Mapping[str, Any]],
+    failure_code: str,
+    failure_summary: str,
+    requirements: Mapping[str, Any] | None = None,
+    entity_bindings: Mapping[str, Any] | None = None,
+    language: str,
+    deadline: float | None = None,
+    request_id: str = "",
+) -> str:
+    """Invoke proposal_pipeline.generate_failure_analysis with safe deterministic fallback."""
+    if proposal_pipeline is not None:
+        try:
+            text = await proposal_pipeline.generate_failure_analysis(
+                grid_or_rows=rows,
+                designer_turns=designer_turns,
+                failure_code=failure_code,
+                failure_summary=failure_summary,
+                requirements=requirements,
+                entity_bindings=entity_bindings,
+                language=language,
+                deadline=deadline,
+                request_id=request_id,
+            )
+            if str(text or "").strip():
+                return str(text).strip()
+        except (LLMError, TimeoutError, ValueError):
+            pass
+    return deterministic_proposal_failure_text(language)
+
+
 def record_message_failure_audit_tx(
     conn: sqlite3.Connection,
     *,
@@ -361,21 +663,31 @@ def record_message_failure_audit_tx(
     message_key: str,
     request_id: str,
     code: str,
-    details: Mapping[str, Any] | None,
+    retryable: bool = True,
+    details: Mapping[str, Any] | None = None,
     now_iso: str,
+    emit_reply_failure: bool = False,
 ) -> None:
-    """Persist structured message generation failure event for read-model display."""
-    append_audit_event_tx(
-        conn,
-        session_id,
-        "message_generation_failed",
-        {
-            "messageKey": message_key,
-            "baseVersionId": base_version_id,
-            "code": code,
-            "requestId": request_id or uuid.uuid4().hex,
-            "retryable": True,
-            "details": dict(details or {}),
-        },
-        now_iso,
-    )
+    """Persist structured message (and optional reply) failure events for read-model/audits."""
+    req_id = request_id or uuid.uuid4().hex
+    payload = {
+        "messageKey": message_key,
+        "baseVersionId": base_version_id,
+        "code": code,
+        "requestId": req_id,
+        "retryable": bool(retryable),
+        "details": dict(details or {}),
+    }
+    append_audit_event_tx(conn, session_id, "message_generation_failed", payload, now_iso)
+    if emit_reply_failure:
+        append_audit_event_tx(
+            conn,
+            session_id,
+            "reply_generation_failed",
+            {
+                **payload,
+                "task": "message",
+                "reliableBodyDelivered": False,
+            },
+            now_iso,
+        )

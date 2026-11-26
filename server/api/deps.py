@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from fastapi import Cookie, Depends, Header, Request, Response
 
@@ -68,27 +71,103 @@ def extract_bearer_token(
     return None
 
 
+def _extract_version_assessment(ver: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw = ver.get("assessment")
+    if raw is None:
+        raw = ver.get("assessment_json")
+    if raw is None:
+        raw = ver.get("assessmentJson")
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            return None
+        return dict(parsed) if isinstance(parsed, Mapping) else None
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return None
+
+
 def ensure_session_shape(payload: dict[str, Any]) -> dict[str, Any]:
     """Ensure optional read-model keys expected by the Preact workbench are always populated."""
     versions = payload.get("versions") or []
     turns = payload.get("turns") or []
+
+    first_observe_by_vid: dict[str, str] = {}
+    first_assistant_by_vid: dict[str, str] = {}
+    for turn in turns:
+        if turn.get("role") != "assistant":
+            continue
+        vid = str(turn.get("versionId") or "")
+        tid = str(turn.get("turnId") or "")
+        if not vid or not tid:
+            continue
+        first_assistant_by_vid.setdefault(vid, tid)
+        move = (turn.get("guidance") or {}).get("move")
+        if move == "observe_stage" and vid not in first_observe_by_vid:
+            first_observe_by_vid[vid] = tid
+
     if "assessments" not in payload:
-        first_assistant_by_vid: dict[str, str] = {}
-        for turn in turns:
-            vid = str(turn.get("versionId") or "")
-            if not vid or vid in first_assistant_by_vid:
-                continue
-            move = (turn.get("guidance") or {}).get("move")
-            if turn.get("role") == "assistant" and move == "observe_stage":
-                first_assistant_by_vid[vid] = str(turn.get("turnId") or "")
-        assessments: list[dict[str, str]] = []
+        assessments: list[dict[str, Any]] = []
         for ver in versions:
             vid = str(ver.get("versionId") or "")
-            tid = ver.get("openingTurnId") or first_assistant_by_vid.get(vid)
+            if not vid:
+                continue
+            ver_assessment = _extract_version_assessment(ver)
+            tid = (
+                ver.get("openingTurnId")
+                or (ver_assessment.get("assistantTurnId") if ver_assessment else None)
+                or first_observe_by_vid.get(vid)
+                or (first_assistant_by_vid.get(vid) if ver_assessment is not None else None)
+            )
             if tid:
-                ver.setdefault("openingTurnId", tid)
-                assessments.append({"versionId": vid, "assistantTurnId": str(tid)})
+                ver.setdefault("openingTurnId", str(tid))
+            if tid or ver_assessment is not None:
+                entry: dict[str, Any] = {
+                    "versionId": vid,
+                    "assistantTurnId": str(tid or ""),
+                }
+                if ver_assessment is not None:
+                    entry["assessment"] = ver_assessment
+                assessments.append(entry)
         payload["assessments"] = assessments
+    elif isinstance(payload["assessments"], list):
+        existing_by_vid = {
+            str(item.get("versionId") or ""): item
+            for item in payload["assessments"]
+            if isinstance(item, dict) and item.get("versionId")
+        }
+        for ver in versions:
+            vid = str(ver.get("versionId") or "")
+            if not vid:
+                continue
+            ver_assessment = _extract_version_assessment(ver)
+            if ver_assessment is None:
+                continue
+            tid = (
+                ver.get("openingTurnId")
+                or ver_assessment.get("assistantTurnId")
+                or first_observe_by_vid.get(vid)
+                or first_assistant_by_vid.get(vid)
+            )
+            if tid:
+                ver.setdefault("openingTurnId", str(tid))
+            existing = existing_by_vid.get(vid)
+            if existing is None:
+                payload["assessments"].append(
+                    {
+                        "versionId": vid,
+                        "assistantTurnId": str(tid or ""),
+                        "assessment": ver_assessment,
+                    }
+                )
+            else:
+                if tid and not existing.get("assistantTurnId"):
+                    existing["assistantTurnId"] = str(tid)
+                existing.setdefault("assessment", ver_assessment)
     return payload
 
 
@@ -116,10 +195,38 @@ def validate_fields(payload: Any, *field_names: str) -> None:
         validate_identifier(getattr(payload, field_name), field_name)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
+def rewrite_loopback_url(
+    url: str,
+    request: Request,
+    *,
+    configured_base_url: str,
+    default_base_url: str,
+) -> str:
+    """Rewrite default production URLs to the request loopback origin for local dev."""
+    hostname = (request.url.hostname or "").casefold()
+    if hostname not in _LOOPBACK_HOSTS:
+        return url
+    if configured_base_url.strip().rstrip("/") != default_base_url.strip().rstrip("/"):
+        return url
+    parsed_default = urlparse(default_base_url)
+    default_origin = f"{parsed_default.scheme}://{parsed_default.netloc}"
+    if not default_origin or not url.startswith(default_origin):
+        return url
+    port = request.url.port
+    request_origin = (
+        f"{request.url.scheme}://{request.url.hostname}:{port}"
+        if port is not None
+        else f"{request.url.scheme}://{request.url.hostname}"
+    )
+    return f"{request_origin}{url[len(default_origin):]}"
+
+
 def set_session_access_cookie(request: Request, response: Response, token: str) -> None:
     """Attach the HttpOnly session cookie with transport-aware Secure flag."""
-    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-    is_https = request.url.scheme == "https" or forwarded_proto == "https"
+    is_https = request.url.scheme == "https"
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
@@ -169,6 +276,7 @@ __all__ = [
     "get_llm_deadline",
     "get_request_id",
     "resolve_challenge_proposal_id",
+    "rewrite_loopback_url",
     "set_session_access_cookie",
     "validate_fields",
     "validate_identifier",

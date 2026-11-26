@@ -95,6 +95,9 @@ afterEach(() => {
   teardown?.();
   teardown = null;
   document.body.replaceChildren();
+  (window as unknown as { happyDOM?: { setURL: (u: string) => void } }).happyDOM?.setURL(
+    "http://localhost:3000/",
+  );
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -126,6 +129,8 @@ describe("webgl-bridge", () => {
     expect(isAllowedCoCreationOrigin("http://localhost:8000", loopbackAllowed)).toBe(true);
     expect(isAllowedCoCreationOrigin("http://127.0.0.1:8010", loopbackAllowed)).toBe(false);
     expect(isAllowedCoCreationOrigin("http://localhost:8010", loopbackAllowed)).toBe(false);
+    expect(isAllowedCoCreationOrigin("https://sokobanaidemo.top", loopbackAllowed)).toBe(false);
+    expect(isAllowedCoCreationOrigin("https://www.sokobanaidemo.top", loopbackAllowed)).toBe(false);
 
     const prodAllowed = buildAllowedCoCreationOrigins({
       origin: "https://sokobanaidemo.top",
@@ -138,6 +143,9 @@ describe("webgl-bridge", () => {
   });
 
   it("registers all 9 Sokoban* shims + SokobanOpenDashboardGate, enforces iframe-only sources, and dispatches all 5 SendMessage targets", async () => {
+    (window as unknown as { happyDOM?: { setURL: (u: string) => void } }).happyDOM?.setURL(
+      "https://sokobanaidemo.top/game/",
+    );
     renderTemplateDom();
     const sendMessage = vi.fn();
     window.createUnityInstance = vi.fn(async () => ({
@@ -524,7 +532,7 @@ describe("webgl-bridge", () => {
     expect(disconnectSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("opens dashboard via POST /verify-dashboard-password and window.open(..., 'noopener') and handles 401 errors", async () => {
+  it("pre-opens blank popup synchronously, closes on 401, handles blocked popup, and preserves dialog-internal key handlers", async () => {
     renderTemplateDom();
     let failAuth = true;
     const fetchMock = vi.fn(async () =>
@@ -532,7 +540,26 @@ describe("webgl-bridge", () => {
         ? new Response(JSON.stringify({ detail: "Unauthorized" }), { status: 401 })
         : new Response(JSON.stringify({ ok: true }), { status: 200 }),
     );
-    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const createdPopups: Array<{
+      opener: unknown;
+      closed: boolean;
+      location: { href: string };
+      close: ReturnType<typeof vi.fn>;
+    }> = [];
+    let blockPopups = false;
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => {
+      if (blockPopups) return null;
+      const winObj = {
+        opener: window as unknown,
+        closed: false,
+        location: { href: "about:blank" },
+        close: vi.fn(() => {
+          winObj.closed = true;
+        }),
+      };
+      createdPopups.push(winObj);
+      return winObj as unknown as Window;
+    });
 
     const gate = createDashboardGate({
       elements: {
@@ -554,9 +581,11 @@ describe("webgl-bridge", () => {
     )!;
     expect(dialog.open || dialog.hasAttribute("open")).toBe(true);
 
-    // Key events while open stop propagation before Unity listeners without preventing default
+    // Key events inside dialog reach dialog-internal handlers while still stopping before window listeners
     const windowListener = vi.fn();
+    const dialogInternalListener = vi.fn();
     window.addEventListener("keydown", windowListener);
+    dialog.addEventListener("keydown", dialogInternalListener);
     const keyEvent = new KeyboardEvent("keydown", {
       key: "a",
       bubbles: true,
@@ -564,10 +593,12 @@ describe("webgl-bridge", () => {
     });
     document.querySelector("#dashboard-access-password")!.dispatchEvent(keyEvent);
     expect(keyEvent.defaultPrevented).toBe(false);
+    expect(dialogInternalListener).toHaveBeenCalledTimes(1);
     expect(windowListener).not.toHaveBeenCalled();
     window.removeEventListener("keydown", windowListener);
+    dialog.removeEventListener("keydown", dialogInternalListener);
 
-    // 401 shows status message and keeps modal open
+    // 401 closes pre-opened blank tab and keeps modal open
     document.querySelector<HTMLInputElement>("#dashboard-access-password")!.value =
       "wrong";
     document
@@ -578,23 +609,40 @@ describe("webgl-bridge", () => {
         document.querySelector("#dashboard-access-status")!.textContent,
       ).toBe("Incorrect password");
     });
-    expect(openSpy).not.toHaveBeenCalled();
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(createdPopups[0].opener).toBeNull();
+    expect(createdPopups[0].close).toHaveBeenCalledTimes(1);
+    expect(dialog.open || dialog.hasAttribute("open")).toBe(true);
 
-    // Valid password opens /frontend/ with noopener and closes modal
+    // Blocked popup (!popup) on valid auth keeps modal open with clickable fallback link
     failAuth = false;
+    blockPopups = true;
     document.querySelector<HTMLInputElement>("#dashboard-access-password")!.value =
       "secret";
     document
       .querySelector<HTMLFormElement>("#dashboard-access-form")!
       .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+    await vi.waitFor(() => {
+      const link = document.querySelector<HTMLAnchorElement>(
+        "#dashboard-access-status a",
+      );
+      expect(link).toBeTruthy();
+      expect(link?.getAttribute("href")).toMatch(/\/frontend\/$/);
+      expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+    });
+    expect(dialog.open || dialog.hasAttribute("open")).toBe(true);
+
+    // Valid password with unblocked pre-opened popup severs opener, navigates location.href, and closes modal
+    blockPopups = false;
+    document
+      .querySelector<HTMLFormElement>("#dashboard-access-form")!
+      .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
 
     await vi.waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(openSpy).toHaveBeenCalledWith(
-        expect.stringMatching(/\/frontend\/$/),
-        "_blank",
-        "noopener",
-      );
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(createdPopups).toHaveLength(2);
+      expect(createdPopups[1].opener).toBeNull();
+      expect(createdPopups[1].location.href).toMatch(/\/frontend\/$/);
       expect(dialog.open || dialog.hasAttribute("open")).toBe(false);
     });
 

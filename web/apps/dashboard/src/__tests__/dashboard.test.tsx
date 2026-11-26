@@ -11,6 +11,7 @@ import {
   formatClockDuration,
   hasFirstStage,
   isCompletedMatch,
+  openingIsConsumed,
 } from "../format";
 import { createDashboardStore } from "../store";
 import type { MatchmakingRecordsResponse } from "../types";
@@ -273,6 +274,38 @@ describe("dashboard formatters and API utilities", () => {
       "stage",
       "node",
     ]);
+
+    const openingMatch = createSamplePayload().matches[0];
+    openingMatch.players[0].coCreationFlow.push(
+      {
+        eventId: "open-1",
+        eventType: "opening",
+        playerNumber: 1,
+        versionId: "v1",
+        assistantTurnId: "turn-open-1",
+        assistantText: "Opening evaluation text",
+      },
+      {
+        eventId: "turn-consuming-open-1",
+        eventType: "turn",
+        playerNumber: 1,
+        openingAssistantTurnId: "turn-open-1",
+      },
+    );
+    expect(
+      openingIsConsumed(openingMatch, {
+        eventType: "opening",
+        playerNumber: 1,
+        assistantTurnId: "turn-open-1",
+      }),
+    ).toBe(true);
+    expect(
+      openingIsConsumed(openingMatch, {
+        eventType: "opening",
+        playerNumber: 1,
+        assistantTurnId: "turn-open-unconsumed",
+      }),
+    ).toBe(false);
   });
 
   it("aborts an in-flight refresh when a newer refresh starts", async () => {

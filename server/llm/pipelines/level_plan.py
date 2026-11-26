@@ -114,7 +114,7 @@ class LevelPlanPipeline:
             deadline=deadline,
             max_attempts=max_attempts,
             temperature=0.6,
-            max_tokens=900,
+            max_tokens=4096,
             attempt_timeout_seconds=self.timeout_seconds,
             extra_body=self.extra_body,
             clock=self.clock,

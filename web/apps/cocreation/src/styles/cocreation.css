@@ -1,10 +1,12 @@
 /* Co-Creation Workbench styles layered cleanly atop @sokoban/ui-core/styles/tokens.css */
 
-:root {
-  --ui-help-bg: #294557;
-  --ui-help-border: #162f3d;
-  --ui-help-text: #fff5df;
-  --ui-help-shadow: 2px 3px 0 rgba(20, 30, 35, 0.28);
+@layer base {
+  :root {
+    --ui-help-bg: #294557;
+    --ui-help-border: #162f3d;
+    --ui-help-text: #fff5df;
+    --ui-help-shadow: 2px 3px 0 rgba(20, 30, 35, 0.28);
+  }
 }
 
 @layer layout {
@@ -134,39 +136,6 @@
   .chat-panel,
   .map-panel {
     min-height: 640px;
-  }
-
-  @media (min-width: 1201px) {
-    .workspace {
-      height: calc(100vh - 126px);
-      min-height: 640px;
-    }
-
-    .stage-panel,
-    .chat-panel,
-    .map-panel {
-      height: 100%;
-    }
-
-    .chat-panel {
-      min-height: 0;
-    }
-
-    .chat-scroll {
-      height: auto;
-      max-height: none;
-    }
-
-    .stage-panel {
-      display: flex;
-      flex-direction: column;
-    }
-
-    .stage-panel .stage-list {
-      flex: 1;
-      min-height: 0;
-      max-height: none;
-    }
   }
 }
 
@@ -483,6 +452,10 @@
     margin: 0 auto;
     padding: 22px 16px 16px;
     flex-shrink: 0;
+  }
+
+  .app.is-landing main:has(.global-notice-stack) #landing {
+    height: calc(100dvh - 100px);
   }
 
   #landing .landing-mark {
@@ -939,6 +912,13 @@
     background-color: #a86a32;
   }
 
+  .progress-panel > summary:focus-visible,
+  .answered-questions > summary:focus-visible,
+  .manual-observation-detail > summary:focus-visible {
+    outline: 3px solid #ffe188;
+    outline-offset: -3px;
+  }
+
   .progress-panel-body {
     display: grid;
     min-height: 0;
@@ -1119,6 +1099,13 @@
     transform: translate(-1px, -1px);
   }
 
+  .question-feedback-button:disabled {
+    border-color: #8a8c83;
+    color: #6e7069;
+    background: #dcddd5;
+    box-shadow: none;
+  }
+
   .progress-empty {
     margin: 0;
     padding: 9px 10px;
@@ -1171,6 +1158,28 @@
     background: #e2b1a4;
   }
 
+  .answered-questions > summary:hover {
+    color: #4d1c15;
+    background: #e2b1a4;
+  }
+
+  .answered-questions .progress-items {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .answered-questions .progress-item-question.answered,
+  .answered-questions .progress-item-question.ignored {
+    --progress-item-accent: #9a5d50;
+    border-color: #b98b7f;
+    color: #5f514c;
+    background: #f7e9e3;
+    box-shadow:
+      inset 0 0 0 1px #fffaf6,
+      1px 1px 0 rgba(82, 43, 35, 0.18);
+    opacity: 1;
+  }
+
   .progress-evidence {
     margin-top: 9px;
     padding: 7px 8px 8px;
@@ -1211,6 +1220,10 @@
     font-family: var(--font-mono);
     font-size: 8px;
     font-weight: 900;
+  }
+
+  .progress-evidence-text {
+    color: #424b47;
   }
 
   .manual-observation-detail {
@@ -2420,6 +2433,14 @@
   }
 
   /* Technical details & contextual help */
+  .interface-hint {
+    margin: 7px 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
   .technical-details {
     flex-basis: 100%;
     min-width: 0;
@@ -2466,6 +2487,11 @@
     content: "⌃";
   }
 
+  .contextual-help > summary:focus-visible {
+    outline: 2px solid #ffe188;
+    outline-offset: 3px;
+  }
+
   .contextual-help > p,
   .ui-tooltip {
     padding: 10px 12px;
@@ -2503,6 +2529,19 @@
     right: 8px;
   }
 
+  .version-help > p::before {
+    content: "";
+    position: absolute;
+    left: 25px;
+    top: -7px;
+    width: 10px;
+    height: 10px;
+    border-left: 2px solid var(--ui-help-border);
+    border-top: 2px solid var(--ui-help-border);
+    background: var(--ui-help-bg);
+    transform: rotate(45deg);
+  }
+
   .proposal-help {
     flex: 0 0 auto;
     color: #315a73;
@@ -2520,6 +2559,19 @@
     max-width: 75vw;
   }
 
+  .proposal-help > p::after {
+    content: "";
+    position: absolute;
+    right: 26px;
+    bottom: -7px;
+    width: 10px;
+    height: 10px;
+    border-right: 2px solid var(--ui-help-border);
+    border-bottom: 2px solid var(--ui-help-border);
+    background: var(--ui-help-bg);
+    transform: rotate(45deg);
+  }
+
   .editor-help {
     flex: 0 0 auto;
     color: #315a73;
@@ -2534,6 +2586,19 @@
     top: calc(100% + 8px);
     right: 0;
     width: min(310px, 100%);
+  }
+
+  .editor-help > p::before {
+    content: "";
+    position: absolute;
+    top: -7px;
+    right: 24px;
+    width: 10px;
+    height: 10px;
+    border-left: 2px solid var(--ui-help-border);
+    border-top: 2px solid var(--ui-help-border);
+    background: var(--ui-help-bg);
+    transform: rotate(45deg);
   }
 
   /* Floating tooltip */
@@ -2590,6 +2655,39 @@
 }
 
 @layer responsive {
+  @media (min-width: 1201px) {
+    .workspace {
+      height: calc(100vh - 126px);
+      min-height: 640px;
+    }
+
+    .stage-panel,
+    .chat-panel,
+    .map-panel {
+      height: 100%;
+    }
+
+    .chat-panel {
+      min-height: 0;
+    }
+
+    .chat-scroll {
+      height: auto;
+      max-height: none;
+    }
+
+    .stage-panel {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .stage-panel .stage-list {
+      flex: 1;
+      min-height: 0;
+      max-height: none;
+    }
+  }
+
   @media (max-width: 1200px) {
     .workspace {
       grid-template-columns: 240px minmax(0, 1fr);
@@ -2678,8 +2776,16 @@
       display: none;
     }
 
-    main {
+    .app:not(.is-landing) main {
       padding: 14px 12px 24px;
+    }
+
+    .app.is-landing main {
+      padding: 12px;
+    }
+
+    .progress-panel {
+      margin: 0 10px;
     }
 
     .progress-panel-body {
@@ -2701,6 +2807,10 @@
       flex-direction: column;
       align-items: stretch;
       padding: 10px 10px 6px;
+    }
+
+    .composer-dock .composer {
+      align-items: stretch;
     }
 
     .composer-actions {
@@ -2727,12 +2837,21 @@
       max-width: none;
     }
 
+    .proposal-help > p::after {
+      left: 22px;
+      right: auto;
+    }
+
     .composer-meta span:first-child {
       display: none;
     }
 
     .play-control {
       max-width: 65%;
+    }
+
+    .map-panel .validation-card .technical-details {
+      margin-left: 0;
     }
 
     .map-board {
@@ -2787,6 +2906,10 @@
       gap: 8px;
     }
 
+    .app.is-landing main:has(.global-notice-stack) #landing {
+      height: calc(100dvh - 100px);
+    }
+
     #landing h2 {
       font-size: 22px;
     }
@@ -2797,6 +2920,26 @@
 
     .draft-actions button {
       font-size: 14px;
+    }
+  }
+
+  @media (max-width: 360px) {
+    .composer-actions {
+      flex-wrap: wrap;
+    }
+
+    .composer-dock .composer-actions {
+      flex-wrap: nowrap;
+    }
+
+    .proposal-control .proposal-mode-toggle {
+      gap: 5px;
+      padding-left: 6px;
+      padding-right: 6px;
+    }
+
+    .proposal-mode-caption {
+      font-size: 9px;
     }
   }
 }

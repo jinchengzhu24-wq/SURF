@@ -78,6 +78,59 @@ describe("SokobanMap", () => {
     const changedCell = document.querySelector('[data-x="6"][data-y="2"]')!;
     expect(changedCell.className).toContain("changed");
     expect(changedCell.textContent).toBe("B1");
+    expect(changedCell.getAttribute("title")).toBe("B1 (row 3, column 7)");
+    const wallCell = document.querySelector('[data-x="0"][data-y="0"]')!;
+    expect(wallCell.getAttribute("title")).toBe("wall (1, 1)");
+  });
+
+  it("delegates onTileInspect for pointer hover (ignoring touch) and keyboard focus", () => {
+    const onTileInspect = vi.fn();
+    render(
+      <SokobanMap
+        rows={SAMPLE_ROWS}
+        mode="editor"
+        onTileInspect={onTileInspect}
+      />,
+    );
+
+    const grid = screen.getByRole("group");
+    const playerBtn = document.querySelector<HTMLButtonElement>(
+      'button[data-x="3"][data-y="2"]',
+    )!;
+
+    // Touch pointerover is ignored
+    const touchEv = new Event("pointerover", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(touchEv, "pointerType", { value: "touch" });
+    playerBtn.dispatchEvent(touchEv);
+    expect(onTileInspect).not.toHaveBeenCalled();
+
+    // Mouse pointerover inspects tile with immediate: false and entityLabel
+    const mouseEv = new Event("pointerover", { bubbles: true }) as PointerEvent;
+    Object.defineProperty(mouseEv, "pointerType", { value: "mouse" });
+    playerBtn.dispatchEvent(mouseEv);
+    expect(onTileInspect).toHaveBeenLastCalledWith({
+      anchor: playerBtn,
+      coord: { x: 3, y: 2 },
+      tile: "p",
+      entityLabel: "P",
+      immediate: false,
+    });
+
+    // Pointer leave emits null
+    fireEvent.pointerLeave(grid);
+    expect(onTileInspect).toHaveBeenLastCalledWith(null);
+
+    // Focus-in inspects tile with immediate: true; focus-out outside grid emits null
+    fireEvent.focusIn(playerBtn);
+    expect(onTileInspect).toHaveBeenLastCalledWith({
+      anchor: playerBtn,
+      coord: { x: 3, y: 2 },
+      tile: "p",
+      entityLabel: "P",
+      immediate: true,
+    });
+    fireEvent.focusOut(playerBtn, { relatedTarget: document.body });
+    expect(onTileInspect).toHaveBeenLastCalledWith(null);
   });
 
   it("uses event delegation and arrow-key navigation in editor mode without destroying button identity/focus", () => {
@@ -140,8 +193,36 @@ describe("SokobanMap", () => {
     );
     const btn = document.querySelector<HTMLButtonElement>('button[data-x="1"][data-y="1"]')!;
     expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(btn);
     expect(onTileClick).not.toHaveBeenCalled();
+  });
+
+  it("keeps disabled tiles inspectable via aria-disabled when onTileInspect is provided", () => {
+    const onTileClick = vi.fn();
+    const onTileInspect = vi.fn();
+    render(
+      <SokobanMap
+        rows={SAMPLE_ROWS}
+        mode="editor"
+        disabled={true}
+        onTileClick={onTileClick}
+        onTileInspect={onTileInspect}
+      />,
+    );
+    const btn = document.querySelector<HTMLButtonElement>('button[data-x="3"][data-y="2"]')!;
+    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(btn);
+    expect(onTileClick).not.toHaveBeenCalled();
+    fireEvent.focusIn(btn);
+    expect(onTileInspect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        anchor: btn,
+        coord: { x: 3, y: 2 },
+        immediate: true,
+      }),
+    );
   });
 });
 
@@ -335,7 +416,7 @@ describe("API client and URL safety", () => {
       async () =>
         new Response(
           JSON.stringify({ detail: { code: "RATE_LIMIT", message: "Slow down" } }),
-          { status: 429 },
+          { status: 429, headers: { "X-Request-ID": "req-hdr-429" } },
         ),
     );
     await expect(
@@ -344,7 +425,69 @@ describe("API client and URL safety", () => {
       status: 429,
       code: "RATE_LIMIT",
       message: "Slow down",
+      requestId: "req-hdr-429",
       retryable: true,
+    });
+
+    // Unified backend error envelope with string detail + structured error/details
+    const unifiedErrFetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            detail: "Model failed",
+            error: {
+              code: "UPSTREAM_ERROR",
+              message: "Model failed",
+              details: { attemptsUsed: 2 },
+              retryable: true,
+            },
+            code: "UPSTREAM_ERROR",
+            message: "Model failed",
+            details: { attemptsUsed: 2, row: 1 },
+            retryable: true,
+            requestId: "req-unified-1",
+          }),
+          { status: 502, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    await expect(
+      fetchJson("/api/chat", { fetchImpl: unifiedErrFetch }),
+    ).rejects.toMatchObject({
+      status: 502,
+      code: "UPSTREAM_ERROR",
+      message: "Model failed",
+      requestId: "req-unified-1",
+      retryable: true,
+      detail: {
+        code: "UPSTREAM_ERROR",
+        message: "Model failed",
+        retryable: true,
+        details: { attemptsUsed: 2, row: 1 },
+      },
+    });
+
+    const detailsOnlyFetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            detail: "Outer wall breach",
+            code: "OPEN_OUTER_WALL",
+            details: { row: 0, column: 2, tile: "@" },
+            retryable: false,
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    await expect(
+      fetchJson("/api/versions", { fetchImpl: detailsOnlyFetch }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "OPEN_OUTER_WALL",
+      message: "Outer wall breach",
+      retryable: false,
+      detail: {
+        details: { row: 0, column: 2, tile: "@" },
+      },
     });
 
     vi.useFakeTimers();

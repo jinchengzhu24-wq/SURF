@@ -15,7 +15,7 @@ import {
 } from "../../store/sessionStore";
 import { selectVersion } from "../../store/workflows";
 import type { PlayAttempt, StageVersion } from "../../types";
-import { tooltipHandlers } from "../Common/Tooltip";
+import { miniMapTooltipHandlers, showTooltip, tooltipHandlers } from "../Common/Tooltip";
 
 export function formatAttemptText(lang: "en" | "zh-CN", attempt: PlayAttempt): string {
   const statusKey: TranslationKey =
@@ -34,7 +34,11 @@ function StageMiniMap({ version }: { version: StageVersion }): JSX.Element {
   const changed = new Set((version.diff || []).map((item) => `${item.x},${item.y}`));
 
   return (
-    <div class="mini-map" style={{ gridTemplateColumns: "repeat(12, 1fr)" }}>
+    <div
+      class="mini-map"
+      style={{ gridTemplateColumns: "repeat(12, 1fr)" }}
+      {...miniMapTooltipHandlers("stagePreview")}
+    >
       {version.rows.map((row, y) =>
         [...row].map((tile, x) => {
           const coordKey = `${x},${y}`;
@@ -44,6 +48,9 @@ function StageMiniMap({ version }: { version: StageVersion }): JSX.Element {
             <i
               key={coordKey}
               class={`${getTileClass(tile)}${isChanged ? " changed" : ""}`}
+              data-x={x}
+              data-y={y}
+              data-tile={tile}
               data-entity-id={entity}
               role={entity ? "img" : undefined}
               aria-label={entity ? formatEntityCoordinate(entity, x, y) : undefined}
@@ -95,6 +102,12 @@ export function StageSidebar(): JSX.Element {
               ? version.source
               : "human_edit";
 
+          const stageTooltip = {
+            kind: "stage" as const,
+            stageNumber: version.stageNumber,
+            status: disabled ? disabledReason : undefined,
+          };
+
           return (
             <button
               key={version.versionId}
@@ -103,11 +116,15 @@ export function StageSidebar(): JSX.Element {
               disabled={disabled}
               aria-disabled={disabled ? "true" : undefined}
               onClick={() => selectVersion(version.versionId)}
-              {...tooltipHandlers({
-                kind: "stage",
-                stageNumber: version.stageNumber,
-                status: disabled ? disabledReason : undefined,
-              })}
+              {...tooltipHandlers(stageTooltip)}
+              onPointerOver={(event) => {
+                if (event.pointerType === "touch") return;
+                const target = event.target;
+                if (target instanceof Element && target.closest(".mini-map")) return;
+                if (event.currentTarget instanceof HTMLElement) {
+                  showTooltip(event.currentTarget, stageTooltip, false);
+                }
+              }}
             >
               <div class="stage-card-top">
                 <strong>

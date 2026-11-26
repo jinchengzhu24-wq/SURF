@@ -1,6 +1,6 @@
 import { MAP_HEIGHT, buildEntityLabels, getTileClass, getTileLabel } from "@sokoban/ui-core";
 import type { JSX } from "preact";
-import { t } from "../../i18n";
+import { en, t, zhCN, type TranslationKey } from "../../i18n";
 import {
   demoCreationFailed,
   demoCreationPending,
@@ -9,7 +9,7 @@ import {
   language,
   session,
 } from "../../store/sessionStore";
-import { tooltipHandlers } from "../Common/Tooltip";
+import { hideTooltip, showTooltip } from "../Common/Tooltip";
 
 export function DraftPreview(): JSX.Element | null {
   const lang = language.value;
@@ -24,6 +24,21 @@ export function DraftPreview(): JSX.Element | null {
   const hasRows = Array.isArray(rows) && rows.length === MAP_HEIGHT;
   const isDemoLanding = landingMode.value.startsWith("demo");
   if (!hasRows && !isDemoLanding) return null;
+
+  const isFormal = s ? !s.demoMode : !isDemoLanding;
+  const bundle = (lang === "zh-CN" ? zhCN : en) as Record<string, string>;
+  const preferredTitleKey = isFormal ? "formalDraftPreviewTitle" : "demoDraftPreviewTitle";
+  const previewTitle = Object.prototype.hasOwnProperty.call(bundle, preferredTitleKey)
+    ? t(lang, preferredTitleKey as TranslationKey)
+    : isFormal
+      ? `${t(lang, "draftPreviewTitle")} · ${t(
+          lang,
+          s?.initialDraftMethod === "partial_completion" ||
+            s?.initialDraftMethod === "description_generation"
+            ? s.initialDraftMethod
+            : "description_generation",
+        )}`
+      : `${t(lang, "draftPreviewTitle")} · ${t(lang, "algorithm_demo")}`;
 
   const regenerationStatus = preview?.regenerationStatus;
   const loading =
@@ -47,7 +62,7 @@ export function DraftPreview(): JSX.Element | null {
   return (
     <section class="draft-preview" aria-labelledby="draftPreviewTitle">
       <div class="draft-preview-heading">
-        <h3 id="draftPreviewTitle">{t(lang, "draftPreviewTitle")}</h3>
+        <h3 id="draftPreviewTitle">{previewTitle}</h3>
         <span>
           {hasRows
             ? t(lang, "draftGeneration", { generation: preview?.generation || 1 })
@@ -56,7 +71,41 @@ export function DraftPreview(): JSX.Element | null {
       </div>
       <div class="draft-preview-stage">
         {hasRows && rows ? (
-          <div class="draft-preview-grid" role="img" aria-label={t(lang, "draftPreviewTitle")}>
+          <div
+            class="draft-preview-grid"
+            role="img"
+            aria-label={previewTitle}
+            onPointerOver={(event) => {
+              if (event.pointerType === "touch") return;
+              const target = event.target;
+              const cell =
+                target instanceof Element
+                  ? target.closest<HTMLElement>(".draft-preview-cell[data-x][data-y]")
+                  : null;
+              if (!cell) {
+                hideTooltip();
+                return;
+              }
+              if (event.relatedTarget instanceof Node && cell.contains(event.relatedTarget)) return;
+              const x = Number(cell.dataset.x);
+              const y = Number(cell.dataset.y);
+              const tile = cell.dataset.tile;
+              if (!Number.isInteger(x) || !Number.isInteger(y) || typeof tile !== "string") return;
+              showTooltip(
+                cell,
+                {
+                  kind: "tile",
+                  tile,
+                  mode: "preview",
+                  row: y + 1,
+                  column: x + 1,
+                  entityLabel: cell.dataset.entityId || undefined,
+                },
+                false,
+              );
+            }}
+            onPointerLeave={() => hideTooltip()}
+          >
             {rows.map((row, y) =>
               [...row].map((tile, x) => {
                 const entity = entityLabels.get(`${x},${y}`);
@@ -64,14 +113,11 @@ export function DraftPreview(): JSX.Element | null {
                   <span
                     key={`${x},${y}`}
                     class={`draft-preview-cell ${getTileClass(tile)}`}
-                    {...tooltipHandlers({
-                      kind: "tile",
-                      tile,
-                      mode: "preview",
-                      row: y + 1,
-                      column: x + 1,
-                      entityLabel: entity,
-                    })}
+                    data-x={x}
+                    data-y={y}
+                    data-tile={tile}
+                    data-entity-id={entity}
+                    aria-hidden="true"
                   >
                     {entity || getTileLabel(tile)}
                   </span>

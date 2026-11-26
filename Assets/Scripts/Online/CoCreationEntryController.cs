@@ -197,6 +197,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
         );
     }
 
+    [UnityEngine.Scripting.Preserve]
     public void ReceiveBrowserDraftRegenerationRequest(string payloadJson)
     {
         DraftRegenerationBridgeRequest payload = null;
@@ -493,20 +494,35 @@ public sealed class CoCreationEntryController : MonoBehaviour
                     break;
                 }
 
-                if (succeeded && (request.responseCode == 422 || request.responseCode == 400 || request.responseCode == 404))
+                if (request.responseCode == 422 || request.responseCode == 400 || request.responseCode == 404)
                 {
-                    NotifyBrowserRegenerationReturn(requestId, "failed");
-                    CoCreationDraftContext.ClearRegeneration();
-                    processingRegeneration = false;
-                    SetButtonState(true, "RETURN TO CO-CREATION LAB");
-                    SetStatus(
-                        request.responseCode == 422
-                            ? "The server rejected the generated map during validation. The previous draft was preserved."
-                            : "The regeneration request is no longer active on the server. The previous draft was preserved.",
-                        ErrorStatusColor
-                    );
-                    RestartSessionCompletionTracking();
-                    yield break;
+                    string responseText = request.downloadHandler != null ? request.downloadHandler.text : "";
+                    TryParseApiError(responseText, out string errorCode, out string errorMessage);
+                    bool staleRequest = request.responseCode == 404
+                        || ((request.responseCode == 400 || request.responseCode == 422)
+                            && IsStaleRegenerationError(errorCode, errorMessage));
+                    if (succeeded || staleRequest)
+                    {
+                        Debug.LogWarning(
+                            "CoCreationEntryController: Draft regeneration submission rejected: "
+                            + "status=" + request.responseCode
+                            + " code=" + errorCode
+                            + " message=" + errorMessage
+                            + " response=" + responseText
+                        );
+                        NotifyBrowserRegenerationReturn(requestId, "failed");
+                        CoCreationDraftContext.ClearRegeneration();
+                        processingRegeneration = false;
+                        SetButtonState(true, "RETURN TO CO-CREATION LAB");
+                        SetStatus(
+                            staleRequest
+                                ? "The regeneration request is no longer active on the server. The previous draft was preserved."
+                                : "The server rejected the generated map during validation. The previous draft was preserved.",
+                            ErrorStatusColor
+                        );
+                        RestartSessionCompletionTracking();
+                        yield break;
+                    }
                 }
 
                 if (request.responseCode == 409)
@@ -764,6 +780,58 @@ public sealed class CoCreationEntryController : MonoBehaviour
         trackingRoutine = StartCoroutine(TrackSessionCompletion());
     }
 
+    private static bool TryParseApiError(
+        string responseText,
+        out string errorCode,
+        out string errorMessage)
+    {
+        errorCode = "";
+        errorMessage = "";
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return false;
+        }
+
+        try
+        {
+            ApiErrorResponse parsed = JsonUtility.FromJson<ApiErrorResponse>(responseText);
+            if (parsed == null)
+            {
+                return false;
+            }
+            errorCode = (parsed.code ?? "").Trim();
+            errorMessage = (parsed.message ?? "").Trim();
+            return !string.IsNullOrEmpty(errorCode) || !string.IsNullOrEmpty(errorMessage);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsStaleRegenerationError(string errorCode, string errorMessage)
+    {
+        if (string.Equals(errorCode, "STALE_DRAFT_REGENERATION", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(errorCode, "DRAFT_REGENERATION_NOT_ACTIVE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(errorCode, "DRAFT_REGENERATION_NOT_CLAIMED", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(errorCode, "DRAFT_REGENERATION_NOT_PENDING", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(errorCode, "DRAFT_PREVIEW_UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(errorCode, "SESSION_NOT_FOUND", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(errorMessage))
+        {
+            return false;
+        }
+
+        string lower = errorMessage.ToLowerInvariant();
+        return lower.Contains("no longer active")
+            || lower.Contains("not active")
+            || lower.Contains("stale");
+    }
+
     private static bool TryValidateLaunchUrl(string value, out string targetUrl)
     {
         if (PublicEndpointResolver.TryGetSafeHttpUri(value, out Uri uri))
@@ -867,4 +935,11 @@ public sealed class DraftRegenerationCompleteRequest
 public sealed class DraftRegenerationFailRequest
 {
     public string failureCode;
+}
+
+[Serializable]
+internal sealed class ApiErrorResponse
+{
+    public string code = "";
+    public string message = "";
 }

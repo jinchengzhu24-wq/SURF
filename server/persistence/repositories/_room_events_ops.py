@@ -298,7 +298,12 @@ class _RoomEventsMixin:
             expired_rows = conn.execute(
                 "SELECT * FROM online_rooms WHERE expires_at <= ? "
                 "AND status IN ('waiting_for_opponent', 'briefing', 'waiting_for_challenges', "
-                "'challenges_ready', 'waiting_for_results', 'results_ready', 'cancelled')",
+                "'challenges_ready', 'waiting_for_results', 'results_ready', 'cancelled') "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM design_sessions ds "
+                "WHERE ds.match_id = online_rooms.id "
+                "AND ds.status IN ('active', 'awaiting_intention')"
+                ")",
                 (now_iso,),
             ).fetchall()
             if not expired_rows:

@@ -158,6 +158,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         ON conversation_turns(session_id, request_id, role)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_conversation_turns_version_id
+        ON conversation_turns(version_id)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS change_proposals (
         proposal_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES design_sessions(session_id) ON DELETE CASCADE,
@@ -205,6 +209,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         ON revision_challenges(session_id, updated_at)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_revision_challenges_base_version
+        ON revision_challenges(base_version_id)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS play_attempts (
         attempt_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES design_sessions(session_id) ON DELETE CASCADE,
@@ -233,6 +241,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_play_attempts_session_version_issued
         ON play_attempts(session_id, version_id, issued_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_play_attempts_version_id
+        ON play_attempts(version_id)
     """,
     """
     CREATE TABLE IF NOT EXISTS draft_regenerations (

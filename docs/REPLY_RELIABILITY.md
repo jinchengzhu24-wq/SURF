@@ -6,7 +6,7 @@
 
 - 当前地图的唯一权威是 `StageSnapshot`，由当前不可变 `level_versions` 的 12×10 `Grid`（[grid.py](../server/core/grid.py)）、版本 ID 和实体绑定构成。对话、开场、提案、路线恢复和执行验证均使用这份快照。旧 Stage rows、助手旧坐标和用户说错的坐标仅作待核实讨论信息。
 - 每条请求的 `dialogueEvidence` 保留真实 Turn ID、Stage 和用户原话（当前 Stage 最近 24 条 Turn 加活动主题已固定用户来源）。授权新动作或变更状态须绑定当前用户原话或正式操作，助手建议不产生用户约束。
-- **原生结构化 JSON 输出**：所有活跃 LLM 任务均通过 `server.core.llm_client.call_structured`（[llm_client.py](../server/core/llm_client.py)）与 Pydantic v2 模型（`server/llm/schemas.py`：`ChatReplyPayload`、`TurnRoutingPayload`、`BinaryDiscoveryPayload`、`RequirementRecordPayload`、`RevisionPlanPayload`、`MapOperationsPayload`、`ManualEditReviewPayload`、`TranslationPayload`、`TranslationVerificationPayload`）严格输出 JSON Schema。已彻底废除旧版 `<GUIDANCE>||` 文本拼接解析及在 400/422 时静默降级为 `json_object` 的做法。
+- **原生结构化 JSON 输出**：所有活跃 LLM 任务均通过 `server.core.llm_client.call_structured`（[llm_client.py](../server/core/llm_client.py)）与 Pydantic v2 `StrictSchema` 模型（`server/llm/schemas.py`：`ChatReplyPayload`、`TurnRoutingPayload`、`BinaryDiscoveryPayload`、`RequirementRecordPayload`、`RevisionPlanPayload`、`MapOperationsPayload`、`ManualEditReviewPayload`、`TranslationPayload`、`TranslationVerificationPayload`）进行权威结构化校验。生产环境 Moonshot/Kimi 传输层在启动时显式声明 `response_format_mode="json_object"`，DeepSeek 传输层显式声明 `response_format_mode="prompt_only"`（请求体不传 `response_format` 字段，搭配 `extra_body={"thinking": {"type": "disabled"}}`），两者均由 `call_structured` 将精简后的 Pydantic JSON Schema 注入系统提示词（并在校验失败的修复重试中持续保留）及做单层代码围栏剥离，以规避上游专有 JSON Schema 方言或模型 `response_format` 限制造成的不可重试 HTTP 400 拒收；`call_structured` 仍保留对兼容传输层的 `json_schema` 支持，并彻底废除旧版 `<GUIDANCE>||` 文本拼接解析及运行时遇到 400/422 静默降级的做法。
 - `server/llm/grounding.py` 使用模块级预编译正则对照 `Grid` 快照核验实体、坐标、可达性及 `coordinateLinks`，不破坏正常正文，不把错误地图句或未验证结论写入回复、记忆、卡片或提案。
 - 正常正文、可选卡片、链接、进度和记忆分别验收。可选组件无效时保留已验证正文；普通聊天和路线讨论耗尽机会后返回可重试错误且不写助手回合；仅已定义的 Stage 开场允许使用快照兜底。Stage assessment 仅归档，前端不展示独立评价卡。
 
@@ -14,7 +14,7 @@
 
 | 边界 | 当前契约 |
 | --- | --- |
-| 模型传输与隔离 | 共创管线使用原生异步 `AsyncOpenAITransport`（由 FastAPI lifespan 统一管理 `httpx.AsyncClient` 连接池，零 `asyncio.run()`、零后台守护线程、零全局 ContextVar），独占 Moonshot/Kimi 配置且绝不回退至 `DEEPSEEK_*`。错误分类严格区分 `LLMValidationError`、`UpstreamLLMError`、`DeadlineExceededError`，绝不将内部 Python 异常（`TypeError`/`KeyError` 等）误判为可重试模型故障。所有日志与错误输出经 [settings.py](../server/core/settings.py) 的 `redact_secrets` 脱敏。 |
+| 模型传输与隔离 | 共创管线使用原生异步 `AsyncOpenAITransport`（由 FastAPI lifespan 统一管理 `httpx.AsyncClient` 连接池，零 `asyncio.run()`、零后台守护线程、零全局 ContextVar），独占 Moonshot/Kimi 配置且绝不回退至 `DEEPSEEK_*`；对 `kimi-k2.*` / Moonshot 显式配置 `extra_body={"thinking": {"type": "disabled"}}`、固定 `temperature=0.6`、`max_completion_tokens` 与 `response_format_mode="json_object"`；DeepSeek 传输层显式声明 `response_format_mode="prompt_only"`（请求体不传 `response_format`）与 `extra_body={"thinking": {"type": "disabled"}}` 并保留各管线自定义温度。错误分类严格区分 `LLMValidationError`、`UpstreamLLMError`、`DeadlineExceededError`，由 [main.py](../server/main.py) 统一映射为结构化 `502`/`503`/`504` 响应，绝不将内部 Python 异常（`TypeError`/`KeyError` 等）误判为可重试模型故障。所有日志与错误输出经 [settings.py](../server/core/settings.py) 的 `redact_secrets` 脱敏。 |
 | 主请求预算 | 服务端总预算 120 秒（HTTP 入口建立 116 秒内部绝对截止时间）。Policy 2 轻量路由 `TurnRoutingPayload` 单次上限 15 秒；点击 `Proposal` 直通 `BinaryDiscoveryPipeline` 单槽上限 70 秒并预留 20 秒恢复储备；确定性预检、修复重验与求解共用最多 20 秒并服从截止时间。 |
 | 浏览器超时与重试 | 前端（`web/apps/cocreation`，工作流位于 `src/store/workflows/`）消息请求 125 秒 `AbortController` 超时，非法 2xx 视为失败。写失败先只读刷新确认当前 Stage 与原幂等键后再恢复；重试带回原文本、动作、来源、Stage、草稿、方案模式和幂等键。 |
 | 数据库原子幂等 | 幂等状态持久化在独立索引表 `idempotency_keys`（`PRIMARY KEY (session_id, scope, idempotency_key)`，见 [schema.py](../server/persistence/schema.py) 与 [operational_repo.py](../server/persistence/repositories/operational_repo.py)），取代进程内内存锁。同会话键绑定原正文、基础 Stage、动作及方案模式。 |
@@ -24,7 +24,7 @@
 
 ## 回合理解与 Policy 2 方案发现
 
-共创工作台现行仅运行 **Policy 2 二选一方案发现**（`discoveryPolicyVersion=2`）；旧版 Policy 1 自然语言澄清分支与旧选项校验逻辑已从统一后端中移除。
+共创工作台现行仅运行 **Policy 2 二选一方案发现**；旧版 Policy 1 自然语言澄清分支与旧选项校验逻辑已从统一后端中移除。
 
 - **普通自由对话（未点击 `Proposal`）**：走 `UnderstandingPipeline` 的轻量路由 `TurnRoutingPayload`（单次上限 15 秒），分类行为类型、提及对象、地图相关性与受保护对象变更请求，并在原文证据下拦截越权改图请求。
 - **点击 `Proposal`（`requestProposal=True`）**：无活跃分歧时直通 `BinaryDiscoveryPipeline` 单槽处理；若首轮明确要求修改外壳、玩家、箱子或目标，直接返回 `action="protected_refusal"` 与既有权限说明并安全取消主题，不创建 Stage。
@@ -51,7 +51,7 @@
 
 ## DesignContext、意图与问题进度
 
-- `level_versions.design_context_json` 由服务端维护。子 Stage 克隆父 Stage 快照后再记录新证据或决定，历史快照不回溯吸收后代状态。`explicit`（用户明说）、`confirmed`（正式确认）与 `inferred`（可纠正推测）严格分层，推测不得覆盖明确记忆或变为执行硬约束。用户自报告的 `designer_intentions` 与这套记忆完全独立。
+- `level_versions.design_context_json` 由服务端维护。子 Stage 克隆父 Stage 快照后再记录新证据或决定，历史快照不回溯吸收后代状态。`explicit`（用户明说）、`confirmed`（正式确认）与 `inferred`（可纠正推测）严格分层，推测不得覆盖明确记忆或变为执行硬约束。用户自报告的最终设计意图（持久化于 `design_sessions.final_intention_json` 并同步至 `online_rooms` / `online_room_events`）与这套记忆完全独立。
 - 橙色 `TENTATIVE INTENT` 仅在普通轮中可选显示，需通过专用反馈接口确认、修订或拒绝（拒绝不调用模型）。
 - 进度抽屉分为 `Unresolved questions`（来源为非橙卡助手内容，已回答或忽略进入 `Processed`）与确认/修订后的 `Design inclinations`（证据轨迹最多 12 条）。忽略与恢复均为确定性接口，不写额外聊天且不调用模型；Stage 开场不推进问题或已确认决定。
 
@@ -82,7 +82,7 @@
 3. **服务配置与重启**：
    - systemd 托管：更新并重启单一非 root 服务 `deploy/sokoban.service`（`User=sokoban`、`NoNewPrivileges=true`、`PrivateTmp=true`、`EnvironmentFile=-/opt/sokoban/.env`，通过 `uvicorn server.main:create_app --factory` 监听 `127.0.0.1:8000`）。
    - 容器托管：使用多阶段 `deploy/Dockerfile`（Node 22 + Python 3.12 非 root `appuser`，入口 `uvicorn server.main:create_app --factory`）与 `deploy/compose.yaml`（映射 `8000:8000` 并挂载持久化 SQLite 数据卷）。
-   - Nginx 反向代理：`deploy/nginx-sokoban.conf` 将 `/game/`、`/frontend/`、`/cocreation/` 与 `/` 统一转发至 `127.0.0.1:8000`（`/cocreation/` 保留 135 秒超时、`index.html` `no-cache`，并按可信代理加固 `X-Forwarded-Proto`）。仅修改文档或纯静态资源时按需处理，无需不必要的服务中断。
+   - Nginx 反向代理：`deploy/nginx-sokoban.conf` 将 `/game/`、`/frontend/`、`/cocreation/` 与 `/` 统一转发至 `127.0.0.1:8000`（`/cocreation/` 与 `/api/` 保留 135 秒超时、入口页面与 `sokoban-bridge.js` `no-cache`，并按可信代理加固 `X-Forwarded-Proto`）。仅修改文档或纯静态资源时按需处理，无需不必要的服务中断。
 4. **发布后核验**：验证源站及公网 `GET /health`、`GET /ready`、`/frontend/`、`/cocreation/` 静态资源及预期的未授权/密码拦截响应（注意不要通过直接打开无会话 `/cocreation/` 污染研究记录，核验只读接口或已授权测试会话）。
 5. **代码回滚**：恢复上一版本的代码与构建产物并重启 `sokoban.service`，执行同范围健康与只读检查。保留发布期间新采集的研究数据；数据库备份仅用于单独获准的数据恢复。
 

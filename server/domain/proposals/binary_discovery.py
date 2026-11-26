@@ -74,9 +74,9 @@ class BinaryChoice(BaseModel):
     question: str = ""
     note: str = ""
     label: str
-    letter: str
+    letter: str = ""
     promise: BinaryPromise
-    source_turn_id: str = Field(alias="sourceTurnId")
+    source_turn_id: str = Field(default="", alias="sourceTurnId")
     display_language: Literal["en", "zh-CN"] | None = Field(default=None, alias="displayLanguage")
 
 
@@ -151,6 +151,7 @@ class BinaryDiscoveryState(BaseModel):
             "question": question["question"],
             "note": question["note"],
             "number": question["number"],
+            "sourceLanguage": self.language,
             "choices": [
                 {"choiceId": item["choiceId"], "label": item["label"], "letter": item["letter"]}
                 for item in question["choices"]

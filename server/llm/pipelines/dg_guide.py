@@ -250,7 +250,7 @@ class DGGuidePipeline:
                 deadline=deadline,
                 max_attempts=max_attempts,
                 temperature=0.2,
-                max_tokens=450,
+                max_tokens=2048,
                 attempt_timeout_seconds=self.timeout_seconds,
                 extra_body=self.extra_body,
                 clock=self.clock,

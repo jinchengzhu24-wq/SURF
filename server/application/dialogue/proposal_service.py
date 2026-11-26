@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from server.application.sessions import (
@@ -18,19 +20,32 @@ from server.application.sessions import (
     solve_stage_async,
 )
 from server.core.clock import SYSTEM_CLOCK, Clock
+from server.core.grid import map_fingerprint
+from server.core.llm_client import LLMError
 from server.domain.errors import ConflictError, IdempotencyConflictError, NotFoundError
 from server.domain.memory import (
     add_confirmed_decision,
     add_rejected_decision,
     set_active_disagreement,
 )
-from server.domain.sessions import describe_diff
+from server.domain.sessions import describe_diff, summarize_stage_changes
+from server.i18n.messages import format_verified_diff_summary
 from server.persistence.database import SQLiteDatabase, dump_json
 from server.persistence.repositories._mappers import row_to_proposal
 from server.persistence.repositories.operational_repo import OperationalRepository
 from server.persistence.repositories.sessions_repo import SessionsRepository
 
-from ._shared import require_active_session, require_current_version_tx
+from ._shared import (
+    ACTIVE_CHALLENGE_STATUSES,
+    check_completed_idempotency,
+    classify_failure,
+    emit_dashboard_node_tx,
+    record_message_failure_audit_tx,
+    require_active_session,
+    require_browser_session,
+    require_current_version_tx,
+    stale_before_iso,
+)
 from .handlers.binary_discovery import BinaryDiscoveryHandler
 
 
@@ -67,8 +82,28 @@ class ProposalService:
         decision: Literal["accept", "reject"],
         base_version_id: str,
         idempotency_key: str,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Accept or reject a pending proposal; runs solver OUTSIDE write_tx before CAS commit."""
+        require_browser_session(
+            self._sessions_repo,
+            session_id,
+            access_token,
+            settings=self._settings,
+        )
+        clean_reason = str(reason or "").strip()[:2000]
+        sig = request_digest(
+            {
+                "proposalId": proposal_id,
+                "decision": decision,
+                "base": base_version_id,
+                "reason": clean_reason,
+            }
+        )
+        if check_completed_idempotency(
+            self._operational_repo, session_id, "decide_proposal", idempotency_key, sig
+        ):
+            return await self._read_model.get_session_payload(session_id)
         session = require_active_session(
             self._sessions_repo,
             session_id,
@@ -76,15 +111,13 @@ class ProposalService:
             settings=self._settings,
             clock=self._clock,
         )
-        sig = request_digest(
-            {"proposalId": proposal_id, "decision": decision, "base": base_version_id}
-        )
         claim = self._operational_repo.claim_key(
             session_id,
             "decide_proposal",
             idempotency_key,
             request_hash=sig,
             created_at=self._clock.utc_now(),
+            stale_before_iso=stale_before_iso(self._clock, 150.0),
         )
         if claim.outcome == "conflict":
             raise IdempotencyConflictError("IDEMPOTENCY_CONFLICT")
@@ -106,6 +139,25 @@ class ProposalService:
                 raise NotFoundError("PROPOSAL_NOT_FOUND", "error.version_conflict")
             if proposal.status != "pending" or proposal.base_version_id != base_version_id:
                 raise ConflictError("STALE_PROPOSAL", "error.version_conflict")
+            if decision == "accept":
+                cur_ver_rm = next(
+                    (v for v in read_model.versions if v.version_id == base_version_id), None
+                )
+                active_dis = (
+                    (cur_ver_rm.design_context or {}).get("activeDisagreement")
+                    if cur_ver_rm is not None
+                    else None
+                )
+                has_active_dis = (
+                    isinstance(active_dis, Mapping) and active_dis.get("status") == "active"
+                )
+                has_open_challenge = any(
+                    ch.base_version_id == base_version_id
+                    and ch.status in ACTIVE_CHALLENGE_STATUSES
+                    for ch in read_model.challenges
+                )
+                if has_active_dis or has_open_challenge:
+                    raise ConflictError("DISAGREEMENT_ACTIVE", "error.version_conflict")
 
             solved = (
                 await solve_stage_async(
@@ -119,7 +171,7 @@ class ProposalService:
 
             with self._db.write_tx() as conn:
                 cur_session, base_ver = require_current_version_tx(
-                    conn, session_id, base_version_id
+                    conn, session_id, base_version_id, clock=self._clock
                 )
                 p_row = conn.execute(
                     "SELECT * FROM change_proposals WHERE session_id = ? AND proposal_id = ?",
@@ -130,14 +182,31 @@ class ProposalService:
                 cur_prop = row_to_proposal(p_row)
                 if cur_prop.status != "pending":
                     raise ConflictError("STALE_PROPOSAL", "error.version_conflict")
+                if decision == "accept":
+                    tx_dis = (base_ver.design_context or {}).get("activeDisagreement")
+                    tx_has_dis = isinstance(tx_dis, Mapping) and tx_dis.get("status") == "active"
+                    tx_open_chg = conn.execute(
+                        "SELECT 1 FROM revision_challenges "
+                        "WHERE session_id = ? AND base_version_id = ? "
+                        "AND status NOT IN ('resolved', 'cancelled') LIMIT 1",
+                        (session_id, base_version_id),
+                    ).fetchone()
+                    if tx_has_dis or tx_open_chg is not None:
+                        raise ConflictError("DISAGREEMENT_ACTIVE", "error.version_conflict")
 
                 summary = str(cur_prop.proposal.get("summary") or "AI proposal")
-                reason = str(cur_prop.proposal.get("tradeoffNotice") or summary)
+                decision_reason = clean_reason or str(
+                    cur_prop.proposal.get("tradeoffNotice") or summary
+                )
                 if decision == "accept":
                     assert solved is not None
                     new_vid = uuid.uuid4().hex
                     new_num = next_version_number_tx(conn, session_id)
                     diff = describe_diff(base_ver.rows, solved.rows)
+                    change_summary = summarize_stage_changes(
+                        base_ver.rows, solved.rows
+                    ).to_wire_dict()
+                    verified_diff = format_verified_diff_summary(diff, cur_session.language)
                     bindings = build_entity_bindings(
                         solved.rows,
                         parent_bindings=base_ver.entity_bindings,
@@ -147,7 +216,7 @@ class ProposalService:
                         add_confirmed_decision(
                             base_ver.design_context,
                             summary,
-                            reason,
+                            decision_reason,
                             new_vid,
                             cur_prop.assistant_turn_id,
                             proposal_id=proposal_id,
@@ -190,9 +259,34 @@ class ProposalService:
                         "WHERE proposal_id = ? AND status = 'pending'",
                         (
                             now_iso,
-                            dump_json({"decision": "accept", "versionId": new_vid}),
+                            dump_json(
+                                {
+                                    "decision": "accept",
+                                    "versionId": new_vid,
+                                    **({"reason": clean_reason} if clean_reason else {}),
+                                }
+                            ),
                             proposal_id,
                         ),
+                    )
+                    append_audit_event_tx(
+                        conn,
+                        session_id,
+                        "revision_execution_outcome",
+                        {
+                            "versionId": new_vid,
+                            "proposalId": proposal_id,
+                            "sourceProposalTurnId": cur_prop.assistant_turn_id,
+                            "summary": summary,
+                            "verifiedDiff": verified_diff,
+                            "changeSummary": change_summary,
+                            "diff": diff,
+                            "validation": solved.as_dict(),
+                            "beforeFingerprint": map_fingerprint(base_ver.rows),
+                            "afterFingerprint": map_fingerprint(solved.rows),
+                            "status": "verified",
+                        },
+                        now_iso,
                     )
                     append_audit_event_tx(
                         conn,
@@ -235,11 +329,38 @@ class ProposalService:
                         event=stage_ev,
                         now_iso=now_iso,
                     )
+                    emit_dashboard_node_tx(
+                        conn,
+                        self._room_sync,
+                        session=cur_session,
+                        version=base_ver,
+                        node_id=f"proposal:{proposal_id}",
+                        node_type="proposal",
+                        node_status="accepted",
+                        entries=[
+                            {
+                                "entryId": f"proposal-verified:{proposal_id}",
+                                "kind": "map_diff",
+                                "text": dump_json({"diff": diff, "validation": solved.as_dict()}),
+                                "label": "Verified proposal result",
+                                "occurredAt": now_iso,
+                            },
+                            {
+                                "entryId": f"proposal-action:{proposal_id}",
+                                "kind": "player_action",
+                                "text": f"Accepted candidate map · saved as Stage {new_num}",
+                                "label": "Player decision",
+                                "occurredAt": now_iso,
+                            },
+                        ],
+                        now_iso=now_iso,
+                    )
                 else:
+                    reject_reason = clean_reason or "Rejected by designer"
                     next_ctx = add_rejected_decision(
                         base_ver.design_context,
                         summary,
-                        "Rejected by designer",
+                        reject_reason,
                         base_ver.version_id,
                         cur_prop.assistant_turn_id,
                         proposal_id=proposal_id,
@@ -253,7 +374,16 @@ class ProposalService:
                         "UPDATE change_proposals "
                         "SET status = 'rejected', decided_at = ?, decision_json = ? "
                         "WHERE proposal_id = ? AND status = 'pending'",
-                        (now_iso, dump_json({"decision": "reject"}), proposal_id),
+                        (
+                            now_iso,
+                            dump_json(
+                                {
+                                    "decision": "reject",
+                                    **({"reason": clean_reason} if clean_reason else {}),
+                                }
+                            ),
+                            proposal_id,
+                        ),
                     )
                     append_audit_event_tx(
                         conn,
@@ -262,6 +392,25 @@ class ProposalService:
                         {"proposalId": proposal_id, "baseVersionId": base_ver.version_id},
                         now_iso,
                     )
+                    emit_dashboard_node_tx(
+                        conn,
+                        self._room_sync,
+                        session=cur_session,
+                        version=base_ver,
+                        node_id=f"proposal:{proposal_id}",
+                        node_type="proposal",
+                        node_status="rejected",
+                        entries=[
+                            {
+                                "entryId": f"proposal-action:{proposal_id}",
+                                "kind": "player_action",
+                                "text": f"Rejected proposal ({reject_reason})",
+                                "label": "Player decision",
+                                "occurredAt": now_iso,
+                            }
+                        ],
+                        now_iso=now_iso,
+                    )
 
             self._operational_repo.complete_key(
                 session_id,
@@ -269,6 +418,11 @@ class ProposalService:
                 idempotency_key,
                 response={"proposalId": proposal_id, "versionId": new_vid},
             )
+        except asyncio.CancelledError:
+            self._operational_repo.complete_key(
+                session_id, "decide_proposal", idempotency_key, status="failed"
+            )
+            raise
         except Exception:
             self._operational_repo.complete_key(
                 session_id, "decide_proposal", idempotency_key, status="failed"
@@ -285,19 +439,37 @@ class ProposalService:
         question_id: str,
         choice_id: str,
         idempotency_key: str,
+        base_version_id: str | None = None,
+        display_language: str | None = None,
         request_id: str = "",
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """Select a Policy-2 A/B binary discovery choice with DB idempotency."""
-        require_active_session(
+        require_browser_session(
+            self._sessions_repo,
+            session_id,
+            access_token,
+            settings=self._settings,
+        )
+        sig = request_digest(
+            {
+                "topicId": topic_id,
+                "questionId": question_id,
+                "choiceId": choice_id,
+                "baseVersionId": base_version_id,
+                "displayLanguage": display_language,
+            }
+        )
+        if check_completed_idempotency(
+            self._operational_repo, session_id, "binary_choice", idempotency_key, sig
+        ):
+            return await self._read_model.get_session_payload(session_id)
+        session = require_active_session(
             self._sessions_repo,
             session_id,
             access_token,
             settings=self._settings,
             clock=self._clock,
-        )
-        sig = request_digest(
-            {"topicId": topic_id, "questionId": question_id, "choiceId": choice_id}
         )
         claim = self._operational_repo.claim_key(
             session_id,
@@ -305,6 +477,7 @@ class ProposalService:
             idempotency_key,
             request_hash=sig,
             created_at=self._clock.utc_now(),
+            stale_before_iso=stale_before_iso(self._clock, 150.0),
         )
         if claim.outcome == "conflict":
             raise IdempotencyConflictError("IDEMPOTENCY_CONFLICT")
@@ -324,12 +497,33 @@ class ProposalService:
                 choice_id=choice_id,
                 idempotency_key=idempotency_key,
                 request_id=request_id or idempotency_key,
+                base_version_id=base_version_id,
+                display_language=display_language,
                 deadline=deadline,
             )
             self._operational_repo.complete_key(
                 session_id, "binary_choice", idempotency_key, response=outcome
             )
-        except Exception:
+        except asyncio.CancelledError:
+            self._operational_repo.complete_key(
+                session_id, "binary_choice", idempotency_key, status="failed"
+            )
+            raise
+        except Exception as exc:
+            code, retryable, details = classify_failure(exc)
+            with self._db.write_tx() as conn:
+                record_message_failure_audit_tx(
+                    conn,
+                    session_id=session_id,
+                    base_version_id=base_version_id or (session.current_version_id or ""),
+                    message_key=idempotency_key,
+                    request_id=request_id or idempotency_key,
+                    code=code,
+                    retryable=retryable,
+                    details=details,
+                    now_iso=self._clock.utc_now(),
+                    emit_reply_failure=isinstance(exc, (LLMError, TimeoutError)),
+                )
             self._operational_repo.complete_key(
                 session_id, "binary_choice", idempotency_key, status="failed"
             )
@@ -343,6 +537,7 @@ class ProposalService:
         *,
         topic_id: str,
         idempotency_key: str,
+        base_version_id: str | None = None,
     ) -> dict[str, Any]:
         """Cancel an active Policy-2 binary discovery topic."""
         require_active_session(
@@ -356,7 +551,10 @@ class ProposalService:
         if read_model is None:
             raise NotFoundError("SESSION_NOT_FOUND", "error.session_not_found")
         await self._binary_handler.cancel_topic(
-            read_model=read_model, topic_id=topic_id, idempotency_key=idempotency_key
+            read_model=read_model,
+            topic_id=topic_id,
+            idempotency_key=idempotency_key,
+            base_version_id=base_version_id,
         )
         return await self._read_model.get_session_payload(session_id)
 

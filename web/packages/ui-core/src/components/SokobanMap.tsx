@@ -131,6 +131,14 @@ export function summarizeMap(rows: readonly string[]): string {
   return `${MAP_WIDTH} by ${MAP_HEIGHT} Sokoban map: ${players} player, ${boxes} boxes, ${targets} targets, ${walls} walls, ${water} water tiles`;
 }
 
+export interface TileInspectInfo {
+  anchor: HTMLElement;
+  coord: TileCoord;
+  tile: string;
+  entityLabel?: string;
+  immediate: boolean;
+}
+
 export interface SokobanMapProps {
   rows: readonly string[];
   mode?: "readonly" | "editor";
@@ -140,6 +148,7 @@ export interface SokobanMapProps {
   label?: string;
   className?: string;
   onTileClick?: (coord: TileCoord, currentTile: string) => void;
+  onTileInspect?: (info: TileInspectInfo | null) => void;
   tileNameMap?: Partial<Record<string, string>>;
 }
 
@@ -163,6 +172,7 @@ export function SokobanMap({
   label,
   className,
   onTileClick,
+  onTileInspect,
   tileNameMap,
 }: SokobanMapProps): JSX.Element {
   const entityLabels = buildEntityLabels(rows);
@@ -192,7 +202,7 @@ export function SokobanMap({
     const target = event.target;
     if (!(target instanceof Element)) return;
     const button = target.closest<HTMLButtonElement>("button[data-x][data-y]");
-    if (!button || button.disabled) return;
+    if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") return;
     const x = Number(button.dataset.x);
     const y = Number(button.dataset.y);
     if (!Number.isInteger(x) || !Number.isInteger(y)) return;
@@ -223,6 +233,54 @@ export function SokobanMap({
     nextButton?.focus();
   };
 
+  const inspectCell = (cell: HTMLElement | null, immediate: boolean) => {
+    if (!onTileInspect) return;
+    if (!cell) {
+      onTileInspect(null);
+      return;
+    }
+    const x = Number(cell.dataset.x);
+    const y = Number(cell.dataset.y);
+    if (!Number.isInteger(x) || !Number.isInteger(y)) {
+      onTileInspect(null);
+      return;
+    }
+    onTileInspect({
+      anchor: cell,
+      coord: { x, y },
+      tile: getCellTile(rows, x, y),
+      entityLabel: cell.dataset.entityId || undefined,
+      immediate,
+    });
+  };
+
+  const handleGridPointerOver = (event: PointerEvent) => {
+    if (!onTileInspect || event.pointerType === "touch") return;
+    const target = event.target;
+    const cell = target instanceof Element ? target.closest<HTMLElement>("[data-x][data-y]") : null;
+    if (cell && event.relatedTarget instanceof Node && cell.contains(event.relatedTarget)) return;
+    inspectCell(cell, false);
+  };
+
+  const handleGridPointerLeave = () => {
+    onTileInspect?.(null);
+  };
+
+  const handleGridFocusIn = (event: FocusEvent) => {
+    if (!onTileInspect) return;
+    const target = event.target;
+    const cell = target instanceof Element ? target.closest<HTMLElement>("[data-x][data-y]") : null;
+    inspectCell(cell, true);
+  };
+
+  const handleGridFocusOut = (event: FocusEvent) => {
+    if (!onTileInspect) return;
+    const grid = event.currentTarget as HTMLDivElement | null;
+    const related = event.relatedTarget;
+    if (grid && related instanceof Node && grid.contains(related)) return;
+    onTileInspect(null);
+  };
+
   const cells: JSX.Element[] = [];
   for (let y = 0; y < MAP_HEIGHT; y += 1) {
     for (let x = 0; x < MAP_WIDTH; x += 1) {
@@ -238,14 +296,13 @@ export function SokobanMap({
         .filter(Boolean)
         .join(" ");
       const displayLabel = entityLabel || getTileLabel(tile);
+      const rawName = getTileName(tile);
+      const tileLabelText = tileNameMap?.[rawName] || rawName;
+      const cellDescription = entityLabel
+        ? formatEntityCoordinate(entityLabel, x, y)
+        : `${tileLabelText} ${formatTileCoordinate(x, y)}`;
 
       if (isEditor) {
-        const rawName = getTileName(tile);
-        const tileLabelText = tileNameMap?.[rawName] || rawName;
-        const cellAriaLabel = entityLabel
-          ? formatEntityCoordinate(entityLabel, x, y)
-          : `${tileLabelText} ${formatTileCoordinate(x, y)}`;
-
         cells.push(
           <button
             key={coordKey}
@@ -257,8 +314,9 @@ export function SokobanMap({
             data-column={x + 1}
             data-tile={tile}
             data-entity-id={entityLabel}
-            aria-label={cellAriaLabel}
-            disabled={disabled}
+            aria-label={cellDescription}
+            aria-disabled={disabled ? "true" : undefined}
+            disabled={disabled && !onTileInspect}
           >
             {displayLabel}
           </button>,
@@ -274,6 +332,7 @@ export function SokobanMap({
             data-column={x + 1}
             data-tile={tile}
             data-entity-id={entityLabel}
+            title={cellDescription}
             aria-hidden="true"
           >
             {displayLabel}
@@ -291,6 +350,10 @@ export function SokobanMap({
       aria-label={resolvedLabel}
       onClick={isEditor ? handleGridClick : undefined}
       onKeyDown={isEditor ? handleGridKeyDown : undefined}
+      onPointerOver={onTileInspect ? handleGridPointerOver : undefined}
+      onPointerLeave={onTileInspect ? handleGridPointerLeave : undefined}
+      onFocusIn={onTileInspect ? handleGridFocusIn : undefined}
+      onFocusOut={onTileInspect ? handleGridFocusOut : undefined}
     >
       {cells}
     </div>

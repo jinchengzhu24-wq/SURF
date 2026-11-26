@@ -98,4 +98,5 @@ export {
   type SokobanMapProps,
   type SokobanTile,
   type TileCoord,
+  type TileInspectInfo,
 } from "./components/SokobanMap";

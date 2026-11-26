@@ -110,7 +110,7 @@ function InclinationsList({ items }: { items: DesignInclination[] }): JSX.Elemen
     <div class="progress-items" aria-live="polite">
       {items.map((item, idx) => (
         <article
-          key={item.inclinationId || `${item.statement}:${idx}`}
+          key={item.hypothesisId || item.inclinationId || `${item.statement}:${idx}`}
           class="progress-item progress-item-inclination"
         >
           <p class="progress-item-title progress-item-text">{String(item.statement || "").trim()}</p>

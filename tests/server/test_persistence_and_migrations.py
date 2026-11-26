@@ -141,6 +141,17 @@ def test_schema_pragmas_and_no_cold_start_table_scans(
             "audit_events", "idempotency_keys", "binary_discovery_topics",
             "component_recovery_tasks",
         }.issubset(tables)
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert {
+            "idx_conversation_turns_version_id",
+            "idx_revision_challenges_base_version",
+            "idx_play_attempts_version_id",
+        }.issubset(indexes)
 
         with pytest.raises(sqlite3.OperationalError):
             conn.execute(
@@ -285,6 +296,42 @@ def test_sessions_dialogue_operational_and_batch_read_model() -> None:
         access_token_hash="a1", integration_token_hash="i1", bootstrap_token_hash="b1",
         created_at="2026-11-26T00:00:00Z", is_demo=True, expires_at="2026-11-26T00:15:00Z",
     )
+    sessions.insert_version(
+        version_id="demo-v1", session_id="demo-expired", version_number=1, source="initial",
+        summary="init", rows=["####", "#p.#"], solver={"solvable": True},
+        created_at="2026-11-26T00:00:01Z",
+    )
+    dialogue.insert_turn(
+        turn_id="demo-t1", session_id="demo-expired", role="assistant", content="hi",
+        version_id="demo-v1", request_id="demo-req", created_at="2026-11-26T00:00:02Z",
+    )
+    dialogue.insert_proposal(
+        proposal_id="demo-p1", session_id="demo-expired", assistant_turn_id="demo-t1",
+        base_version_id="demo-v1", status="pending", proposal={"summary": "edit"},
+        created_at="2026-11-26T00:00:03Z", idempotency_key="demo-pk",
+    )
+    dialogue.upsert_challenge(
+        challenge_id="demo-ch1", session_id="demo-expired", base_version_id="demo-v1",
+        source_proposal_turn_id="demo-t1", challenge_turn_id="demo-t1",
+        status="awaiting_reason", created_at="2026-11-26T00:00:04Z",
+    )
+    sessions.create_play_attempt(
+        attempt_id="demo-pa1", session_id="demo-expired", version_id="demo-v1",
+        mode="algorithm_demo", language="en", ticket_hash="dth",
+        ticket_expires_at="2026-11-26T00:10:00Z", issued_at="2026-11-26T00:00:05Z",
+        minimum_moves=4, minimum_pushes=1, idempotency_key="demo-pak",
+    )
+    sessions.create_draft_regeneration(
+        request_id="demo-dr1", session_id="demo-expired", idempotency_key="demo-drk",
+        status="completed", generation=1, requested_at="2026-11-26T00:00:06Z",
+    )
+    ops.upsert_topic("demo-expired", "demo-top", {"status": "clarifying"}, "2026-11-26T00:00:07Z")
+    ops.upsert_task("demo-rec", "demo-expired", "human_edit", "d1", {"status": "pending"},
+                    "2026-11-26T00:00:08Z")
+    dialogue.append_event("demo-expired", "session_created", {}, "2026-11-26T00:00:00Z")
+    ops.claim_key("demo-expired", "message", "dk", request_hash="dh",
+                  created_at="2026-11-26T00:00:09Z")
+
     sessions.create_session(
         session_id="demo-active", mode="algorithm_demo", language="zh-CN",
         access_token_hash="a2", integration_token_hash="i2", bootstrap_token_hash="b2",
@@ -297,6 +344,7 @@ def test_sessions_dialogue_operational_and_batch_read_model() -> None:
     )
     assert sessions.delete_expired_demo_sessions("2026-11-26T00:20:00Z") == 1
     assert sessions.get_session("demo-expired") is None
+    assert sessions.load_session_read_model("demo-expired") is None
     assert sessions.get_session("demo-active") is not None
     assert sessions.get_session("formal-1") is not None
 
@@ -482,3 +530,152 @@ def test_migrations_cli_idempotent_import_and_legacy_db(tmp_path: Path) -> None:
     assert rm.versions[0].assessment is not None
     assert rm.turns[0].translations is not None and "zh-CN" in rm.turns[0].translations
     assert OperationalRepository(db).get_key("s1", "binary_discovery", "bdk1") is not None
+    with db.read_conn() as conn:
+        study_row = conn.execute(
+            "SELECT match_id, participant_id FROM study_records WHERE record_type = 'level_start'"
+        ).fetchone()
+        assert study_row is not None
+        assert study_row["match_id"] is None
+        assert study_row["participant_id"] == "s1"
+
+
+def test_migration_filters_orphans_normalizes_challenges_and_backfills_language_lock(
+    tmp_path: Path,
+) -> None:
+    from server.persistence._cocreation_migrate import migrate_cocreation_db
+
+    legacy_path = tmp_path / "legacy_orphans.sqlite3"
+    conn = sqlite3.connect(legacy_path)
+    try:
+        conn.executescript(_legacy_schema_sql())
+        # Session with current_version_id set but language_locked_at NULL
+        conn.execute(
+            "INSERT INTO design_sessions(id, creation_key, access_hash, integration_hash, "
+            "bootstrap_hash, initial_draft_method, language, language_locked_at, status, "
+            "current_version_id, deadline_started_at, created_at, updated_at) "
+            "VALUES ('s1','ck1','ah','ih','bh','partial_completion','zh-CN',NULL,"
+            "'active','v1',NULL,'2026-11-26T00:00:00Z','2026-11-26T00:01:00Z')"
+        )
+        # Session with deadline_started_at set but language_locked_at NULL
+        conn.execute(
+            "INSERT INTO design_sessions(id, creation_key, access_hash, integration_hash, "
+            "bootstrap_hash, initial_draft_method, language, language_locked_at, status, "
+            "current_version_id, deadline_started_at, created_at, updated_at) "
+            "VALUES ('s2','ck2','ah2','ih2','bh2','partial_completion','en',NULL,"
+            "'active',NULL,'2026-11-26T00:00:30Z','2026-11-26T00:00:10Z','2026-11-26T00:00:30Z')"
+        )
+        conn.execute(
+            "INSERT INTO level_versions(id, session_id, stage_number, source, rows_json, summary, "
+            "diff_json, validation_json, idempotency_key, created_at) "
+            "VALUES ('v1','s1',1,'initial','[\"####\"]','init','[]','{\"solvable\":true}',"
+            "'vk1','2026-11-26T00:00:00Z')"
+        )
+        # Orphan level_version for missing session
+        conn.execute(
+            "INSERT INTO level_versions(id, session_id, stage_number, source, rows_json, summary, "
+            "diff_json, validation_json, idempotency_key, created_at) "
+            "VALUES ('v-orphan','s-missing',1,'initial','[\"####\"]','init','[]','{}',"
+            "'vk-o','2026-11-26T00:00:00Z')"
+        )
+        # Valid & orphan turns/proposals/play_attempts
+        conn.execute(
+            "INSERT INTO conversation_turns(id, session_id, sequence_number, role, content, "
+            "language, version_id, created_at) "
+            "VALUES ('t1','s1',1,'assistant','hi','zh-CN','v1','2026-11-26T00:00:01Z'),"
+            "('t-orphan','s1',2,'user','orphan','zh-CN','v-missing','2026-11-26T00:00:02Z')"
+        )
+        conn.execute(
+            "INSERT INTO change_proposals(id, session_id, base_version_id, proposed_rows_json, "
+            "summary, diff_json, validation_json, status, assistant_turn_id, idempotency_key, "
+            "created_at) VALUES ('cp1','s1','v1','[\"####\"]','sum','[]','{}','pending','t1',"
+            "'pk1','2026-11-26T00:00:03Z'),"
+            "('cp-orphan','s1','v-missing','[\"####\"]','sum','[]','{}','pending','t1',"
+            "'pk-o','2026-11-26T00:00:04Z')"
+        )
+        conn.execute(
+            "INSERT INTO play_attempts(id, session_id, version_id, initial_draft_method, "
+            "language, status, ticket_hash, ticket_expires_at, issued_at, idempotency_key) "
+            "VALUES ('pa-orphan','s1','v-missing','partial_completion','zh-CN','issued',"
+            "'th','2026-11-26T00:10:00Z','2026-11-26T00:00:05Z','pak-o')"
+        )
+        # Legacy revision_challenges statuses + orphan
+        conn.execute(
+            "INSERT INTO revision_challenges(challenge_id, session_id, base_version_id, "
+            "source_proposal_turn_id, challenge_turn_id, status, created_at, updated_at) "
+            "VALUES ('c1','s1','v1','t1','t1','review_pending',"
+            "'2026-11-26T00:00:01Z','2026-11-26T00:00:01Z'),"
+            "('c2','s1','v1','t1','t2','reason_review',"
+            "'2026-11-26T00:00:02Z','2026-11-26T00:00:02Z'),"
+            "('c3','s1','v1','t1','t3','choice_pending',"
+            "'2026-11-26T00:00:03Z','2026-11-26T00:00:03Z'),"
+            "('c-orphan','s1','v-missing','t1','t4','review_pending',"
+            "'2026-11-26T00:00:04Z','2026-11-26T00:00:04Z')"
+        )
+        # Orphan operational audit events for missing session
+        conn.execute(
+            "INSERT INTO audit_events(session_id, event_type, payload_json, created_at) "
+            "VALUES ('s-missing','binary_discovery_state',"
+            "'{\"topicId\":\"top-o\",\"status\":\"clarifying\"}','2026-11-26T00:01:00Z'),"
+            "('s-missing','component_recovery',"
+            "'{\"recoveryId\":\"rec-o\",\"baseVersionId\":\"v1\"}','2026-11-26T00:01:01Z')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    target_db = SQLiteDatabase(tmp_path / "migrated.sqlite3")
+    stats = migrate_cocreation_db(target_db, legacy_path)
+    assert stats["sessions"] == 2
+    assert stats["versions"] == 1
+    assert stats["turns"] == 1
+    assert stats["proposals"] == 1
+    assert stats["challenges"] == 3
+    assert stats["play_attempts"] == 0
+    assert stats["binary_topics"] == 0
+    assert stats["recovery_tasks"] == 0
+
+    sessions_repo = SessionsRepository(target_db)
+    s1 = sessions_repo.get_session("s1")
+    s2 = sessions_repo.get_session("s2")
+    assert s1 is not None and s1.language_locked is True
+    assert s1.language_locked_at == "2026-11-26T00:00:00Z"
+    assert s2 is not None and s2.language_locked is True
+    assert s2.language_locked_at == "2026-11-26T00:00:10Z"
+    rm = sessions_repo.load_session_read_model("s1")
+    assert rm is not None
+    statuses = {c.challenge_id: c.status for c in rm.challenges}
+    assert statuses == {
+        "c1": "awaiting_reason",
+        "c2": "awaiting_reason",
+        "c3": "awaiting_choice",
+    }
+
+
+def test_reap_expired_rooms_protects_active_cocreation_sessions(tmp_path: Path) -> None:
+    db = SQLiteDatabase(tmp_path / "reap_guard.sqlite3")
+    rooms = RoomsRepository(db)
+    sessions = SessionsRepository(db)
+    p1 = {"playerNumber": 1, "tokenHash": "h1", "studySessionId": "st1",
+          "menuStartedFlow": True, "ready": False}
+    rooms.create_room(
+        "m-active", "ABC234", player1=p1,
+        now_iso="2026-11-26T00:00:00Z", expires_at_iso="2026-11-26T00:10:00Z",
+    )
+    sessions.create_session(
+        session_id="sess-active", match_id="m-active", player_slot=1,
+        mode="partial_completion", language="en",
+        access_token_hash="a", integration_token_hash="i", bootstrap_token_hash="b",
+        created_at="2026-11-26T00:00:00Z",
+    )
+    # Expired timestamp, but protected while design_session is active or awaiting_intention
+    assert rooms.reap_expired_rooms("2026-11-26T00:20:00Z") == 0
+    assert rooms.get_room("m-active") is not None
+
+    sessions.update_session("sess-active", status="awaiting_intention")
+    assert rooms.reap_expired_rooms("2026-11-26T00:20:00Z") == 0
+    assert rooms.get_room("m-active") is not None
+
+    # Once completed, expired room can be reaped
+    sessions.update_session("sess-active", status="completed")
+    assert rooms.reap_expired_rooms("2026-11-26T00:20:00Z") == 1
+    assert rooms.get_room("m-active") is None

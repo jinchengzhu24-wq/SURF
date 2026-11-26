@@ -10,6 +10,7 @@ import type {
   StructuredErrorLike,
 } from "../types";
 import {
+  binaryFlowActive,
   busy,
   canEditSelected,
   language,
@@ -191,7 +192,14 @@ export function restoreUnsavedMapDraft(): boolean {
 }
 
 export function editTile(x: number, y: number): void {
-  if (!canEditSelected.value || busy.value) return;
+  if (
+    !canEditSelected.value ||
+    busy.value ||
+    binaryFlowActive.value ||
+    session.value?.proposalFlowState?.status === "planning"
+  ) {
+    return;
+  }
   const currentRows = draftRows.value;
   if (y < 0 || y >= currentRows.length) return;
   const rowChars = [...currentRows[y]];

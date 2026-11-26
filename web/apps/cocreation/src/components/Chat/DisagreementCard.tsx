@@ -3,26 +3,44 @@ import { t, type TranslationKey } from "../../i18n";
 import { canUseChallengeChoice } from "../../store/chatStore";
 import { language } from "../../store/sessionStore";
 import { sendChallengeChoice } from "../../store/workflows";
-import type { Disagreement } from "../../types";
+import type { ChallengeCard, ChallengeState, Disagreement } from "../../types";
 import { tooltipHandlers } from "../Common/Tooltip";
 
 export interface DisagreementCardProps {
-  disagreement: Disagreement;
+  disagreement: Disagreement | ChallengeCard;
+  challengeState?: ChallengeState | null;
 }
 
-export function DisagreementCard({ disagreement }: DisagreementCardProps): JSX.Element {
+export function DisagreementCard({
+  disagreement,
+  challengeState,
+}: DisagreementCardProps): JSX.Element {
   const lang = language.value;
+  const cardQuestion =
+    disagreement.nextQuestion ||
+    ("question" in disagreement ? disagreement.question : undefined);
+  const cardSummary =
+    disagreement.coreDisagreement ||
+    ("summary" in disagreement ? disagreement.summary : undefined);
   const fields: Array<[TranslationKey, string | undefined]> = [
     ["discussionUser", disagreement.userPosition],
-    ["discussionCore", disagreement.coreDisagreement],
-    ["discussionNext", disagreement.nextQuestion],
+    ["discussionCore", cardSummary],
+    ["discussionNext", cardQuestion],
   ];
 
+  const resolvedChallengeId = disagreement.challengeId || challengeState?.challengeId;
+  const effectivePhase =
+    disagreement.phase ||
+    (challengeState?.status === "choice_pending" || disagreement.status === "choice_pending"
+      ? "choice_pending"
+      : undefined);
+
   const showChoiceButtons =
-    disagreement.subject === "ai_revision_challenge" &&
-    disagreement.phase === "choice_pending" &&
-    Boolean(disagreement.challengeId);
-  const canChoose = canUseChallengeChoice(disagreement.challengeId);
+    (disagreement.subject === "ai_revision_challenge" ||
+      Boolean("choices" in disagreement && disagreement.choices?.length)) &&
+    effectivePhase === "choice_pending" &&
+    Boolean(resolvedChallengeId);
+  const canChoose = canUseChallengeChoice(resolvedChallengeId);
 
   return (
     <section class="discussion-focus disagreement-card">
@@ -37,7 +55,7 @@ export function DisagreementCard({ disagreement }: DisagreementCardProps): JSX.E
           </div>
         );
       })}
-      {showChoiceButtons && disagreement.challengeId ? (
+      {showChoiceButtons && resolvedChallengeId ? (
         <div class="proposal-actions">
           {(
             [
@@ -51,7 +69,7 @@ export function DisagreementCard({ disagreement }: DisagreementCardProps): JSX.E
               class="secondary-button guidance-cue-button challenge-choice-button"
               disabled={!canChoose}
               aria-disabled={!canChoose ? "true" : undefined}
-              onClick={() => sendChallengeChoice(disagreement.challengeId!, choice)}
+              onClick={() => sendChallengeChoice(resolvedChallengeId, choice)}
               {...tooltipHandlers({
                 kind: "action",
                 helpKey: "challengeChoice",

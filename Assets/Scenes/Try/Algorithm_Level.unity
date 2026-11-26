@@ -13,7 +13,7 @@ OcclusionCullingSettings:
 --- !u!104 &2
 RenderSettings:
   m_ObjectHideFlags: 0
-  serializedVersion: 9
+  serializedVersion: 10
   m_Fog: 0
   m_FogColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}
   m_FogMode: 3
@@ -42,8 +42,8 @@ RenderSettings:
 --- !u!157 &3
 LightmapSettings:
   m_ObjectHideFlags: 0
-  serializedVersion: 12
-  m_GIWorkflowMode: 1
+  serializedVersion: 13
+  m_BakeOnSceneLoad: 0
   m_GISettings:
     serializedVersion: 2
     m_BounceScale: 1
@@ -66,9 +66,6 @@ LightmapSettings:
     m_LightmapParameters: {fileID: 0}
     m_LightmapsBakeMode: 1
     m_TextureCompression: 1
-    m_FinalGather: 0
-    m_FinalGatherFiltering: 1
-    m_FinalGatherRayCount: 256
     m_ReflectionCompression: 2
     m_MixedBakeMode: 2
     m_BakeBackend: 1
@@ -477,7 +474,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &3189217402
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -492,6 +489,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   endpoint: http://111.231.136.4:8000/generate-level-plan
   requestTimeoutSeconds: 180
+  includeCreativeWorkshopIdea: 0
+  includeDescriptionGenerationPreferences: 0
 --- !u!114 &3189217403
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -585,12 +584,12 @@ PrefabInstance:
       value: 
       objectReference: {fileID: 898566770}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
-      propertyPath: completeAction
-      value: 2
-      objectReference: {fileID: 0}
-    - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: levelToLoad
       value: Menu
+      objectReference: {fileID: 0}
+    - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
+      propertyPath: completeAction
+      value: 2
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: maxGeneratedLevelCount
@@ -751,27 +750,27 @@ PrefabInstance:
       value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
-      propertyPath: rows.Array.data[3]
+      propertyPath: 'rows.Array.data[3]'
       value: ' #.@@.......# '
       objectReference: {fileID: 0}
     - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
-      propertyPath: rows.Array.data[4]
+      propertyPath: 'rows.Array.data[4]'
       value: ' #.@@....s..# '
       objectReference: {fileID: 0}
     - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
-      propertyPath: rows.Array.data[5]
+      propertyPath: 'rows.Array.data[5]'
       value: ' ###..#.....# '
       objectReference: {fileID: 0}
     - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
-      propertyPath: rows.Array.data[6]
+      propertyPath: 'rows.Array.data[6]'
       value: '   #...t.#..# '
       objectReference: {fileID: 0}
     - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
-      propertyPath: rows.Array.data[7]
+      propertyPath: 'rows.Array.data[7]'
       value: '   #.s......# '
       objectReference: {fileID: 0}
     - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
-      propertyPath: rows.Array.data[8]
+      propertyPath: 'rows.Array.data[8]'
       value: '   ###..#...# '
       objectReference: {fileID: 0}
     - target: {fileID: 8610000000000000002, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}

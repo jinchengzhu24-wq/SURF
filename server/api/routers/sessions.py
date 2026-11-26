@@ -13,6 +13,7 @@ from server.api.deps import (
     ensure_session_shape,
     get_llm_deadline,
     get_request_id,
+    rewrite_loopback_url,
     set_session_access_cookie,
     validate_identifier,
 )
@@ -26,14 +27,17 @@ from server.api.schemas import (
     TranslationRequest,
 )
 from server.domain.errors import AuthError
+from server.settings import DEFAULT_PUBLIC_BASE_URL
 
 router = APIRouter()
 
 
 @router.post("/sessions")
-async def create_session(payload: CreateSessionRequest, container: ContainerDep) -> dict[str, Any]:
+async def create_session(
+    payload: CreateSessionRequest, request: Request, container: ContainerDep
+) -> dict[str, Any]:
     validate_identifier(payload.idempotencyKey, "idempotencyKey")
-    return await container.session_lifecycle_service.create_formal_session(
+    result = await container.session_lifecycle_service.create_formal_session(
         rows=payload.rows,
         initial_draft_method=payload.initialDraftMethod,
         language=payload.language,
@@ -41,16 +45,32 @@ async def create_session(payload: CreateSessionRequest, container: ContainerDep)
         match_id=payload.matchId,
         player_number=payload.playerNumber,
     )
+    if "launchUrl" in result and isinstance(result["launchUrl"], str):
+        result["launchUrl"] = rewrite_loopback_url(
+            result["launchUrl"],
+            request,
+            configured_base_url=container.settings.public_base_url,
+            default_base_url=DEFAULT_PUBLIC_BASE_URL,
+        )
+    return result
 
 
 @router.post("/demo-sessions")
 async def create_demo_session(
-    payload: DemoSessionRequest, container: ContainerDep
+    payload: DemoSessionRequest, request: Request, container: ContainerDep
 ) -> dict[str, Any]:
     validate_identifier(payload.idempotencyKey, "idempotencyKey")
-    return await container.session_lifecycle_service.create_demo_session(
+    result = await container.session_lifecycle_service.create_demo_session(
         language=payload.language, idempotency_key=payload.idempotencyKey
     )
+    if "launchUrl" in result and isinstance(result["launchUrl"], str):
+        result["launchUrl"] = rewrite_loopback_url(
+            result["launchUrl"],
+            request,
+            configured_base_url=container.settings.public_base_url,
+            default_base_url=DEFAULT_PUBLIC_BASE_URL,
+        )
+    return result
 
 
 @router.post("/sessions/{session_id}/browser-access")

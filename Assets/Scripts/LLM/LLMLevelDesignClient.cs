@@ -430,6 +430,26 @@ public class LLMLevelDesignClient : MonoBehaviour
 public static class LLMBackendError
 {
     [Serializable]
+    private sealed class UnifiedErrorObject
+    {
+        public string code = "";
+        public string message = "";
+        public bool retryable = false;
+    }
+
+    [Serializable]
+    private sealed class UnifiedErrorEnvelope
+    {
+        public string code = "";
+        public string stage = "";
+        public string message = "";
+        public string requestId = "";
+        public bool retryable = false;
+        public int attemptsUsed = 0;
+        public UnifiedErrorObject error = null;
+    }
+
+    [Serializable]
     private sealed class PlainErrorEnvelope
     {
         public string detail = "";
@@ -556,6 +576,64 @@ public static class LLMBackendError
 
         try
         {
+            UnifiedErrorEnvelope unified =
+                JsonUtility.FromJson<UnifiedErrorEnvelope>(responseBody);
+            if (unified != null)
+            {
+                bool hasTopCode = !string.IsNullOrWhiteSpace(unified.code);
+                bool hasNestedCode = unified.error != null
+                    && !string.IsNullOrWhiteSpace(unified.error.code);
+                if (hasTopCode || hasNestedCode)
+                {
+                    string resolvedCode = hasTopCode
+                        ? unified.code
+                        : unified.error.code;
+                    string resolvedMessage = !string.IsNullOrWhiteSpace(unified.message)
+                        ? unified.message
+                        : (unified.error != null ? unified.error.message : "");
+                    bool resolvedRetryable = hasTopCode
+                        ? unified.retryable
+                        : unified.error.retryable;
+
+                    return new ErrorDetail
+                    {
+                        code = resolvedCode ?? "",
+                        stage = !string.IsNullOrWhiteSpace(unified.stage)
+                            ? unified.stage
+                            : "http_response",
+                        message = resolvedMessage ?? "",
+                        requestId = unified.requestId ?? "",
+                        retryable = resolvedRetryable,
+                        attemptsUsed = Mathf.Max(0, unified.attemptsUsed)
+                    };
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Fall through to legacy detail envelopes if unified parsing fails.
+        }
+
+        try
+        {
+            ErrorEnvelope envelope = JsonUtility.FromJson<ErrorEnvelope>(responseBody);
+            ErrorDetail detail = envelope != null ? envelope.detail : null;
+            if (detail != null
+                && (!string.IsNullOrWhiteSpace(detail.code)
+                    || !string.IsNullOrWhiteSpace(detail.stage)
+                    || !string.IsNullOrWhiteSpace(detail.message)
+                    || !string.IsNullOrWhiteSpace(detail.requestId)))
+            {
+                return detail;
+            }
+        }
+        catch (Exception)
+        {
+            // Plain-text detail responses store detail as a string rather than an object.
+        }
+
+        try
+        {
             PlainErrorEnvelope plainEnvelope =
                 JsonUtility.FromJson<PlainErrorEnvelope>(responseBody);
 
@@ -573,27 +651,9 @@ public static class LLMBackendError
         }
         catch (Exception)
         {
-            // Structured LLM errors store detail as an object, so parsing that
-            // response with the plain-string envelope can legitimately fail.
+            // Array-shaped validation details or malformed payloads return null below.
         }
 
-        try
-        {
-            ErrorEnvelope envelope = JsonUtility.FromJson<ErrorEnvelope>(responseBody);
-            ErrorDetail detail = envelope != null ? envelope.detail : null;
-            if (detail != null
-                && (!string.IsNullOrWhiteSpace(detail.code)
-                    || !string.IsNullOrWhiteSpace(detail.stage)
-                    || !string.IsNullOrWhiteSpace(detail.message)
-                    || !string.IsNullOrWhiteSpace(detail.requestId)))
-            {
-                return detail;
-            }
-            return null;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
+        return null;
     }
 }

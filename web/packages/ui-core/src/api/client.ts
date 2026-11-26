@@ -8,6 +8,7 @@ export interface ApiErrorOptions {
   message: string;
   url: string;
   detail?: unknown;
+  requestId?: string;
   retryable?: boolean;
   cause?: unknown;
 }
@@ -18,6 +19,7 @@ export class ApiError extends Error {
   readonly code: string;
   readonly url: string;
   readonly detail?: unknown;
+  readonly requestId?: string;
   readonly retryable: boolean;
 
   constructor(options: ApiErrorOptions) {
@@ -27,6 +29,7 @@ export class ApiError extends Error {
     this.code = options.code;
     this.url = options.url;
     this.detail = options.detail;
+    this.requestId = options.requestId;
     this.retryable = Boolean(options.retryable);
   }
 }
@@ -241,11 +244,34 @@ function extractErrorMeta(payload: unknown, fallbackStatus: number): {
   code: string;
   message: string;
   detail: unknown;
+  requestId?: string;
   retryable?: boolean;
 } {
   if (payload && typeof payload === "object") {
     const record = payload as Record<string, unknown>;
-    const detail = "detail" in record ? record.detail : payload;
+    const rawDetail = "detail" in record ? record.detail : payload;
+    const errorRecord =
+      record.error && typeof record.error === "object" && !Array.isArray(record.error)
+        ? (record.error as Record<string, unknown>)
+        : null;
+    const topDetails =
+      record.details && typeof record.details === "object" && !Array.isArray(record.details)
+        ? (record.details as Record<string, unknown>)
+        : null;
+
+    let detail: unknown = rawDetail;
+    if (typeof rawDetail === "string" && (errorRecord || topDetails)) {
+      if (errorRecord) {
+        const resolvedDetails = topDetails ?? errorRecord.details;
+        detail =
+          resolvedDetails !== undefined
+            ? { ...errorRecord, details: resolvedDetails }
+            : { ...errorRecord };
+      } else {
+        detail = { details: topDetails };
+      }
+    }
+
     const detailRecord =
       detail && typeof detail === "object" && !Array.isArray(detail)
         ? (detail as Record<string, unknown>)
@@ -255,6 +281,7 @@ function extractErrorMeta(payload: unknown, fallbackStatus: number): {
       (typeof record.code === "string" && record.code) ||
       `HTTP_${fallbackStatus}`;
     const message =
+      (typeof rawDetail === "string" && rawDetail) ||
       formatErrorDetail(detail) ||
       (typeof record.message === "string" && record.message) ||
       `HTTP ${fallbackStatus}`;
@@ -264,7 +291,11 @@ function extractErrorMeta(payload: unknown, fallbackStatus: number): {
         : typeof record.retryable === "boolean"
           ? record.retryable
           : undefined;
-    return { code, message, detail, retryable };
+    const requestId =
+      (typeof detailRecord?.requestId === "string" && detailRecord.requestId) ||
+      (typeof record.requestId === "string" && record.requestId) ||
+      undefined;
+    return { code, message, detail, requestId, retryable };
   }
   return {
     code: `HTTP_${fallbackStatus}`,
@@ -400,6 +431,7 @@ export async function fetchJson<T>(
     }
   }
 
+  const responseRequestId = response.headers?.get?.("X-Request-ID")?.trim() || undefined;
   const rawText = await response.text();
   let parsedBody: unknown = undefined;
   if (rawText.trim().length > 0) {
@@ -413,6 +445,7 @@ export async function fetchJson<T>(
           message: `HTTP ${response.status}`,
           url,
           detail: rawText,
+          requestId: responseRequestId,
           retryable: response.status >= 500 || response.status === 429,
           cause: error,
         });
@@ -423,6 +456,7 @@ export async function fetchJson<T>(
         message: "Server returned invalid JSON.",
         url,
         detail: rawText,
+        requestId: responseRequestId,
         retryable: true,
         cause: error,
       });
@@ -437,6 +471,7 @@ export async function fetchJson<T>(
       message: meta.message,
       url,
       detail: meta.detail,
+      requestId: responseRequestId || meta.requestId,
       retryable:
         meta.retryable ?? (response.status >= 500 || response.status === 429),
     });
@@ -451,6 +486,7 @@ export async function fetchJson<T>(
         message: "Response payload failed schema validation.",
         url,
         detail: result.error.issues,
+        requestId: responseRequestId,
         retryable: false,
       });
     }

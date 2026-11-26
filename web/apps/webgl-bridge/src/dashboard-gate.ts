@@ -106,16 +106,27 @@ export function createDashboardGate({
     restoreTarget.focus();
   }
 
-  // Prevent Unity WebGL's window/document keyboard capture from intercepting
-  // keys typed inside the native <dialog> without blocking browser input defaults.
-  const isolateUnityKeyboard = (event: KeyboardEvent): void => {
+  // Prevent Unity WebGL's window/document keyboard listeners from intercepting
+  // keys typed inside the native <dialog> without swallowing dialog-internal handlers.
+  const isolateOutsideDialogKeyboard = (event: KeyboardEvent): void => {
     if (!isOpen()) return;
+    if (event.target instanceof Node && elements.dialog.contains(event.target)) {
+      return;
+    }
     event.stopImmediatePropagation();
   };
 
+  const isolateDialogKeyboardBubble = (event: KeyboardEvent): void => {
+    if (!isOpen()) return;
+    event.stopPropagation();
+  };
+
   for (const eventName of ["keydown", "keypress", "keyup"] as const) {
-    win.addEventListener(eventName, isolateUnityKeyboard, {
+    win.addEventListener(eventName, isolateOutsideDialogKeyboard, {
       capture: true,
+      signal,
+    });
+    elements.dialog.addEventListener(eventName, isolateDialogKeyboardBubble, {
       signal,
     });
   }
@@ -167,6 +178,17 @@ export function createDashboardGate({
       setBusy(true);
       elements.statusText.textContent = "Checking password...";
 
+      // Pre-open synchronously inside the submit gesture without noopener so we retain
+      // the Window handle to navigate (or close on failure), then sever opener immediately.
+      const popup = win.open("about:blank", "_blank");
+      if (popup) {
+        try {
+          popup.opener = null;
+        } catch {
+          // Ignore readonly opener in restricted environments.
+        }
+      }
+
       try {
         await fetchJson<unknown>("/verify-dashboard-password", {
           method: "POST",
@@ -174,10 +196,34 @@ export function createDashboardGate({
           timeoutMs: 10_000,
           fetchImpl,
         });
-        win.open(safeUrl, "_blank", "noopener");
         setBusy(false);
-        close();
+        if (popup && !popup.closed) {
+          try {
+            popup.opener = null;
+          } catch {
+            // Ignore readonly opener in restricted environments.
+          }
+          popup.location.href = safeUrl;
+          close();
+          return;
+        }
+        const fallbackLink = doc.createElement("a");
+        fallbackLink.href = safeUrl;
+        fallbackLink.target = "_blank";
+        fallbackLink.rel = "noopener noreferrer";
+        fallbackLink.textContent = "Open dashboard";
+        elements.statusText.replaceChildren(
+          "Popup blocked. Open the dashboard directly: ",
+          fallbackLink,
+        );
       } catch (error) {
+        if (popup && !popup.closed) {
+          try {
+            popup.close();
+          } catch {
+            // Ignore close failures on mocked or restricted windows.
+          }
+        }
         setBusy(false);
         if (error instanceof ApiError && error.status === 401) {
           elements.statusText.textContent = "Incorrect password";

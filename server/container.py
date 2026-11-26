@@ -87,6 +87,33 @@ class AppContainer:
         self.db.close()
 
 
+def build_deepseek_transport(settings: SokobanSettings) -> AsyncOpenAITransport:
+    """Construct the DeepSeek transport using prompt-only schema injection and disabled thinking."""
+    return AsyncOpenAITransport(
+        api_key=settings.deepseek_api_key.get_secret_value(),
+        base_url=settings.deepseek_base_url,
+        default_timeout_seconds=settings.deepseek_timeout_seconds,
+        response_format_mode="prompt_only",
+        default_extra_body={"thinking": {"type": "disabled"}},
+    )
+
+
+def build_cocreation_transport(settings: SokobanSettings) -> AsyncOpenAITransport:
+    """Construct the Moonshot/Kimi co-creation transport with K2 parameter defaults."""
+    model_lower = settings.cocreation_llm_model.strip().casefold()
+    base_lower = settings.cocreation_llm_base_url.strip().casefold()
+    is_kimi_k2 = model_lower.startswith("kimi-k2") or "moonshot" in base_lower
+    return AsyncOpenAITransport(
+        api_key=settings.cocreation_llm_api_key.get_secret_value(),
+        base_url=settings.cocreation_llm_base_url,
+        default_timeout_seconds=settings.cocreation_llm_timeout_seconds,
+        response_format_mode="json_object",
+        default_extra_body={"thinking": {"type": "disabled"}} if is_kimi_k2 else None,
+        fixed_temperature=0.6 if is_kimi_k2 else None,
+        use_max_completion_tokens=is_kimi_k2,
+    )
+
+
 def build_container(
     settings: SokobanSettings | None = None,
     *,
@@ -104,20 +131,12 @@ def build_container(
     resolved_deepseek_transport: LLMTransport = (
         deepseek_transport
         if deepseek_transport is not None
-        else AsyncOpenAITransport(
-            api_key=resolved_settings.deepseek_api_key.get_secret_value(),
-            base_url=resolved_settings.deepseek_base_url,
-            default_timeout_seconds=resolved_settings.deepseek_timeout_seconds,
-        )
+        else build_deepseek_transport(resolved_settings)
     )
     resolved_cocreation_transport: LLMTransport = (
         cocreation_transport
         if cocreation_transport is not None
-        else AsyncOpenAITransport(
-            api_key=resolved_settings.cocreation_llm_api_key.get_secret_value(),
-            base_url=resolved_settings.cocreation_llm_base_url,
-            default_timeout_seconds=resolved_settings.cocreation_llm_timeout_seconds,
-        )
+        else build_cocreation_transport(resolved_settings)
     )
 
     rooms_repo = RoomsRepository(resolved_db)
@@ -321,9 +340,11 @@ def build_container(
         operational_repo,
         session_read_model_service,
         chat_pipeline=chat_pipeline,
+        understanding_pipeline=understanding_pipeline,
         room_sync=online_room_service,
         clock=resolved_clock,
         settings=cocreation_settings,
+        extra_secrets=resolved_settings.secret_values(),
     )
 
     return AppContainer(
@@ -360,4 +381,9 @@ def build_container(
     )
 
 
-__all__ = ["AppContainer", "build_container"]
+__all__ = [
+    "AppContainer",
+    "build_cocreation_transport",
+    "build_container",
+    "build_deepseek_transport",
+]

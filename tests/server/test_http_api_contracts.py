@@ -21,7 +21,6 @@ from tests.conftest import (
     make_map_ops_json,
     make_opening_json,
     make_routing_json,
-    make_translation_json,
 )
 
 
@@ -685,13 +684,70 @@ async def test_cocreation_api_parity_demo_ttl_and_full_dialogue_stage_contracts(
             t["versionId"] == v4 and t["role"] == "assistant" for t in retried.json()["turns"]
         )
 
-        # Translations endpoint
+        # Translations endpoint (per-turn persistence + verification)
         session_snapshot = retried.json()
-        turn_ids = [t["turnId"] for t in session_snapshot["turns"] if t["language"] != "zh-CN"]
-        bundle.cocreation_transport.queue(
-            make_translation_json(session_snapshot, "zh-CN"),
-            json.dumps({"accepted": True, "reason": "Verified"}),
-        )
+        pending_turns = [t for t in session_snapshot["turns"] if t["language"] != "zh-CN"]
+        turn_ids = [t["turnId"] for t in pending_turns]
+        for turn in pending_turns:
+            g = turn["guidance"]
+            tr_item: dict[str, object] = {
+                "turnId": turn["turnId"],
+                "body": f"中文:{turn['content'][:40]}",
+                "uiCueTexts": [
+                    f"提示:{i}"
+                    for i, cue in enumerate(g.get("uiCues") or [])
+                    if isinstance(cue, dict) and str(cue.get("text") or "").strip()
+                ],
+            }
+            if str(g.get("followUpQuestion") or "").strip():
+                tr_item["followUpQuestion"] = "中文追问？"
+            if g.get("intentHypothesis"):
+                tr_item["intentHypothesis"] = "中文意图"
+            offer = g.get("proposalOffer")
+            needs_verify = False
+            if isinstance(offer, dict):
+                if offer.get("summary"):
+                    tr_item["proposalSummary"] = "中文提案摘要"
+                    tr_item["proposalOfferSummary"] = "中文提案摘要"
+                if offer.get("rationale"):
+                    tr_item["proposalOfferRationale"] = "中文理由"
+                pres = offer.get("proposalPresentation")
+                if isinstance(pres, dict):
+                    if pres.get("schemaVersion") == 2 and pres.get("reason"):
+                        tr_item["proposalPresentationReason"] = "中文说明"
+                    if pres.get("binaryCompact") and pres.get("verifiedActions"):
+                        tr_item["proposalVerifiedActions"] = [
+                            f"动作:{i}"
+                            for i, a in enumerate(pres.get("verifiedActions") or [])
+                            if str(a).strip()
+                        ]
+                        needs_verify = True
+            if isinstance(g.get("proposalQuestion"), dict):
+                pq_src = g["proposalQuestion"]
+                tr_item["proposalQuestion"] = {
+                    "questionId": pq_src["questionId"],
+                    "topicId": pq_src.get("topicId", ""),
+                    "baseVersionId": pq_src.get("baseVersionId", ""),
+                    "question": "中文问题？",
+                    "note": "说明" if pq_src.get("note") else "",
+                    "number": pq_src.get("number", 1),
+                    "choices": [
+                        {
+                            "choiceId": ch["choiceId"],
+                            "letter": ch["letter"],
+                            "label": f"选项{ch['letter']}",
+                        }
+                        for ch in (pq_src.get("choices") or [])
+                    ],
+                }
+                needs_verify = True
+            bundle.cocreation_transport.queue(
+                json.dumps({"translations": [tr_item]}, ensure_ascii=False)
+            )
+            if needs_verify:
+                bundle.cocreation_transport.queue(
+                    json.dumps({"accepted": True, "reason": "Verified"})
+                )
         tr = await client.post(
             f"/api/sessions/{sid}/translations/zh-CN",
             json={"turnIds": turn_ids},
@@ -717,3 +773,453 @@ async def test_cocreation_api_parity_demo_ttl_and_full_dialogue_stage_contracts(
             == "Focused on clear central push timing."
         )
         assert len(bundle.deepseek_transport.calls) == 0  # Strict Moonshot isolation!
+
+
+@pytest.mark.asyncio
+async def test_container_provider_transports_and_core_llm_error_mapping(
+    app_bundle_factory, tmp_path
+) -> None:
+    from server.container import build_container
+    from server.core.llm_client import UpstreamLLMError
+    from server.settings import SokobanSettings
+
+    settings = SokobanSettings(
+        data_dir=tmp_path / "data",
+        db_path=tmp_path / "data" / "provider.sqlite3",
+        deepseek_api_key="ds-test-key-1234567890",
+        cocreation_llm_api_key="sk-kimi-test-1234567890",
+        cocreation_llm_base_url="https://api.moonshot.cn/v1",
+        cocreation_llm_model="kimi-k2.6",
+        reaper_enabled=False,
+    )
+    container = build_container(settings=settings)
+    try:
+        assert container.deepseek_transport.response_format_mode == "prompt_only"
+        assert container.deepseek_transport.default_extra_body == {
+            "thinking": {"type": "disabled"}
+        }
+        assert container.cocreation_transport.response_format_mode == "json_object"
+        assert container.cocreation_transport.default_extra_body == {
+            "thinking": {"type": "disabled"}
+        }
+        assert container.cocreation_transport.fixed_temperature == 0.6
+        assert container.cocreation_transport.use_max_completion_tokens is True
+    finally:
+        await container.close()
+
+    bundle = app_bundle_factory(
+        cocreation_responses=[
+            UpstreamLLMError(
+                "UPSTREAM_REQUEST_REJECTED",
+                "bad param sk-secret-token-123456",
+                retryable=False,
+                provider_status=400,
+            )
+        ]
+    )
+    async with bundle.client() as client:
+        demo = await client.post(
+            "/cocreation/api/demo-sessions",
+            json={"language": "en", "idempotencyKey": "demo-err-1"},
+        )
+        assert demo.status_code == 200
+        demo_payload = demo.json()
+        sid = demo_payload["sessionId"]
+
+        access_resp = await client.post(
+            f"/cocreation/api/sessions/{sid}/browser-access",
+            json={"bootstrapToken": extract_hash_param(demo_payload["launchUrl"], "bootstrap")},
+        )
+        assert access_resp.status_code == 200
+
+        vid = demo_payload.get("currentVersionId")
+        if not vid:
+            locked = await client.patch(
+                f"/cocreation/api/sessions/{sid}/language",
+                json={"language": "en"},
+            )
+            assert locked.status_code == 200
+            vid = locked.json()["currentVersionId"]
+
+        assess = await client.post(
+            f"/cocreation/api/sessions/{sid}/versions/{vid}/assessments",
+            json={"idempotencyKey": "assess-err-1"},
+        )
+        assert assess.status_code == 502
+        assert assess.headers.get("X-LLM-Attempts-Used") == "1"
+        err_body = assess.json()
+        assert err_body["detail"] == err_body["error"]["message"]
+        assert err_body["error"]["code"] == "UPSTREAM_REQUEST_REJECTED"
+        assert err_body["error"]["retryable"] is False
+        assert "sk-secret-token-123456" not in err_body["error"]["message"]
+        assert "[redacted]" in err_body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_unity_detail_contract_attempts_header_no_cache_and_placeholder_secret(
+    app_bundle_factory, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import httpx
+    from server.api.deps import ensure_session_shape
+    from server.main import _room_reaper_loop, create_app
+    from server.settings import SokobanSettings
+
+    # 1. Placeholder TOKEN_SECRET from .env.example is flagged as default/insecure.
+    webgl_dir = tmp_path / "webgl"
+    (webgl_dir / "TemplateData").mkdir(parents=True)
+    (webgl_dir / "index.html").write_text("<html>game</html>", encoding="utf-8")
+    (webgl_dir / "TemplateData" / "sokoban-bridge.js").write_text("// bridge", encoding="utf-8")
+
+    placeholder_settings = SokobanSettings(
+        data_dir=tmp_path / "ph_data",
+        db_path=tmp_path / "ph_data" / "ph.sqlite3",
+        webgl_build_dir=webgl_dir,
+        token_secret="replace-with-a-long-random-production-secret",
+        reaper_enabled=False,
+    )
+    assert placeholder_settings.is_default_token_secret is True
+    placeholder_app = create_app(settings=placeholder_settings)
+    with caplog.at_level(logging.WARNING), TestClient(placeholder_app) as sync_client:
+        ready_resp = sync_client.get("/ready")
+        assert ready_resp.status_code == 200
+        assert ready_resp.json()["tokenSecretConfigured"] is False
+
+        for no_cache_path in (
+            "/game",
+            "/game/",
+            "/game/index.html",
+            "/game/TemplateData/sokoban-bridge.js",
+        ):
+            r = sync_client.get(no_cache_path, follow_redirects=False)
+            assert r.status_code in (200, 307), (no_cache_path, r.status_code)
+            assert r.headers.get("Cache-Control") == "no-cache, must-revalidate", no_cache_path
+
+        not_found = sync_client.get("/does-not-exist")
+        assert not_found.status_code == 404
+        assert isinstance(not_found.json()["detail"], str)
+        assert not_found.json()["detail"] == not_found.json()["message"]
+
+        bad_req = sync_client.post("/api/demo-sessions", json={"language": "fr"})
+        assert bad_req.status_code == 400
+        assert isinstance(bad_req.json()["detail"], str)
+        assert bad_req.json()["detail"] == bad_req.json()["message"]
+
+    assert any("TOKEN_SECRET" in rec.message for rec in caplog.records)
+
+    # 2. CoreLLMError exposes X-LLM-Attempts-Used when attempts_used > 0 and string `detail`.
+    bundle = app_bundle_factory(
+        deepseek_responses=[
+            httpx.ReadTimeout("timeout 1"),
+            httpx.ReadTimeout("timeout 2"),
+        ]
+    )
+    async with bundle.client() as client:
+        lp_err = await client.post(
+            "/generate-level-plan",
+            json={"ideaText": "Balanced central corridor", "sessionId": "lp-err-1"},
+        )
+        assert lp_err.status_code == 504
+        assert lp_err.headers.get("X-LLM-Attempts-Used") == "2"
+        body = lp_err.json()
+        assert isinstance(body["detail"], str) and body["detail"] == body["message"]
+        assert body["error"]["code"] == "UPSTREAM_TIMEOUT"
+
+    # 3. ensure_session_shape incorporates level_versions.assessment_json when present.
+    shaped = ensure_session_shape(
+        {
+            "versions": [
+                {"versionId": "v1", "assessment": {"assistantTurnId": "t-migrated", "ok": True}},
+                {"versionId": "v2", "assessment": {"solutionSummary": "manual review"}},
+            ],
+            "turns": [
+                {
+                    "turnId": "t-manual",
+                    "versionId": "v2",
+                    "role": "assistant",
+                    "guidance": {"move": "clarify_intent"},
+                }
+            ],
+        }
+    )
+    assert shaped["versions"][0]["openingTurnId"] == "t-migrated"
+    assert shaped["versions"][1]["openingTurnId"] == "t-manual"
+    assert [a["versionId"] for a in shaped["assessments"]] == ["v1", "v2"]
+    assert shaped["assessments"][0]["assistantTurnId"] == "t-migrated"
+    assert shaped["assessments"][1]["assistantTurnId"] == "t-manual"
+    assert callable(_room_reaper_loop)
+
+
+@pytest.mark.asyncio
+async def test_router_passthrough_kwargs_and_reaper_calls_stage_sweeper(
+    app_bundle_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from server.main import _room_reaper_loop
+
+    bundle = app_bundle_factory()
+    recorded: dict[str, dict[str, object]] = {}
+
+    async def fake_send_message(*args, **kwargs):
+        recorded["send_message"] = {"args": args, "kwargs": kwargs}
+        return {"versions": [], "turns": []}
+
+    async def fake_choose_binary(*args, **kwargs):
+        recorded["choose_binary"] = {"args": args, "kwargs": kwargs}
+        return {"versions": [], "turns": []}
+
+    async def fake_cancel_binary(*args, **kwargs):
+        recorded["cancel_binary"] = {"args": args, "kwargs": kwargs}
+        return {"versions": [], "turns": []}
+
+    async def fake_intent_feedback(*args, **kwargs):
+        recorded["intent_feedback"] = {"args": args, "kwargs": kwargs}
+        return {"versions": [], "turns": []}
+
+    async def fake_retry_recovery(*args, **kwargs):
+        recorded["retry_recovery"] = {"args": args, "kwargs": kwargs}
+        return {"versions": [], "turns": []}
+
+    async def fake_decide_proposal(*args, **kwargs):
+        recorded["decide_proposal"] = {"args": args, "kwargs": kwargs}
+        return {"versions": [], "turns": []}
+
+    monkeypatch.setattr(bundle.container.message_orchestrator, "send_message", fake_send_message)
+    monkeypatch.setattr(
+        bundle.container.proposal_service, "choose_binary_choice", fake_choose_binary
+    )
+    monkeypatch.setattr(
+        bundle.container.proposal_service, "cancel_binary_topic", fake_cancel_binary
+    )
+    monkeypatch.setattr(
+        bundle.container.intent_service, "submit_intent_feedback", fake_intent_feedback
+    )
+    monkeypatch.setattr(bundle.container.recovery_service, "retry_recovery", fake_retry_recovery)
+    monkeypatch.setattr(bundle.container.proposal_service, "decide_proposal", fake_decide_proposal)
+
+    async with bundle.client() as client:
+        r1 = await client.post(
+            "/api/sessions/s1/messages",
+            json={
+                "content": "",
+                "baseVersionId": "v1",
+                "idempotencyKey": "k-msg",
+                "action": "continue_challenge",
+                "exitChallenge": True,
+            },
+        )
+        assert r1.status_code == 200
+        assert recorded["send_message"]["kwargs"]["exit_challenge"] is True
+
+        r2 = await client.post(
+            "/api/sessions/s1/proposal-discovery/choices",
+            json={
+                "topicId": "t1",
+                "questionId": "q1",
+                "choiceId": "c1",
+                "baseVersionId": "v1",
+                "displayLanguage": "en",
+                "idempotencyKey": "k-ch",
+            },
+        )
+        assert r2.status_code == 200
+        assert recorded["choose_binary"]["kwargs"]["base_version_id"] == "v1"
+        assert recorded["choose_binary"]["kwargs"]["display_language"] == "en"
+
+        r3 = await client.post(
+            "/api/sessions/s1/proposal-discovery/cancel",
+            json={"topicId": "t1", "baseVersionId": "v1", "idempotencyKey": "k-can"},
+        )
+        assert r3.status_code == 200
+        assert recorded["cancel_binary"]["kwargs"]["base_version_id"] == "v1"
+
+        r4 = await client.post(
+            "/api/sessions/s1/intent-hypotheses/h1/feedback",
+            json={
+                "action": "confirm",
+                "sourceTurnId": "turn-9",
+                "baseVersionId": "v1",
+                "idempotencyKey": "k-int",
+            },
+        )
+        assert r4.status_code == 200
+        assert recorded["intent_feedback"]["kwargs"]["source_turn_id"] == "turn-9"
+
+        r5 = await client.post(
+            "/api/sessions/s1/component-recoveries/rec1/retry",
+            json={"baseVersionId": "v1", "idempotencyKey": "k-rec"},
+        )
+        assert r5.status_code == 200
+        assert recorded["retry_recovery"]["kwargs"]["base_version_id"] == "v1"
+        assert recorded["retry_recovery"]["kwargs"]["deadline"] == pytest.approx(10.0)
+
+        r6 = await client.post(
+            "/api/sessions/s1/proposals/p1/decision",
+            json={
+                "decision": "reject",
+                "baseVersionId": "v1",
+                "idempotencyKey": "k-prop",
+                "reason": "Too narrow",
+            },
+        )
+        assert r6.status_code == 200
+        assert recorded["decide_proposal"]["kwargs"]["reason"] == "Too narrow"
+
+    # Verify _room_reaper_loop invokes stage_service.sweep_expired_operations()
+    calls: list[str] = []
+
+    async def fake_reap_rooms() -> int:
+        calls.append("rooms")
+        return 0
+
+    async def fake_sweep_ops() -> None:
+        calls.append("stage_sweep")
+
+    sleep_count = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(bundle.container.online_room_service, "reap_expired_rooms", fake_reap_rooms)
+    monkeypatch.setattr(
+        bundle.container.stage_service, "sweep_expired_operations", fake_sweep_ops, raising=False
+    )
+    monkeypatch.setattr("server.main.asyncio.sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await _room_reaper_loop(bundle.container, 1.0)
+    assert calls == ["rooms", "stage_sweep"]
+
+
+@pytest.mark.asyncio
+async def test_placeholders_secret_redaction_cookie_scheme_and_loopback_urls(
+    tmp_path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+    from server.container import build_container
+    from server.domain.errors import DomainError
+    from server.main import create_app
+    from server.settings import SokobanSettings
+
+    # 1. Placeholder API keys & delete password + env alias secret collection
+    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-alias-secret-999999")
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-moonshot-alias-secret-888888")
+    monkeypatch.setenv("COCREATION_LLM_API_KEY", "your_kimi_api_key_here")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "your_deepseek_api_key_here")
+    monkeypatch.setenv("DASHBOARD_DELETE_PASSWORD", "replace-with-dashboard-delete-password")
+    monkeypatch.setenv("COCREATION_TOKEN_SECRET", "tok-alias-secret-777777")
+
+    loaded = SokobanSettings.from_env(load_dotenv_file=False)
+    assert loaded.has_deepseek_config is False
+    assert loaded.has_cocreation_llm_config is False
+    assert (
+        SokobanSettings(cocreation_llm_api_key="your_llm_api_key_here").has_cocreation_llm_config
+        is False
+    )
+    secrets_collected = loaded.secret_values()
+    assert "sk-kimi-alias-secret-999999" in secrets_collected
+    assert "sk-moonshot-alias-secret-888888" in secrets_collected
+    assert "tok-alias-secret-777777" in secrets_collected
+
+    ph_settings = SokobanSettings(
+        data_dir=tmp_path / "ph2_data",
+        db_path=tmp_path / "ph2_data" / "ph2.sqlite3",
+        deepseek_api_key="your_deepseek_api_key_here",
+        cocreation_llm_api_key="your_kimi_api_key_here",
+        dashboard_delete_password="replace-with-dashboard-delete-password",
+        reaper_enabled=False,
+    )
+    container = build_container(settings=ph_settings)
+    app = create_app(settings=ph_settings, container=container)
+
+    with caplog.at_level(logging.WARNING), TestClient(app) as sync_client:
+        ready = sync_client.get("/ready").json()
+        assert ready["deepseekConfigured"] is False
+        assert ready["cocreationLlmConfigured"] is False
+
+        del_resp = sync_client.post(
+            "/verify-dashboard-password",
+            headers={"X-Delete-Password": "replace-with-dashboard-delete-password"},
+        )
+        assert del_resp.status_code == 503
+        assert del_resp.json()["error"]["code"] == "DELETE_PASSWORD_NOT_CONFIGURED"
+
+    assert any("DASHBOARD_DELETE_PASSWORD" in rec.message for rec in caplog.records)
+
+    # 2. DomainError.details recursive redaction
+    @app.get("/_test_domain_error_redaction")
+    async def _raise_secret_domain_error() -> dict[str, str]:
+        raise DomainError(
+            "INTERNAL_TEST_FAILURE",
+            "error.internal",
+            retryable=True,
+            details={
+                "nested": {"hint": "leak sk-kimi-alias-secret-999999 here"},
+                "items": ["bearer tok-alias-secret-777777", 42],
+                "attemptsUsed": 1,
+            },
+            message="Failed with sk-moonshot-alias-secret-888888",
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+    ) as loopback_client:
+        err_resp = await loopback_client.get("/_test_domain_error_redaction")
+        assert err_resp.status_code == 503
+        err_json = err_resp.json()
+        dumped = json.dumps(err_json)
+        assert "sk-kimi-alias-secret-999999" not in dumped
+        assert "sk-moonshot-alias-secret-888888" not in dumped
+        assert "tok-alias-secret-777777" not in dumped
+        assert "[redacted]" in err_json["details"]["nested"]["hint"]
+        assert err_json["details"]["attemptsUsed"] == 1
+
+        # 3. Loopback launchUrl/playUrl rewrite + cookie ignores raw X-Forwarded-Proto
+        demo = await loopback_client.post(
+            "/api/demo-sessions", json={"language": "en", "idempotencyKey": "loop-demo-1"}
+        )
+        assert demo.status_code == 200
+        demo_json = demo.json()
+        assert demo_json["launchUrl"].startswith("http://127.0.0.1:8000/cocreation/#")
+
+        access = await loopback_client.post(
+            f"/api/sessions/{demo_json['sessionId']}/browser-access",
+            json={"bootstrapToken": extract_hash_param(demo_json["launchUrl"], "bootstrap")},
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert access.status_code == 200
+        set_cookie = access.headers.get("set-cookie", "")
+        assert "HttpOnly" in set_cookie
+        assert "; Secure" not in set_cookie and "; secure" not in set_cookie
+
+        locked = await loopback_client.patch(
+            f"/api/sessions/{demo_json['sessionId']}/language", json={"language": "en"}
+        )
+        assert locked.status_code == 200
+        vid = locked.json()["currentVersionId"]
+
+        pa = await loopback_client.post(
+            f"/api/sessions/{demo_json['sessionId']}/versions/{vid}/play-attempts",
+            json={"idempotencyKey": "loop-pa-1"},
+        )
+        assert pa.status_code == 200
+        assert pa.json()["playUrl"].startswith("http://127.0.0.1:8000/game/?")
+
+    # 4. HTTPS scheme sets Secure cookie
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://sokobanaidemo.top"
+    ) as https_client:
+        demo_https = await https_client.post(
+            "/api/demo-sessions", json={"language": "en", "idempotencyKey": "https-demo-1"}
+        )
+        assert demo_https.status_code == 200
+        assert demo_https.json()["launchUrl"].startswith("https://sokobanaidemo.top/cocreation/#")
+        demo_https_json = demo_https.json()
+        access_https = await https_client.post(
+            f"/api/sessions/{demo_https_json['sessionId']}/browser-access",
+            json={"bootstrapToken": extract_hash_param(demo_https_json["launchUrl"], "bootstrap")},
+        )
+        assert access_https.status_code == 200
+        assert "Secure" in access_https.headers.get("set-cookie", "")

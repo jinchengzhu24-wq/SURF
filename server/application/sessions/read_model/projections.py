@@ -27,13 +27,15 @@ def sanitize_turn_guidance(
 ) -> dict[str, Any]:
     """Sanitize turn guidance via canonical PublicTurnGuidance and recheck coordinate links."""
     guidance = to_public_guidance(raw_guidance, include_dashboard_node=include_dashboard_node)
-    links = (
-        extract_coordinate_links(
-            body, rows, guidance.get("coordinateLinks"), entity_bindings
-        )
-        if rows
-        else []
-    )
+    if rows:
+        try:
+            links = extract_coordinate_links(
+                body, rows, guidance.get("coordinateLinks"), entity_bindings
+            )
+        except ValueError:
+            links = []
+    else:
+        links = []
     if links:
         guidance["coordinateLinks"] = links
     else:
@@ -246,7 +248,7 @@ def build_proposal_state(
     is_latest = latest_revision_turn_by_version.get(turn.version_id) == turn.turn_id
     return {
         "status": "active",
-        "actionable": (b_status or "active") == "active"
+        "actionable": (b_status or "active") in {"active", "ready"}
         and is_latest
         and turn.version_id == current_version_id,
         "reason": None,

@@ -136,6 +136,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
         }
     }
 
+    [UnityEngine.Scripting.Preserve]
     public void ReceiveBrowserReturnToLab(string _unused = "")
     {
         if (completed || returning)

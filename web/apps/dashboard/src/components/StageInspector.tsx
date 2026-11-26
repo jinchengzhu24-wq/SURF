@@ -9,6 +9,7 @@ import {
   formatMode,
   formatNodeMetrics,
   formatTimestamp,
+  openingIsConsumed,
   value,
 } from "../format";
 import type { DashboardStore } from "../store";
@@ -105,6 +106,7 @@ function FlowStageDetails({
         : "Manual";
   const rows = record.rows ?? [];
   const opening = findOpeningForStage(match, record);
+  const visibleOpening = opening && !openingIsConsumed(match, opening) ? opening : null;
 
   return (
     <section class="record-section">
@@ -135,11 +137,11 @@ function FlowStageDetails({
         )}
       </div>
 
-      {opening ? (
+      {visibleOpening ? (
         <div class="inspector-subsection">
           <h4>AI opening evaluation</h4>
-          <p>{opening.assistantText || "-"}</p>
-          {renderCards(opening.cards, "Opening cards")}
+          <p>{visibleOpening.assistantText || "-"}</p>
+          {renderCards(visibleOpening.cards, "Opening cards")}
         </div>
       ) : null}
     </section>

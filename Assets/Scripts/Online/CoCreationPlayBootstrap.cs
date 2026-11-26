@@ -73,6 +73,7 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
         yield return BootstrapAndLoad(launchUrl, "", false);
     }
 
+    [UnityEngine.Scripting.Preserve]
     public void ReceiveBrowserPlayRequest(string messageJson)
     {
         if (bootstrapping)

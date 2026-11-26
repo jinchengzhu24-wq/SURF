@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import uuid
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import httpx
 from openai import (
@@ -154,6 +155,21 @@ def _reject_non_finite_json_constant(constant: str) -> Any:
     raise ValueError(f"Non-finite JSON constant is not allowed: {constant}")
 
 
+def _unwrap_single_json_fence(raw: str) -> str:
+    """Strip a single outer Markdown ``` or ```json fence without regex scraping."""
+    text = str(raw or "").strip()
+    if not text:
+        return text
+    lines = text.splitlines()
+    if (
+        len(lines) >= 2
+        and lines[0].strip().lower() in {"```", "```json"}
+        and lines[-1].strip() == "```"
+    ):
+        return "\n".join(lines[1:-1]).strip()
+    return text
+
+
 def _sanitize_schema_name(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", str(name or "structured_output"))
     return cleaned[:64] or "structured_output"
@@ -253,10 +269,24 @@ class AsyncOpenAITransport:
         max_connections: int = 40,
         max_keepalive_connections: int = 20,
         keepalive_expiry: float = 60.0,
+        response_format_mode: Literal["json_schema", "json_object", "prompt_only"] = "json_schema",
+        default_extra_body: Mapping[str, Any] | None = None,
+        fixed_temperature: float | None = None,
+        use_max_completion_tokens: bool = False,
     ) -> None:
         self.default_api_key = str(api_key or "").strip()
         self.default_base_url = str(base_url or "").strip()
         self.default_timeout_seconds = max(0.1, float(default_timeout_seconds))
+        self.response_format_mode: Literal["json_schema", "json_object", "prompt_only"] = (
+            response_format_mode
+        )
+        self.default_extra_body: dict[str, Any] | None = (
+            dict(default_extra_body) if default_extra_body is not None else None
+        )
+        self.fixed_temperature: float | None = (
+            float(fixed_temperature) if fixed_temperature is not None else None
+        )
+        self.use_max_completion_tokens = bool(use_max_completion_tokens)
         self._limits = httpx.Limits(
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
@@ -320,17 +350,27 @@ class AsyncOpenAITransport:
         else:
             scoped = client
 
+        effective_temperature = (
+            self.fixed_temperature if self.fixed_temperature is not None else float(temperature)
+        )
+        token_limit = max(1, int(max_tokens))
+        token_param = "max_completion_tokens" if self.use_max_completion_tokens else "max_tokens"
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": [dict(m) for m in messages],
-            "temperature": float(temperature),
-            "max_tokens": max(1, int(max_tokens)),
+            "temperature": effective_temperature,
+            token_param: token_limit,
             "stream": False,
         }
         if response_format is not None:
             kwargs["response_format"] = dict(response_format)
+        merged_extra_body: dict[str, Any] = (
+            dict(self.default_extra_body) if self.default_extra_body is not None else {}
+        )
         if extra_body is not None:
-            kwargs["extra_body"] = dict(extra_body)
+            merged_extra_body.update(extra_body)
+        if merged_extra_body:
+            kwargs["extra_body"] = merged_extra_body
 
         response = await scoped.chat.completions.create(**kwargs)
         choices = getattr(response, "choices", None)
@@ -366,8 +406,32 @@ def _build_repair_messages(
     original_messages: Sequence[Mapping[str, Any]],
     raw_content: str,
     validation_error: str,
+    *,
+    error_code: str = "",
 ) -> list[dict[str, Any]]:
     repaired = [dict(message) for message in original_messages]
+    if error_code == "MODEL_OUTPUT_TRUNCATED":
+        if raw_content:
+            snippet = f"{raw_content[:200]}..." if len(raw_content) > 200 else raw_content
+            repaired.append(
+                {
+                    "role": "assistant",
+                    "content": f"[truncated output ({len(raw_content)} chars): {snippet}]",
+                }
+            )
+        repaired.append(
+            {
+                "role": "user",
+                "content": (
+                    "Your previous JSON response was truncated at max_tokens "
+                    f"({len(raw_content)} chars). Keep every text field concise and compact, "
+                    "avoid verbose explanations, and output one complete, closed, valid JSON "
+                    "object matching the required schema only. "
+                    f"Validation error: {validation_error[:400]}"
+                ),
+            }
+        )
+        return repaired
     if raw_content:
         repaired.append({"role": "assistant", "content": raw_content})
     repaired.append(
@@ -383,6 +447,27 @@ def _build_repair_messages(
     return repaired
 
 
+def _append_schema_to_messages(
+    messages: Sequence[Mapping[str, Any]],
+    schema: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    compact_schema = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+    instruction = (
+        "\n\nReturn a single valid JSON object matching this exact JSON Schema "
+        "(use the exact property names, types, and enums; include all required fields "
+        "and add no extra keys):\n"
+        f"{compact_schema}"
+    )
+    updated = [dict(message) for message in messages]
+    for message in updated:
+        if str(message.get("role") or "") == "system":
+            existing = str(message.get("content") or "")
+            message["content"] = f"{existing}{instruction}" if existing else instruction.lstrip()
+            return updated
+    updated.insert(0, {"role": "system", "content": instruction.lstrip()})
+    return updated
+
+
 async def call_structured[T: BaseModel](
     transport: LLMTransport,
     *,
@@ -390,7 +475,7 @@ async def call_structured[T: BaseModel](
     model: str,
     messages: Sequence[Mapping[str, Any]],
     response_model: type[T],
-    validator: Callable[[T], T | None] | None = None,
+    validator: Callable[[T], T | None | Awaitable[T | None]] | None = None,
     deadline: float | None = None,
     max_attempts: int = 2,
     temperature: float = 0.0,
@@ -418,17 +503,28 @@ async def call_structured[T: BaseModel](
         secret_tuple = (*secret_tuple, default_key.strip())
 
     schema = response_model.model_json_schema()
-    response_format: dict[str, Any] = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": _sanitize_schema_name(task or response_model.__name__),
-            "strict": True,
-            "schema": schema,
-        },
-    }
+    response_format_mode = str(
+        getattr(transport, "response_format_mode", "json_schema") or "json_schema"
+    )
+    if response_format_mode == "json_object":
+        response_format: dict[str, Any] | None = {"type": "json_object"}
+        base_messages = _append_schema_to_messages(messages, schema)
+    elif response_format_mode == "prompt_only":
+        response_format = None
+        base_messages = _append_schema_to_messages(messages, schema)
+    else:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": _sanitize_schema_name(task or response_model.__name__),
+                "strict": True,
+                "schema": schema,
+            },
+        }
+        base_messages = [dict(message) for message in messages]
 
     started_at = active_clock.perf_counter()
-    current_messages = [dict(message) for message in messages]
+    current_messages = [dict(message) for message in base_messages]
     last_error: LLMError | None = None
 
     for attempt in range(1, attempts_limit + 1):
@@ -497,7 +593,12 @@ async def call_structured[T: BaseModel](
             last_error = err
             if attempt >= attempts_limit:
                 raise err from exc
-            current_messages = _build_repair_messages(messages, raw_content, str(err))
+            current_messages = _build_repair_messages(
+                base_messages,
+                raw_content,
+                str(err),
+                error_code=err.code,
+            )
             if retry_delay_seconds > 0:
                 await active_clock.async_sleep(retry_delay_seconds)
             continue
@@ -533,9 +634,10 @@ async def call_structured[T: BaseModel](
                     request_id=resolved_request_id,
                     attempts_used=attempt,
                 )
+            unwrapped = _unwrap_single_json_fence(raw_content)
             try:
                 decoded = json.loads(
-                    raw_content,
+                    unwrapped,
                     parse_constant=_reject_non_finite_json_constant,
                 )
             except (json.JSONDecodeError, ValueError) as exc:
@@ -545,6 +647,13 @@ async def call_structured[T: BaseModel](
                     request_id=resolved_request_id,
                     attempts_used=attempt,
                 ) from exc
+            if not isinstance(decoded, dict):
+                raise LLMValidationError(
+                    "MODEL_JSON_INVALID",
+                    "Model output JSON root must be an object.",
+                    request_id=resolved_request_id,
+                    attempts_used=attempt,
+                )
 
             try:
                 parsed_model = response_model.model_validate(decoded)
@@ -559,6 +668,8 @@ async def call_structured[T: BaseModel](
             if validator is not None:
                 try:
                     maybe_refined = validator(parsed_model)
+                    if inspect.isawaitable(maybe_refined):
+                        maybe_refined = await maybe_refined
                 except LLMValidationError as exc:
                     raise LLMValidationError(
                         exc.code,
@@ -580,9 +691,10 @@ async def call_structured[T: BaseModel](
             if attempt >= attempts_limit:
                 raise
             current_messages = _build_repair_messages(
-                messages,
+                base_messages,
                 redact_secrets(raw_content, secret_tuple),
                 str(err),
+                error_code=err.code,
             )
             if retry_delay_seconds > 0:
                 await active_clock.async_sleep(retry_delay_seconds)

@@ -29,15 +29,26 @@ const REFRESH_BEFORE_ERROR_CODES = new Set([
   "DISAGREEMENT_ACTIVE",
   "INTENT_CONFLICT_PENDING",
   "SESSION_DEADLINE_EXPIRED",
+  "PENDING_PROPOSAL",
   "PROPOSAL_PENDING",
   "VERSION_CONFLICT",
+  "TURN_NOT_FOUND",
+  "STALE_REVISION_BINDING",
+  "UNBOUND_REVISION",
+  "STALE_PROPOSAL",
+  "QUESTION_FEEDBACK_STALE",
+  "INTENT_HYPOTHESIS_STALE",
 ]);
 
 const CARD_STALE_ERROR_CODES = new Set([
   "INVALID_CARD_SOURCE",
   "PROPOSAL_STALE",
+  "STALE_PROPOSAL",
   "PROPOSAL_PRECONDITION_FAILED",
   "CHALLENGE_STALE",
+  "TURN_NOT_FOUND",
+  "STALE_REVISION_BINDING",
+  "UNBOUND_REVISION",
 ]);
 
 const componentRecoveryState = {
@@ -64,6 +75,10 @@ export function toggleProposalMode(): void {
 
 export async function sendMessage(): Promise<void> {
   if (binaryFlowActive.value) return;
+  const challenge = activeChallengeState.value;
+  if (challenge && (challenge.status === "choice_pending" || challenge.status === "awaiting_choice")) {
+    return;
+  }
   const content = composerText.value.trim();
   const s = session.value;
   if (!content || busy.value || !s || !canEditSelected.value) return;
@@ -74,7 +89,6 @@ export async function sendMessage(): Promise<void> {
     existing.content !== content || existing.baseVersionId !== s.currentVersionId ||
     Boolean(existing.requestProposal) !== proposalMode.value
   ) {
-    const challenge = activeChallengeState.value;
     pendingMessage.value = {
       content,
       baseVersionId: s.currentVersionId,
@@ -204,7 +218,7 @@ export async function submitPendingMessage(): Promise<void> {
     });
 
     const isCard = Boolean(pending.action && pending.action !== "none");
-    if (err.code === "PROPOSAL_STALE" && !isCard) {
+    if ((err.code === "PROPOSAL_STALE" || err.code === "STALE_PROPOSAL") && !isCard) {
       clearPendingMessage();
       setComposerText(pending.content);
       await tryRefreshSession();

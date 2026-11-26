@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -34,6 +35,7 @@ from .tokens import (
     compute_cocreation_duration_seconds,
     is_deadline_expired,
     request_digest,
+    utc_plus_seconds_iso,
 )
 
 
@@ -58,6 +60,7 @@ async def finalize_session_impl(
         idempotency_key,
         request_hash=sig,
         created_at=clock.utc_now(),
+        stale_before_iso=utc_plus_seconds_iso(clock, -150),
     )
     if claim.outcome == "conflict":
         raise IdempotencyConflictError("IDEMPOTENCY_CONFLICT")
@@ -98,8 +101,8 @@ async def finalize_session_impl(
 
             pending_rows = conn.execute(
                 "SELECT proposal_id FROM change_proposals "
-                "WHERE session_id = ? AND status = 'pending'",
-                (session_id,),
+                "WHERE session_id = ? AND base_version_id = ? AND status = 'pending'",
+                (session_id, base_version_id),
             ).fetchall()
             if pending_rows and not deadline_expired and not historical:
                 raise ConflictError("PENDING_PROPOSAL", "error.version_conflict")
@@ -176,12 +179,11 @@ async def finalize_session_impl(
                         now_iso=now_iso,
                     )
 
-            if (historical or deadline_expired) and pending_rows:
-                conn.execute(
-                    "UPDATE change_proposals SET status = 'superseded', decided_at = ? "
-                    "WHERE session_id = ? AND status = 'pending'",
-                    (now_iso, session_id),
-                )
+            conn.execute(
+                "UPDATE change_proposals SET status = 'superseded', decided_at = ? "
+                "WHERE session_id = ? AND status = 'pending'",
+                (now_iso, session_id),
+            )
             conn.execute(
                 "UPDATE design_sessions "
                 "SET status = 'awaiting_intention', current_version_id = ?, "
@@ -229,6 +231,9 @@ async def finalize_session_impl(
             idempotency_key,
             response={"finalVersionId": final_ver.version_id},
         )
+    except asyncio.CancelledError:
+        operational_repo.complete_key(session_id, "finalize", idempotency_key, status="failed")
+        raise
     except Exception:
         operational_repo.complete_key(session_id, "finalize", idempotency_key, status="failed")
         raise

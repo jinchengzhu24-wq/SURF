@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from server.application.sessions import (
@@ -12,41 +12,25 @@ from server.application.sessions import (
     solve_stage_async,
 )
 from server.core.clock import Clock
-from server.core.grid import map_fingerprint, parse_grid
-from server.domain.errors import ConflictError, NotFoundError, ValidationError
+from server.core.grid import map_fingerprint
+from server.domain.errors import ConflictError, NotFoundError
+from server.domain.proposals import ProposalSearchExhausted
 from server.domain.sessions import describe_diff
-from server.i18n.messages import format_tradeoff_notice, format_verified_diff_summary
+from server.i18n.messages import format_solver_delta_notice, format_verified_diff_summary
 from server.llm.pipelines.proposal import ProposalPipeline
 from server.persistence.database import SQLiteDatabase, dump_json
 from server.persistence.models import SessionReadModel
 
 from .._shared import (
+    apply_transitions_to_rows,
     build_proposal_offer_and_binding,
+    build_turn_cards,
+    emit_dashboard_node_tx,
     emit_turn_room_event_tx,
+    generate_safe_failure_analysis,
     insert_turn_tx,
     require_current_version_tx,
 )
-
-
-def _apply_transitions_to_rows(
-    base_rows: Sequence[str],
-    transitions: Sequence[dict[str, Any]],
-) -> list[str]:
-    grid = parse_grid(base_rows, validate_playable=True)
-    cells = [list(row) for row in grid.rows]
-    for t in transitions:
-        r, c = t.get("row"), t.get("column")
-        if (
-            not isinstance(r, int)
-            or not isinstance(c, int)
-            or not (1 <= r <= len(cells))
-            or not (1 <= c <= len(cells[r - 1]))
-        ):
-            raise ValidationError("INVALID_REVISION_BINDING", "error.version_conflict")
-        if cells[r - 1][c - 1] != t.get("from"):
-            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
-        cells[r - 1][c - 1] = str(t["to"])
-    return ["".join(row) for row in cells]
 
 
 class RevisionCardHandler:
@@ -64,6 +48,10 @@ class RevisionCardHandler:
         self._proposal_pipeline = proposal_pipeline
         self._room_sync = room_sync
         self._clock = clock
+
+    @property
+    def proposal_pipeline(self) -> ProposalPipeline | None:
+        return self._proposal_pipeline
 
     async def execute_revision(
         self,
@@ -85,15 +73,51 @@ class RevisionCardHandler:
         )
         if target_turn is None:
             raise NotFoundError("TURN_NOT_FOUND", "error.version_conflict")
-        binding = target_turn.proposal_binding or {}
-        if binding.get("baseVersionId") != current_ver.version_id:
-            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
-        brief = binding.get("executionBrief") or {}
+        target_offer = (target_turn.guidance or {}).get("proposalOffer")
+        binding = target_turn.proposal_binding
+        if (
+            target_turn.role != "assistant"
+            or not isinstance(target_offer, Mapping)
+            or not str(target_offer.get("summary") or "").strip()
+            or not isinstance(binding, Mapping)
+            or not isinstance(binding.get("executionBrief"), Mapping)
+        ):
+            raise ConflictError("INVALID_CARD_SOURCE", "error.version_conflict")
+        brief = binding["executionBrief"]
         transitions = list(brief.get("requiredTransitions") or ())
         if not transitions:
-            raise ConflictError("UNBOUND_REVISION", "error.version_conflict")
+            raise ConflictError("INVALID_CARD_SOURCE", "error.version_conflict")
 
-        candidate_rows = _apply_transitions_to_rows(current_ver.rows, transitions)
+        latest_offer_turn_id = next(
+            (
+                t.turn_id
+                for t in reversed(read_model.turns)
+                if t.role == "assistant"
+                and t.version_id == current_ver.version_id
+                and isinstance((t.guidance or {}).get("proposalOffer"), Mapping)
+                and str((t.guidance or {}).get("proposalOffer", {}).get("summary") or "").strip()
+            ),
+            None,
+        )
+        if (
+            target_turn.version_id != current_ver.version_id
+            or target_turn.turn_id != latest_offer_turn_id
+        ):
+            raise ConflictError("PROPOSAL_STALE", "error.version_conflict")
+        if binding.get("baseVersionId") != current_ver.version_id:
+            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
+        expected_fp = binding.get("mapFingerprint")
+        if expected_fp and map_fingerprint(current_ver.rows) != expected_fp:
+            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
+        expected_bfp = binding.get("entityBindingFingerprint")
+        actual_bfp = (current_ver.entity_bindings or {}).get("bindingFingerprint")
+        if not expected_bfp or not actual_bfp or expected_bfp != actual_bfp:
+            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
+        binding_status = str(binding.get("status") or "active")
+        if binding_status not in {"active", "ready"}:
+            raise ConflictError("PROPOSAL_STALE", "error.version_conflict")
+
+        candidate_rows = apply_transitions_to_rows(current_ver.rows, transitions)
         solved = await solve_stage_async(candidate_rows, clock=self._clock)
         return self._commit_proposal(
             session_id=session.session_id,
@@ -109,7 +133,7 @@ class RevisionCardHandler:
             latency_ms=0,
             revision_plan=None,
             requirement_record=None,
-            tradeoff_notice=format_tradeoff_notice(
+            tradeoff_notice=format_solver_delta_notice(
                 current_ver.solver, solved, session.language
             ),
         )
@@ -147,18 +171,41 @@ class RevisionCardHandler:
         brief = user_text.strip() or (
             user_turns[-1]["content"] if user_turns else "Provide an alternative revision"
         )
-        res = await self._proposal_pipeline.generate_proposal(
-            grid_or_rows=current_ver.rows,
-            authorized_brief=brief,
-            designer_turns=user_turns or [{"id": uuid.uuid4().hex, "content": brief}],
-            excluded_fingerprints=excluded_fps,
-            design_context=current_ver.design_context,
-            entity_bindings=current_ver.entity_bindings,
-            language=session.language,
-            deadline=deadline,
-            request_id=request_id or idempotency_key,
-        )
-        notice = res.tradeoff_notice or format_tradeoff_notice(
+        try:
+            res = await self._proposal_pipeline.generate_proposal(
+                grid_or_rows=current_ver.rows,
+                authorized_brief=brief,
+                designer_turns=user_turns or [{"id": uuid.uuid4().hex, "content": brief}],
+                excluded_fingerprints=excluded_fps,
+                design_context=current_ver.design_context,
+                entity_bindings=current_ver.entity_bindings,
+                language=session.language,
+                deadline=deadline,
+                request_id=request_id or idempotency_key,
+            )
+        except ProposalSearchExhausted as exc:
+            explanation = await generate_safe_failure_analysis(
+                self._proposal_pipeline,
+                rows=current_ver.rows,
+                designer_turns=user_turns or [{"id": uuid.uuid4().hex, "content": brief}],
+                failure_code="PROPOSAL_SEARCH_EXHAUSTED",
+                failure_summary=str(exc.diagnostics.get("failureReasons") or exc),
+                requirements=None,
+                entity_bindings=current_ver.entity_bindings,
+                language=session.language,
+                deadline=deadline,
+                request_id=request_id or idempotency_key,
+            )
+            return self._commit_exhausted_explanation(
+                session_id=session.session_id,
+                base_version_id=current_ver.version_id,
+                user_text=user_text or brief,
+                assistant_text=explanation,
+                idempotency_key=idempotency_key,
+                request_id=request_id,
+            )
+
+        notice = res.tradeoff_notice or format_solver_delta_notice(
             current_ver.solver, res.solve_result, session.language
         )
         return self._commit_proposal(
@@ -177,6 +224,78 @@ class RevisionCardHandler:
             requirement_record=res.requirement_record,
             tradeoff_notice=notice,
         )
+
+    def _commit_exhausted_explanation(
+        self,
+        *,
+        session_id: str,
+        base_version_id: str,
+        user_text: str,
+        assistant_text: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        now_iso = self._clock.utc_now()
+        user_turn_id = uuid.uuid4().hex
+        assistant_turn_id = uuid.uuid4().hex
+        guidance = {"replyType": "proposal_search_exhausted"}
+        with self._db.write_tx() as conn:
+            cur_session, cur_ver = require_current_version_tx(
+                conn, session_id, base_version_id, clock=self._clock
+            )
+            insert_turn_tx(
+                conn,
+                turn_id=user_turn_id,
+                session_id=session_id,
+                request_id=idempotency_key,
+                role="user",
+                content=user_text,
+                language=cur_session.language,
+                version_id=cur_ver.version_id,
+                created_at=now_iso,
+            )
+            insert_turn_tx(
+                conn,
+                turn_id=assistant_turn_id,
+                session_id=session_id,
+                request_id=idempotency_key,
+                role="assistant",
+                content=assistant_text,
+                language=cur_session.language,
+                version_id=cur_ver.version_id,
+                created_at=now_iso,
+                guidance=guidance,
+                model=self._proposal_pipeline.model if self._proposal_pipeline else "",
+            )
+            append_audit_event_tx(
+                conn,
+                session_id,
+                "reply_delivery_outcome",
+                {
+                    "messageKey": idempotency_key,
+                    "requestId": request_id or idempotency_key,
+                    "task": "alternative_revision",
+                    "baseVersionId": cur_ver.version_id,
+                    "modelGenerationSucceeded": False,
+                    "reliableBodyDelivered": True,
+                    "fullQualityPassed": False,
+                    "verifiedProposal": False,
+                    "failureCode": "PROPOSAL_SEARCH_EXHAUSTED",
+                },
+                now_iso,
+            )
+            emit_turn_room_event_tx(
+                conn,
+                self._room_sync,
+                session=cur_session,
+                version=cur_ver,
+                user_turn_id=user_turn_id,
+                assistant_turn_id=assistant_turn_id,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                now_iso=now_iso,
+            )
+        return {"assistantTurnId": assistant_turn_id, "exhausted": True}
 
     def _commit_proposal(
         self,
@@ -203,7 +322,7 @@ class RevisionCardHandler:
 
         with self._db.write_tx() as conn:
             cur_session, cur_ver = require_current_version_tx(
-                conn, session_id, base_version_id
+                conn, session_id, base_version_id, clock=self._clock
             )
             diff = describe_diff(cur_ver.rows, candidate_rows)
             verified_diff = format_verified_diff_summary(diff, cur_session.language)
@@ -214,7 +333,10 @@ class RevisionCardHandler:
                 summary=summary,
                 rationale=assistant_text,
                 language=cur_session.language,
+                solve_result=solver_dict,
+                request_text=user_text,
             )
+            guidance = {"move": "offer_revision", "proposalOffer": offer}
             insert_turn_tx(
                 conn,
                 turn_id=user_turn_id,
@@ -236,7 +358,7 @@ class RevisionCardHandler:
                 language=cur_session.language,
                 version_id=cur_ver.version_id,
                 created_at=now_iso,
-                guidance={"proposalOffer": offer},
+                guidance=guidance,
                 proposal_binding=binding,
                 model=model,
                 attempts_used=attempts_used,
@@ -274,10 +396,22 @@ class RevisionCardHandler:
             append_audit_event_tx(
                 conn,
                 session_id,
-                "revision_execution_outcome",
-                {"versionId": cur_ver.version_id, "proposalId": proposal_id, "source": source},
+                "reply_delivery_outcome",
+                {
+                    "messageKey": idempotency_key,
+                    "requestId": idempotency_key,
+                    "task": source,
+                    "baseVersionId": cur_ver.version_id,
+                    "proposalId": proposal_id,
+                    "modelGenerationSucceeded": True,
+                    "reliableBodyDelivered": True,
+                    "fullQualityPassed": True,
+                    "verifiedProposal": True,
+                    "latencyMs": latency_ms,
+                },
                 now_iso,
             )
+            cards = build_turn_cards(guidance)
             emit_turn_room_event_tx(
                 conn,
                 self._room_sync,
@@ -287,6 +421,34 @@ class RevisionCardHandler:
                 assistant_turn_id=assistant_turn_id,
                 user_text=user_text,
                 assistant_text=assistant_text,
+                cards=cards,
+                now_iso=now_iso,
+            )
+            emit_dashboard_node_tx(
+                conn,
+                self._room_sync,
+                session=cur_session,
+                version=cur_ver,
+                node_id=f"proposal:{proposal_id}",
+                node_type="proposal",
+                node_status="proposal_ready",
+                entries=[
+                    {
+                        "entryId": f"player:{user_turn_id}",
+                        "kind": "player_message",
+                        "text": user_text,
+                        "label": "Player",
+                        "occurredAt": now_iso,
+                        "language": cur_session.language,
+                    },
+                    {
+                        "entryId": f"proposal-verified:{proposal_id}",
+                        "kind": "map_diff",
+                        "text": dump_json({"diff": diff, "validation": solver_dict}),
+                        "label": "Verified proposal result",
+                        "occurredAt": now_iso,
+                    },
+                ],
                 now_iso=now_iso,
             )
         return {"proposalId": proposal_id, "assistantTurnId": assistant_turn_id}

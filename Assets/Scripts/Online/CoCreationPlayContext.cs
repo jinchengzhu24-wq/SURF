@@ -42,12 +42,7 @@ public static class CoCreationPlayContext
 
     public static string ResolveSceneName()
     {
-        return string.Equals(
-            InitialDraftMethod,
-            AIAssistantModeController.PartialCompletionApiMode,
-            StringComparison.OrdinalIgnoreCase)
-            ? "PC_Level"
-            : "DG_Level";
+        return "DG_Level";
     }
 
     public static void Clear()

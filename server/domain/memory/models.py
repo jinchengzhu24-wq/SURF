@@ -240,7 +240,7 @@ class Disagreement(BaseModel):
     core_disagreement: str | None = Field(default=None, alias="coreDisagreement")
     next_question: str | None = Field(default=None, alias="nextQuestion")
     resolution: str | None = None
-    phase: Literal["reason_review", "choice_pending"] | None = None
+    phase: Literal["reason_pending", "reason_review", "choice_pending"] | None = None
     display_card: bool = Field(default=True, alias="displayCard")
     challenge_id: str | None = Field(default=None, alias="challengeId")
     disagreement_id: str | None = Field(default=None, alias="disagreementId")

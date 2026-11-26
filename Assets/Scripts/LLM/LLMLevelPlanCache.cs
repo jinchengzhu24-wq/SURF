@@ -13,7 +13,7 @@ public class LLMLevelPlanCache : MonoBehaviour
     [Header("Cache")]
     public int targetCachedPlanCount = 3;
     public int maxTotalPlanRequests = 3;
-    public bool prefetchOnStart = true;
+    public bool prefetchOnStart = false;
     public bool logCacheEvents = true;
 
     private readonly Queue<LevelDesignPlan> cachedPlans = new Queue<LevelDesignPlan>();
@@ -39,16 +39,24 @@ public class LLMLevelPlanCache : MonoBehaviour
         }
 
         Instance = this;
-        DontDestroyOnLoad(gameObject);
+        prefetchOnStart = false;
+
+        // Decommission cross-scene persistence and idle background prefetch when
+        // no active consumer exists or the scene uses pure algorithmic generation.
+        if (!HasActivePlanConsumer())
+        {
+            enabled = false;
+            return;
+        }
+
         ResolveClient();
     }
 
     private void Start()
     {
-        if (prefetchOnStart)
-        {
-            EnsurePlanBuffer();
-        }
+        // Background prefetch on Start is decommissioned so scenes such as
+        // Algorithm_Level never fire unconsumed /generate-level-plan requests.
+        prefetchOnStart = false;
     }
 
     private void OnDisable()
@@ -69,9 +77,10 @@ public class LLMLevelPlanCache : MonoBehaviour
     private void CancelPrefetch()
     {
         StopAllCoroutines();
+        bool wasRequesting = isRequesting;
         isRequesting = false;
 
-        if (llmClient != null)
+        if (wasRequesting && llmClient != null)
         {
             llmClient.CancelActiveRequests();
         }
@@ -103,17 +112,19 @@ public class LLMLevelPlanCache : MonoBehaviour
 
     public void EnsurePlanBuffer()
     {
-        if (!isActiveAndEnabled || isRequesting)
+        // Unconsumed automatic background prefetch is decommissioned.
+        isRequesting = false;
+    }
+
+    private static bool HasActivePlanConsumer()
+    {
+        LevelLoader loader = FindObjectOfType<LevelLoader>();
+        if (loader != null && !loader.useLLMPlan)
         {
-            return;
+            return false;
         }
 
-        if (!CanRequestMorePlans())
-        {
-            return;
-        }
-
-        StartCoroutine(FillBufferRoutine());
+        return false;
     }
 
     public IEnumerator WaitForPlan(float timeoutSeconds, Action<LevelDesignPlan> onComplete)

@@ -26,14 +26,21 @@ export const PREPARE_TTL_MS = 30_000;
 export function buildAllowedCoCreationOrigins(
   loc: Pick<Location, "origin" | "hostname">,
 ): string[] {
-  const origins = new Set<string>(PRODUCTION_ORIGINS);
-  if (loc.origin && loc.origin !== "null") {
-    origins.add(loc.origin);
-  }
+  const origins = new Set<string>();
   if (isLoopbackHost(loc.hostname)) {
+    if (loc.origin && loc.origin !== "null") {
+      origins.add(loc.origin);
+    }
     for (const localOrigin of LOCAL_COCREATION_ORIGINS) {
       origins.add(localOrigin);
     }
+    return Array.from(origins);
+  }
+  for (const prodOrigin of PRODUCTION_ORIGINS) {
+    origins.add(prodOrigin);
+  }
+  if (loc.origin && loc.origin !== "null") {
+    origins.add(loc.origin);
   }
   return Array.from(origins);
 }
