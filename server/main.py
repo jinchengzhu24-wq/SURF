@@ -293,9 +293,11 @@ def create_app(
             exc.provider_status,
             safe_message,
         )
-        details: dict[str, Any] = (
-            {"providerStatus": exc.provider_status} if exc.provider_status is not None else {}
-        )
+        details: dict[str, Any] = {}
+        if exc.provider_status is not None:
+            details["providerStatus"] = exc.provider_status
+        if exc.attempts_used > 0:
+            details["attemptsUsed"] = exc.attempts_used
         headers = (
             {"X-LLM-Attempts-Used": str(exc.attempts_used)}
             if exc.attempts_used > 0

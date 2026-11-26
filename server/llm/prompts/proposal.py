@@ -14,31 +14,39 @@ _REQUIREMENTS_SYSTEM = (
     "evidenceSpan from designerTurns. NEVER emit requirements for platform-protected entities "
     "(outer_shell, player, boxes, targets)—the server enforces those automatically. "
     "Use strength='invariant' ONLY for explicit prohibitions, fixed counts, or explicit edit "
-    "scope; directional wishes are strength='goal'. Use value=null and unit='none' unless the "
-    "designer stated an explicit number. Keep scope='all' unless component is water/wall and "
-    "property is count. exactTransitions must be empty unless the designer explicitly typed "
-    "1-based row/column coordinates and tile changes. automaticBindings accepts ONLY snapshot "
-    "entity IDs (P, B1, B2, T1, T2) when an unspecified goal needs an anchor."
+    "scope; directional wishes are strength='goal'. Use value=null with unit='none' unless the "
+    "designer stated an explicit number (when value is set, use unit='absolute' or 'delta'; "
+    "delta increase/decrease requires value >= 1). Keep scope='all' unless component is "
+    "water/wall and property is count. component='gameplay' cannot use count/positions/"
+    "distribution/distance. entities accepts ONLY unique snapshot IDs (P, B1, B2, T1, T2). "
+    "exactTransitions must be empty unless the designer explicitly typed interior 1-based "
+    "coordinates (row 2..9, column 2..11) with distinct from/to tiles ('.', '#', '@'). "
+    "automaticBindings must be empty unless at least one requirement has empty entities."
 )
 
 _REVISION_PLAN_SYSTEM = (
     "Compile an authorized RevisionPlanPayload JSON ONLY with 1 to 3 materially different local "
     "strategies for the 10x12 Sokoban Stage. Do NOT output map rows or cell operations here.\n"
     "Allowed effects: open_route, narrow_route, adjust_internal_walls, reshape_water.\n"
-    "Allowed operators ONLY: add_wall, remove_wall, add_water, remove_water. Player, boxes, "
-    "targets, and connected outer_shell are strictly fixed. Only cells in "
-    "editableInternalWallCells may be removed with remove_wall. Never put 'walls' in preserve "
-    "when using wall operators, or 'water' when using water operators. Keep editBudget in 1..12."
+    "Allowed operators ONLY: add_wall, remove_wall, add_water, remove_water (unique, and at least "
+    "one usable operator must realize the declared effect). Player, boxes, targets, and connected "
+    "outer_shell are strictly fixed. Only cells in editableInternalWallCells may be removed with "
+    "remove_wall. Never put 'walls' in preserve when using wall operators, or 'water' when using "
+    "water operators. Keep editBudget in 1..12. Any requiredTransitions must use unique interior "
+    "coordinates (row 2..9, column 2..11) with from != to, count <= editBudget, operators covered "
+    "by usable operators, and coordinates inside focus if focus is set. playObjective must be a "
+    "single line or null."
 )
 
 _MAP_OPERATIONS_SYSTEM = (
     "Realize the supplied RevisionPlan strategies as concrete cell-level operations on the "
     "10x12 Sokoban Stage. Return ONLY MapOperationsPayload JSON with 1 to 3 candidates.\n"
-    "STRICT PERMISSIONS: Each operation MUST use op in ('add_wall', 'remove_wall', 'add_water', "
-    "'remove_water') with exact 1-based row (1..10), column (1..12), matching current 'from' tile "
-    "from stageSnapshot, and target 'to' tile ('.', '#', or '@'). NEVER touch player (p), boxes "
-    "(s), targets (t), void (' '), or any outer_shell wall. Only remove walls listed in "
-    "editableInternalWallCells. Keep each candidate within its strategy's editBudget (<=12)."
+    "STRICT PERMISSIONS: Each operation MUST use interior 1-based coordinates (row 2..9, "
+    "column 2..11) with unique (row, column) per candidate and exact (op, from, to) pairs: "
+    "add_wall ('.'->'#'), remove_wall ('#'->'.'), add_water ('.'->'@'), remove_water ('@'->'.'). "
+    "Each 'from' tile MUST match stageSnapshot. NEVER touch player (p), boxes (s), targets (t), "
+    "void (' '), or any outer_shell wall. Only remove walls listed in editableInternalWallCells. "
+    "Respect preserved components and keep each candidate within its strategy's editBudget (<=12)."
 )
 
 _FAILURE_ANALYSIS_SYSTEM = (

@@ -25,7 +25,7 @@ from server.domain.blueprints import (
 )
 from server.i18n.messages import normalize_language
 from server.llm.prompts.dg_guide import build_dg_guide_messages
-from server.llm.schemas import DGGuideSummaryPayload
+from server.llm.schemas import DGGuideSummaryPayload, build_constrained_dg_guide_model
 
 # Precompiled module-level regexes supporting both EN and unspaced zh-CN sentences
 _SENTENCE_END_RE = re.compile(r"[.!?](?:\s|$)|[。！？]")
@@ -153,9 +153,17 @@ def normalize_dg_partner_rationale(rationale: str, label: str, language: str = "
     locale = normalize_language(language)
     clean = " ".join(str(rationale or "").split()).strip()
     min_len = 12 if locale == "zh-CN" else 30
+    if len(clean) < min_len:
+        raise ValueError(
+            f"DG guide {label} rationale is too short ({len(clean)} chars; "
+            f"must be at least {min_len} chars)."
+        )
     sentence_count = len(_SENTENCE_END_RE.findall(clean))
-    if len(clean) < min_len or sentence_count != 1:
-        raise ValueError(f"DG guide {label} rationale must be exactly one sentence.")
+    if sentence_count != 1:
+        raise ValueError(
+            f"DG guide {label} rationale must be exactly one sentence "
+            f"(found {sentence_count})."
+        )
 
     if locale == "zh-CN":
         if "我" not in clean:
@@ -196,7 +204,6 @@ class DGGuidePipeline:
         ctx_model = context if isinstance(context, DGContext) else DGContext.model_validate(context)
         ctx = ctx_model.model_dump(by_alias=True)
         locale = normalize_language(ctx.get("language"))
-        messages = build_dg_guide_messages(ctx)
 
         diff_scores = dg_preference_allowed_scores(
             ctx["firstMovePreference"], ctx["pushPlanningPreference"], DG_DIFFICULTY_ANSWERS
@@ -214,18 +221,30 @@ class DGGuidePipeline:
             if layout_scores is None
             else {("Compact", "Balanced", "Open")[s] for s in layout_scores}
         )
+        sorted_diff = sorted(allowed_diff)
+        sorted_layout = sorted(allowed_layout)
+        messages = build_dg_guide_messages(
+            ctx,
+            allowed_difficulties=sorted_diff,
+            allowed_layouts=sorted_layout,
+        )
+        response_model = build_constrained_dg_guide_model(
+            allowed_difficulties=sorted_diff,
+            allowed_layouts=sorted_layout,
+            language=locale,
+        )
         validated_holder: dict[str, str] = {}
 
         def _validate(parsed: DGGuideSummaryPayload) -> DGGuideSummaryPayload:
             if parsed.recommended_difficulty not in allowed_diff:
                 raise LLMValidationError(
                     "DG_DIFFICULTY_RULE_VIOLATION",
-                    f"difficulty={parsed.recommended_difficulty} not in {sorted(allowed_diff)}.",
+                    f"difficulty={parsed.recommended_difficulty} not in {sorted_diff}.",
                 )
             if parsed.recommended_layout not in allowed_layout:
                 raise LLMValidationError(
                     "DG_LAYOUT_RULE_VIOLATION",
-                    f"layout={parsed.recommended_layout} not in {sorted(allowed_layout)}.",
+                    f"layout={parsed.recommended_layout} not in {sorted_layout}.",
                 )
             try:
                 validated_holder["summary"] = normalize_dg_partner_summary(parsed.summary, locale)
@@ -245,7 +264,7 @@ class DGGuidePipeline:
                 task="dg_guide_summary",
                 model=self.model,
                 messages=messages,
-                response_model=DGGuideSummaryPayload,
+                response_model=response_model,
                 validator=_validate,
                 deadline=deadline,
                 max_attempts=max_attempts,

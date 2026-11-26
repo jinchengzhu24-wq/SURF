@@ -321,7 +321,12 @@ def validate_level_plan(
         and not has_custom_water
         and (validated["minWaterAreas"] < 1 or validated["maxWaterAreas"] < 1)
     ):
-        raise ValueError("water areas can be zero only when the user explicitly requests no water")
+        raise ValueError(
+            "minWaterAreas and maxWaterAreas must be 1 or 2 unless no water or custom "
+            "generationPreferences are requested "
+            f"(got minWaterAreas={validated['minWaterAreas']}, "
+            f"maxWaterAreas={validated['maxWaterAreas']})."
+        )
 
     if (
         not no_internal_walls
@@ -329,8 +334,10 @@ def validate_level_plan(
         and (validated["minWallObstacleBlocks"] != 2 or validated["maxWallObstacleBlocks"] < 2)
     ):
         raise ValueError(
-            "internal wall obstacles can be zero only when the user explicitly "
-            "requests no internal walls"
+            "minWallObstacleBlocks must be 2 and maxWallObstacleBlocks must be 2 or 3 "
+            "unless no internal walls or custom generationPreferences are requested "
+            f"(got minWallObstacleBlocks={validated['minWallObstacleBlocks']}, "
+            f"maxWallObstacleBlocks={validated['maxWallObstacleBlocks']})."
         )
 
     return validated

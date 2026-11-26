@@ -17,6 +17,8 @@ import { createSafeStorage } from "../storage/safeStorage";
 import {
   clearPendingMessage,
   composerText,
+  pendingBinary,
+  persistPendingBinary,
   translationFailures,
 } from "../store/chatStore";
 import { createDeadlineClock } from "../store/deadlineClock";
@@ -81,6 +83,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   clearTranslationRetryTimer();
   clearPendingMessage();
+  persistPendingBinary(null);
   busy.value = false;
   translationFailures.value = new Set();
   hideTooltip();
@@ -914,5 +917,207 @@ describe("Coordinate route BFS & Chat components", () => {
     expect(translationFailures.value.has("t2:zh-CN")).toBe(false);
 
     vi.useRealTimers();
+  });
+
+  it("localizes binary discovery, LLM validation, in-progress, and lifecycle errors in both localizeError and formatTechnicalError", () => {
+    const nonGenericCodes = [
+      // Binary discovery grouped & pattern fallback codes
+      "BINARY_PROTECTED_STRATEGY",
+      "BINARY_METRIC_GOALS_FORBIDDEN",
+      "BINARY_STRATEGY_INVALID",
+      "BINARY_PLAN_STRATEGY_INVALID",
+      "BINARY_UNUSED_FIELDS",
+      "BINARY_ENVELOPE_INVALID",
+      "BINARY_ACTION_INVALID",
+      "BINARY_TEXT_INVALID",
+      "BINARY_PROTECTED_ENTITIES_REQUIRED",
+      "BINARY_QUESTION_LIMIT",
+      "BINARY_TWO_BRANCHES_REQUIRED",
+      "BINARY_BRANCH_INVALID",
+      "BINARY_LABEL_INVALID",
+      "BINARY_DUPLICATE_BRANCHES",
+      "BINARY_CORRIDOR_INVALID",
+      "BINARY_CORRIDOR_UNEXPECTED",
+      "BINARY_METRIC_UNVERIFIED",
+      "BINARY_ALREADY_SELECTED_DIRECTION",
+      "BINARY_INITIAL_REQUIREMENTS_REQUIRED",
+      "BINARY_INITIAL_REQUIREMENTS_INVALID",
+      "BINARY_INITIAL_REQUIREMENTS_LOCKED",
+      "BINARY_PREFLIGHT_NOT_FOUND",
+      "BINARY_FUTURE_UNKNOWN_CODE",
+      // LLM validation & translation codes
+      "EMPTY_BODY",
+      "GROUNDING_MISMATCH",
+      "INTERNAL_TOKEN_LEAK",
+      "EVIDENCE_SPAN_MISMATCH",
+      "CHANGE_EVIDENCE_MISMATCH",
+      "ENGAGEMENT_EVIDENCE_MISMATCH",
+      "DIRECTION_SLOTS_MISMATCH",
+      "CONFLICT_CARD_REQUIRED",
+      "CONFLICT_CARD_FORBIDDEN",
+      "REVIEW_MUST_BE_DECLARATIVE",
+      "CONFLICT_QUESTION_COUNT",
+      "REQUIREMENT_PREFLIGHT_CONFLICT",
+      "MAP_OPERATIONS_INVALID",
+      "LEVEL_PLAN_INVALID",
+      "DG_GUIDE_INVALID",
+      "DG_DIFFICULTY_RULE_VIOLATION",
+      "TRANSLATION_GROUNDING_MISMATCH",
+      // In-progress conflict codes
+      "MESSAGE_IN_PROGRESS",
+      "BINARY_CHOICE_IN_PROGRESS",
+      "CLARIFICATION_IN_PROGRESS",
+      "PROPOSAL_DECISION_IN_PROGRESS",
+      "SAVE_IN_PROGRESS",
+      "FUTURE_ACTION_IN_PROGRESS",
+      // Stale / lifecycle / HTTP / client codes
+      "LLM_UNAVAILABLE",
+      "STALE_TOPIC",
+      "TOPIC_NOT_FOUND",
+      "PROPOSAL_NOT_FOUND",
+      "CHALLENGE_NOT_FOUND",
+      "CHALLENGE_NOT_READY",
+      "INVALID_REVISION_BINDING",
+      "SESSION_NOT_FOUND",
+      "VERSION_NOT_FOUND",
+      "INTENT_HYPOTHESIS_NOT_FOUND",
+      "LANGUAGE_NOT_SELECTED",
+      "LANGUAGE_LOCKED",
+      "STAGE_NOT_INITIALIZED",
+      "UNSAVED_DRAFT_ROWS",
+      "HISTORICAL_FINALIZE_ROWS_NOT_ALLOWED",
+      "SESSION_NOT_FINALIZED",
+      "DRAFT_PREVIEW_UNAVAILABLE",
+      "DRAFT_GENERATION_CONFLICT",
+      "DRAFT_REGENERATION_ACTIVE",
+      "STALE_DRAFT_REGENERATION",
+      "DRAFT_REGENERATION_NOT_ACTIVE",
+      "DRAFT_REGENERATION_NOT_CLAIMED",
+      "DRAFT_REGENERATION_NOT_PENDING",
+      "RECOVERY_TASK_NOT_FOUND",
+      "RECOVERY_ATTEMPTS_EXHAUSTED",
+      "INVALID_RECOVERY_EVIDENCE",
+      "UNSUPPORTED_RECOVERY_COMPONENT",
+      "INVALID_REQUEST",
+      "INTERNAL_ERROR",
+      "INVALID_IDENTIFIER",
+      "EMPTY_MESSAGE",
+      "MESSAGE_TOO_LONG",
+      "INVALID_CHOICE",
+      "INVALID_CHALLENGE_CHOICE",
+      "INVALID_INTENTION",
+      "INVALID_INTENT_SUPERSEDES",
+      "MISSING_ASSISTANT_TURN_ID",
+      "MISSING_PROPOSAL_ID",
+      "REQUEST_FAILED",
+      "INVALID_JSON",
+      "NETWORK_ERROR",
+    ];
+
+    for (const lang of ["en", "zh-CN"] as const) {
+      const genericCopy = t(lang, "errors.GENERIC");
+      for (const code of nonGenericCodes) {
+        expect(localizeError(lang, { code }), `localizeError(${lang}, ${code})`).not.toBe(
+          genericCopy,
+        );
+        const tech = formatTechnicalError(lang, { code });
+        expect(tech?.code).toBe(code);
+        expect(tech?.message, `formatTechnicalError(${lang}, ${code})`).not.toBe(genericCopy);
+      }
+
+      // Specific BINARY_* exact keys must retain priority over errors.BINARY_STEP_FAILED
+      const specificBinaryCodes = [
+        "BINARY_BUSY",
+        "BINARY_PROMISE_NOT_REALIZED",
+        "BINARY_DIRECTIONS_UNAVAILABLE",
+        "BINARY_PREFLIGHT_BUDGET",
+        "BINARY_PLANNING_BUDGET",
+        "BINARY_VALIDATION_FAILED",
+        "BINARY_SEMANTIC_REJECTED",
+      ] as const;
+      for (const code of specificBinaryCodes) {
+        const expected = t(lang, `errors.${code}`);
+        expect(localizeError(lang, { code })).toBe(expected);
+        expect(formatTechnicalError(lang, { code })?.message).toBe(expected);
+        expect(expected).not.toBe(t(lang, "errors.BINARY_STEP_FAILED"));
+      }
+    }
+  });
+
+  it("handles BINARY_CHOICE_IN_PROGRESS vs STALE_TOPIC in binary discovery and refreshes on sendMessage conflicts", async () => {
+    const activeBinarySession = makeSession({
+      assessments: [{ versionId: "v1", assistantTurnId: "t_open" }],
+      proposalFlowState: {
+        active: true,
+        status: "clarifying",
+        interactionMode: "binary_choice",
+        topicId: "topic_live",
+        pendingQuestion: {
+          questionId: "q_live",
+          topicId: "topic_live",
+          baseVersionId: "v1",
+          question: "Pick a direction",
+          status: "pending",
+          choices: [
+            { choiceId: "c_a", letter: "A", label: "Option A" },
+            { choiceId: "c_b", letter: "B", label: "Option B" },
+          ],
+        },
+      },
+    });
+    sessionId.value = activeBinarySession.sessionId;
+    selectedVersionId.value = "v1";
+    applySession(activeBinarySession);
+    draftRows.value = SAMPLE_ROWS.slice();
+
+    // 1. BINARY_CHOICE_IN_PROGRESS keeps pendingBinary for retry after refresh
+    vi.spyOn(api, "submitBinaryChoice").mockRejectedValueOnce({
+      code: "BINARY_CHOICE_IN_PROGRESS",
+      message: "In progress",
+      retryable: false,
+    });
+    const getSessionSpy = vi.spyOn(api, "getSession").mockResolvedValue(activeBinarySession);
+    await workflows.submitBinaryAction({
+      kind: "choice",
+      baseVersionId: "v1",
+      topicId: "topic_live",
+      questionId: "q_live",
+      choiceId: "c_a",
+      displayLanguage: "en",
+      idempotencyKey: "bin-busy-1",
+    });
+    expect(pendingBinary.value?.idempotencyKey).toBe("bin-busy-1");
+
+    // 2. STALE_TOPIC clears pendingBinary even if a new topic is active
+    vi.spyOn(api, "submitBinaryChoice").mockRejectedValueOnce({
+      code: "STALE_TOPIC",
+      message: "Stale topic",
+      retryable: true,
+    });
+    await workflows.submitBinaryAction({
+      kind: "choice",
+      baseVersionId: "v1",
+      topicId: "topic_old",
+      questionId: "q_old",
+      choiceId: "c_a",
+      displayLanguage: "en",
+      idempotencyKey: "bin-stale-1",
+    });
+    expect(pendingBinary.value).toBeNull();
+
+    // 3. sendMessage auto-refreshes on CLARIFICATION_IN_PROGRESS
+    const normalSession = makeSession({
+      assessments: [{ versionId: "v1", assistantTurnId: "t_open" }],
+    });
+    applySession(normalSession);
+    composerText.value = "Add a wall near the box";
+    vi.spyOn(api, "sendMessage").mockRejectedValueOnce({
+      code: "CLARIFICATION_IN_PROGRESS",
+      message: "Busy",
+      retryable: false,
+    });
+    getSessionSpy.mockClear();
+    await workflows.sendMessage();
+    expect(getSessionSpy).toHaveBeenCalledWith("sess_1");
   });
 });

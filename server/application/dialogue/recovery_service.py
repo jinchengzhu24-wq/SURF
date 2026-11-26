@@ -21,8 +21,8 @@ from server.domain.errors import ConflictError, NotFoundError
 from server.domain.memory import ensure_design_context, set_active_disagreement
 from server.llm.pipelines.chat import ChatPipeline
 from server.llm.pipelines.understanding import UnderstandingPipeline
-from server.llm.prompts.understanding import build_turn_routing_messages
-from server.llm.schemas import TurnRoutingPayload
+from server.llm.prompts.understanding import build_human_edit_engagement_recovery_messages
+from server.llm.schemas import HumanEditEngagementRecoveryPayload
 from server.persistence.database import SQLiteDatabase, dump_json, load_json
 from server.persistence.repositories._mappers import (
     row_to_recovery_task,
@@ -315,25 +315,22 @@ class RecoveryService:
             for t in read_model.turns
             if t.version_id == task_base_vid and t.role == "user"
         ][-4:]
-        messages = build_turn_routing_messages(
+        messages = build_human_edit_engagement_recovery_messages(
             latest_user_message=user_msg,
             previous_user_messages=prev_user_msgs,
             active_disagreement=active_dis,
-            has_active_proposal=False,
         )
-        def _validate_engagement(parsed: TurnRoutingPayload) -> TurnRoutingPayload:
-            eng = parsed.human_edit_engagement
-            if eng is None:
-                raise LLMValidationError(
-                    "MODEL_VALIDATION_FAILED",
-                    "humanEditEngagement is required for human_edit engagement recovery.",
-                )
-            if eng.decision == "engage" and (
-                not eng.evidence_span or eng.evidence_span not in user_msg
+
+        def _validate_engagement(
+            parsed: HumanEditEngagementRecoveryPayload,
+        ) -> HumanEditEngagementRecoveryPayload:
+            if parsed.decision == "engage" and (
+                not parsed.evidence_span or parsed.evidence_span not in user_msg
             ):
                 raise LLMValidationError(
                     "ENGAGEMENT_EVIDENCE_MISMATCH",
-                    "engage requires a verbatim evidenceSpan from the user message.",
+                    f"evidenceSpan {parsed.evidence_span!r} must appear verbatim in "
+                    "latestUserMessage when decision='engage'.",
                 )
             return parsed
 
@@ -342,10 +339,10 @@ class RecoveryService:
             task="human_edit_engagement_recovery",
             model=model,
             messages=messages,
-            response_model=TurnRoutingPayload,
+            response_model=HumanEditEngagementRecoveryPayload,
             validator=_validate_engagement,
             deadline=deadline,
-            max_attempts=1,
+            max_attempts=2,
             temperature=0.0,
             max_tokens=1024,
             attempt_timeout_seconds=MODEL_ATTEMPT_TIMEOUT_SECONDS,
@@ -354,13 +351,7 @@ class RecoveryService:
             request_id=request_id,
             extra_secrets=self._extra_secrets,
         )
-        eng = res.parsed.human_edit_engagement
-        if eng is None:
-            raise LLMValidationError(
-                "MODEL_VALIDATION_FAILED",
-                "humanEditEngagement is required for human_edit engagement recovery.",
-            )
-        if eng.decision != "engage":
+        if res.parsed.decision != "engage":
             return
 
         now_iso = self._clock.utc_now()

@@ -4,40 +4,59 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from ._schemas_tasks import (
+from ._schemas_proposals import (
     AutomaticBindingPayload,
     BinaryBranchPayload,
     BinaryCorridorPayload,
+    BinaryDiscoveryFollowupFinalPayload,
+    BinaryDiscoveryFollowupPayload,
+    BinaryDiscoveryInitialFinalPayload,
+    BinaryDiscoveryInitialPayload,
     BinaryDiscoveryPayload,
+    BinaryPreserveKey,
     BinaryPromisePayload,
+    BinaryStrategyPayload,
+    EntityId,
+    ExactTransitionPayload,
+    FocusAreaPayload,
+    MapOperationCandidatePayload,
+    MapOperationItemPayload,
+    MapOperationsPayload,
+    MetricGoalPayload,
+    ProposalFailureAnalysisPayload,
+    ReduceObstaclesPromisePayload,
+    RequiredTransitionPayload,
+    RequirementItemPayload,
+    RequirementRecordPayload,
+    ReshapeWaterPromisePayload,
+    RevisionPlanPayload,
+    RevisionStrategyPayload,
+    ShorterSolutionPromisePayload,
+    WidenCorridorPromisePayload,
+    select_binary_discovery_schema,
+)
+from ._schemas_tasks import (
     ChallengeReasonReviewPayload,
     DGGuideSummaryPayload,
     EditableOpName,
     EditableTileChar,
     EffectKind,
-    ExactTransitionPayload,
-    FocusAreaPayload,
     LevelPlanPayload,
     ManualEditConflictCardPayload,
     ManualEditConflictClassificationPayload,
     ManualEditDirectionComparisonPayload,
+    ManualEditReviewNoConflictPayload,
     ManualEditReviewPayload,
-    MapOperationCandidatePayload,
-    MapOperationItemPayload,
-    MapOperationsPayload,
-    MetricGoalPayload,
+    ManualEditReviewWithConflictPayload,
     PreserveKey,
-    ProposalFailureAnalysisPayload,
     ProtectedEntityKey,
-    RequiredTransitionPayload,
-    RequirementItemPayload,
-    RequirementRecordPayload,
-    RevisionPlanPayload,
-    RevisionStrategyPayload,
     StageAssessmentPayload,
     StrictSchema,
+    build_constrained_dg_guide_model,
+    build_constrained_level_plan_model,
+    build_manual_edit_conflict_classification_model,
 )
 
 GuidanceMove = Literal[
@@ -50,6 +69,13 @@ GuidanceMove = Literal[
     "deliver_revision",
 ]
 
+OrdinaryChatMove = Literal[
+    "clarify_intent",
+    "offer_perspective",
+    "challenge_tradeoff",
+    "reflect_on_play",
+]
+
 
 class GridCoordinate(StrictSchema):
     """One-based (row 1..10, column 1..12) map coordinate."""
@@ -59,7 +85,11 @@ class GridCoordinate(StrictSchema):
 
 
 class CoordinateLinkPayload(StrictSchema):
-    """Visual route highlight connecting two grounded map coordinates."""
+    """Visual route highlight connecting two grounded map coordinates.
+
+    Optional card flaws (e.g. from == to or >220 chars) are dropped safely by
+    grounding.py so a verified assistantMessage is never discarded.
+    """
 
     text: str = Field(min_length=1, max_length=240)
     from_coord: GridCoordinate = Field(alias="from")
@@ -113,6 +143,29 @@ class IntentDecisionPayload(StrictSchema):
     claims: list[IntentClaimPayload] = Field(default_factory=list, max_length=4)
     card_text: str = Field(default="", alias="cardText", max_length=500)
 
+    @model_validator(mode="after")
+    def _normalize_classification_consistency(self) -> IntentDecisionPayload:
+        """Safely normalize malformed optional intent cards without failing the whole turn."""
+        if self.classification == "candidate":
+            valid_claims = [
+                claim
+                for claim in self.claims
+                if claim.evidence_span.strip()
+                and claim.normalized_meaning.strip()
+                and claim.subject_text.strip()
+                and claim.attribute_text.strip()
+            ]
+            if not valid_claims or not self.card_text.strip():
+                self.classification = "none"
+                self.claims = []
+                self.card_text = ""
+            else:
+                self.claims = valid_claims
+        else:
+            self.claims = []
+            self.card_text = ""
+        return self
+
 
 class RevisionOfferChangePayload(StrictSchema):
     row: int = Field(ge=1, le=10)
@@ -147,6 +200,8 @@ class PatchTextEntry(StrictSchema):
 
 
 class PatchQuestionEntry(StrictSchema):
+    """Open-question patch entry (missing evidenceText on resolved is dropped in questions.py)."""
+
     question: str = Field(min_length=1, max_length=400)
     status: Literal["open", "resolved"] = "open"
     evidence_text: str = Field(default="", alias="evidenceText", max_length=400)
@@ -160,8 +215,56 @@ class DesignContextPatchPayload(StrictSchema):
     )
 
 
+class StageOpeningPayload(StrictSchema):
+    """Focused structured schema for Stage opening observations."""
+
+    assistant_message: str = Field(alias="assistantMessage", min_length=1, max_length=8000)
+    coordinate_links: list[CoordinateLinkPayload] = Field(
+        default_factory=list, alias="coordinateLinks", max_length=12
+    )
+    assessment: StageAssessmentPayload
+
+    @model_validator(mode="after")
+    def _validate_non_blank(self) -> StageOpeningPayload:
+        if not self.assistant_message.strip():
+            raise ValueError("assistantMessage must not be blank.")
+        return self
+
+
+class OrdinaryChatReplyPayload(StrictSchema):
+    """Focused structured schema for ordinary co-creation chat without active disagreement."""
+
+    assistant_message: str = Field(alias="assistantMessage", min_length=1, max_length=8000)
+    move: OrdinaryChatMove = "offer_perspective"
+    intent_decision: IntentDecisionPayload = Field(alias="intentDecision")
+    intent_confidence: Literal["low", "medium", "high"] | None = Field(
+        default=None, alias="intentConfidence"
+    )
+    ui_cues: list[UICuePayload] = Field(default_factory=list, alias="uiCues", max_length=2)
+    coordinate_links: list[CoordinateLinkPayload] = Field(
+        default_factory=list, alias="coordinateLinks", max_length=12
+    )
+    design_context_patch: DesignContextPatchPayload | None = Field(
+        default=None, alias="designContextPatch"
+    )
+
+    @model_validator(mode="after")
+    def _validate_reply(self) -> OrdinaryChatReplyPayload:
+        if not self.assistant_message.strip():
+            raise ValueError("assistantMessage must not be blank.")
+        if self.intent_decision.classification != "candidate":
+            self.intent_confidence = None
+        return self
+
+
+class OrdinaryChatWithDisagreementPayload(OrdinaryChatReplyPayload):
+    """Ordinary co-creation chat schema when an active disagreement allows a followUpQuestion."""
+
+    follow_up_question: str | None = Field(default=None, alias="followUpQuestion", max_length=320)
+
+
 class ChatReplyPayload(StrictSchema):
-    """Native structured chat response replacing legacy GUIDANCE text scraping."""
+    """Backward-compatible native structured chat response envelope."""
 
     assistant_message: str = Field(alias="assistantMessage", min_length=1, max_length=8000)
     move: GuidanceMove = "offer_perspective"
@@ -197,16 +300,45 @@ class RequestedChangeRecord(StrictSchema):
         "count", "position", "shape", "route", "push_order", "switching", "appearance", "other"
     ]
     operation: Literal["change", "preserve", "mention"]
-    evidence_span: str = Field(alias="evidenceSpan", max_length=400)
+    evidence_span: str = Field(alias="evidenceSpan", min_length=1, max_length=400)
+
+    @model_validator(mode="after")
+    def _validate_non_blank(self) -> RequestedChangeRecord:
+        if not self.evidence_span.strip():
+            raise ValueError("changes[].evidenceSpan must not be blank.")
+        return self
 
 
 class HumanEditEngagementPayload(StrictSchema):
     decision: Literal["engage", "unchanged", "unclear"]
     evidence_span: str = Field(default="", alias="evidenceSpan", max_length=400)
 
+    @model_validator(mode="after")
+    def _validate_engagement(self) -> HumanEditEngagementPayload:
+        if self.decision == "engage" and not self.evidence_span.strip():
+            raise ValueError(
+                "humanEditEngagement.evidenceSpan must not be blank when decision is 'engage'."
+            )
+        return self
+
+
+class HumanEditEngagementRecoveryPayload(StrictSchema):
+    """Focused schema for recovering human_edit engagement without full turn routing."""
+
+    decision: Literal["engage", "unchanged", "unclear"]
+    evidence_span: str = Field(default="", alias="evidenceSpan", max_length=400)
+
+    @model_validator(mode="after")
+    def _validate_engagement(self) -> HumanEditEngagementRecoveryPayload:
+        if self.decision == "engage" and not self.evidence_span.strip():
+            raise ValueError(
+                "evidenceSpan must not be blank when decision is 'engage'."
+            )
+        return self
+
 
 class TurnRoutingPayload(StrictSchema):
-    """Lightweight Policy-2 turn routing classification."""
+    """Lightweight Policy-2 turn routing classification (no active human-edit conflict)."""
 
     acts: list[
         Literal[
@@ -220,24 +352,55 @@ class TurnRoutingPayload(StrictSchema):
         ]
     ] = Field(min_length=1, max_length=5)
     elements: list[
-        Literal["water", "internal_walls", "outer_shell", "player", "boxes", "targets", "unknown"]
-    ] = Field(default_factory=list, max_length=7)
+        Literal[
+            "water",
+            "internal_walls",
+            "outer_shell",
+            "player",
+            "boxes",
+            "targets",
+            "gameplay",
+            "unknown",
+        ]
+    ] = Field(default_factory=list, max_length=8)
     map_related: bool = Field(alias="mapRelated")
     direction_sufficient: bool = Field(alias="directionSufficient")
-    route_target: Literal["ordinary", "binary_discovery", "challenge", "revision"] = Field(
-        alias="routeTarget"
-    )
-    evidence_span: str = Field(alias="evidenceSpan", max_length=400)
+    route_target: Literal["ordinary", "binary_discovery"] = Field(alias="routeTarget")
+    evidence_span: str = Field(default="", alias="evidenceSpan", max_length=400)
     changes: list[RequestedChangeRecord] = Field(default_factory=list, max_length=8)
-    human_edit_engagement: HumanEditEngagementPayload | None = Field(
-        default=None, alias="humanEditEngagement"
-    )
+
+    @model_validator(mode="after")
+    def _validate_evidence_span(self) -> TurnRoutingPayload:
+        if self.map_related and not self.evidence_span.strip():
+            raise ValueError("evidenceSpan must not be blank when mapRelated is true.")
+        return self
+
+
+class TurnRoutingWithHumanEditPayload(TurnRoutingPayload):
+    """Policy-2 turn routing with required human-edit disagreement engagement judgment."""
+
+    human_edit_engagement: HumanEditEngagementPayload = Field(alias="humanEditEngagement")
 
 
 class TranslatedBinaryChoicePayload(StrictSchema):
     choice_id: str = Field(alias="choiceId")
     letter: str
     label: str = Field(min_length=1, max_length=240)
+
+
+class TranslatedBinaryChoiceTextPayload(StrictSchema):
+    """Slim text-only binary choice translation payload (server preserves immutable metadata)."""
+
+    choice_id: str = Field(alias="choiceId", min_length=1, max_length=128)
+    label: str = Field(min_length=1, max_length=240)
+
+    @model_validator(mode="after")
+    def _validate_non_blank(self) -> TranslatedBinaryChoiceTextPayload:
+        if not self.choice_id.strip():
+            raise ValueError("choices[].choiceId must not be blank.")
+        if not self.label.strip():
+            raise ValueError("choices[].label must not be blank.")
+        return self
 
 
 class TranslatedBinaryQuestionPayload(StrictSchema):
@@ -252,6 +415,20 @@ class TranslatedBinaryQuestionPayload(StrictSchema):
     status: Literal["pending", "selected", "expired"] = "pending"
 
 
+class TranslatedBinaryQuestionTextPayload(StrictSchema):
+    """Slim text-only binary question translation payload (no immutable IDs/status)."""
+
+    question: str = Field(min_length=1, max_length=600)
+    note: str = Field(default="", max_length=600)
+    choices: list[TranslatedBinaryChoiceTextPayload] = Field(min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def _validate_non_blank(self) -> TranslatedBinaryQuestionTextPayload:
+        if not self.question.strip():
+            raise ValueError("proposalQuestion.question must not be blank.")
+        return self
+
+
 class TranslatedDisagreementPayload(StrictSchema):
     status: str
     subject: str | None = None
@@ -264,9 +441,37 @@ class TranslatedDisagreementPayload(StrictSchema):
     next_question: str | None = Field(default=None, alias="nextQuestion")
 
 
+class TranslatedDisagreementTextPayload(StrictSchema):
+    """Slim text-only disagreement translation payload (server merges immutable metadata)."""
+
+    user_position: str | None = Field(default=None, alias="userPosition", max_length=400)
+    ai_position: str | None = Field(default=None, alias="aiPosition", max_length=400)
+    core_disagreement: str | None = Field(default=None, alias="coreDisagreement", max_length=800)
+    next_question: str | None = Field(default=None, alias="nextQuestion", max_length=300)
+
+
+class TranslatedPlainTurnItemPayload(StrictSchema):
+    """Slim translation payload for plain text turns without cards, cues, or links."""
+
+    turn_id: str = Field(alias="turnId", min_length=1, max_length=128)
+    body: str = Field(min_length=1, max_length=8000)
+
+    @model_validator(mode="after")
+    def _validate_non_blank(self) -> TranslatedPlainTurnItemPayload:
+        if not self.turn_id.strip():
+            raise ValueError("turnId must not be blank.")
+        if not self.body.strip():
+            raise ValueError("body must not be blank.")
+        return self
+
+
+class PlainTranslationPayload(StrictSchema):
+    translations: list[TranslatedPlainTurnItemPayload] = Field(min_length=1, max_length=32)
+
+
 class TranslatedTurnItemPayload(StrictSchema):
     turn_id: str = Field(alias="turnId", min_length=1, max_length=128)
-    body: str = Field(max_length=8000)
+    body: str = Field(min_length=1, max_length=8000)
     follow_up_question: str | None = Field(default=None, alias="followUpQuestion")
     intent_hypothesis: str | None = Field(default=None, alias="intentHypothesis")
     proposal_offer_summary: str | None = Field(default=None, alias="proposalOfferSummary")
@@ -274,16 +479,23 @@ class TranslatedTurnItemPayload(StrictSchema):
     proposal_presentation_reason: str | None = Field(
         default=None, alias="proposalPresentationReason"
     )
-    proposal_summary: str | None = Field(default=None, alias="proposalSummary")
     ui_cue_texts: list[str] = Field(default_factory=list, alias="uiCueTexts")
     coordinate_link_texts: list[str] | None = Field(default=None, alias="coordinateLinkTexts")
-    disagreement: TranslatedDisagreementPayload | None = None
-    proposal_question: TranslatedBinaryQuestionPayload | None = Field(
+    disagreement: TranslatedDisagreementTextPayload | None = None
+    proposal_question: TranslatedBinaryQuestionTextPayload | None = Field(
         default=None, alias="proposalQuestion"
     )
     proposal_verified_actions: list[str] | None = Field(
         default=None, alias="proposalVerifiedActions"
     )
+
+    @model_validator(mode="after")
+    def _validate_non_blank(self) -> TranslatedTurnItemPayload:
+        if not self.turn_id.strip():
+            raise ValueError("turnId must not be blank.")
+        if not self.body.strip():
+            raise ValueError("body must not be blank.")
+        return self
 
 
 class TranslationPayload(StrictSchema):
@@ -294,13 +506,25 @@ class TranslationVerificationPayload(StrictSchema):
     accepted: bool
     reason: str = Field(default="", max_length=400)
 
+    @model_validator(mode="after")
+    def _validate_rejection_reason(self) -> TranslationVerificationPayload:
+        if not self.accepted and not self.reason.strip():
+            raise ValueError("reason must not be blank when accepted is false.")
+        return self
+
 
 __all__ = [
     "AutomaticBindingPayload",
     "BinaryBranchPayload",
     "BinaryCorridorPayload",
+    "BinaryDiscoveryFollowupFinalPayload",
+    "BinaryDiscoveryFollowupPayload",
+    "BinaryDiscoveryInitialFinalPayload",
+    "BinaryDiscoveryInitialPayload",
     "BinaryDiscoveryPayload",
+    "BinaryPreserveKey",
     "BinaryPromisePayload",
+    "BinaryStrategyPayload",
     "ChallengeReasonReviewPayload",
     "ChatReplyPayload",
     "CoordinateLinkPayload",
@@ -310,43 +534,65 @@ __all__ = [
     "EditableOpName",
     "EditableTileChar",
     "EffectKind",
+    "EntityId",
     "ExactTransitionPayload",
     "FocusAreaPayload",
     "GridCoordinate",
     "GuidanceMove",
     "HumanEditEngagementPayload",
+    "HumanEditEngagementRecoveryPayload",
     "IntentClaimPayload",
     "IntentDecisionPayload",
     "LevelPlanPayload",
     "ManualEditConflictCardPayload",
     "ManualEditConflictClassificationPayload",
     "ManualEditDirectionComparisonPayload",
+    "ManualEditReviewNoConflictPayload",
     "ManualEditReviewPayload",
+    "ManualEditReviewWithConflictPayload",
     "MapOperationCandidatePayload",
     "MapOperationItemPayload",
     "MapOperationsPayload",
     "MetricGoalPayload",
+    "OrdinaryChatMove",
+    "OrdinaryChatReplyPayload",
+    "OrdinaryChatWithDisagreementPayload",
     "PatchQuestionEntry",
     "PatchTextEntry",
+    "PlainTranslationPayload",
     "PreserveKey",
     "ProposalFailureAnalysisPayload",
     "ProtectedEntityKey",
+    "ReduceObstaclesPromisePayload",
     "RequestedChangeRecord",
     "RequiredTransitionPayload",
     "RequirementItemPayload",
     "RequirementRecordPayload",
+    "ReshapeWaterPromisePayload",
     "RevisionOfferChangePayload",
     "RevisionOfferPayload",
     "RevisionPlanPayload",
     "RevisionStrategyPayload",
+    "ShorterSolutionPromisePayload",
     "StageAssessmentPayload",
+    "StageOpeningPayload",
     "StrictSchema",
     "TranslatedBinaryChoicePayload",
+    "TranslatedBinaryChoiceTextPayload",
     "TranslatedBinaryQuestionPayload",
+    "TranslatedBinaryQuestionTextPayload",
     "TranslatedDisagreementPayload",
+    "TranslatedDisagreementTextPayload",
+    "TranslatedPlainTurnItemPayload",
     "TranslatedTurnItemPayload",
     "TranslationPayload",
     "TranslationVerificationPayload",
     "TurnRoutingPayload",
+    "TurnRoutingWithHumanEditPayload",
     "UICuePayload",
+    "WidenCorridorPromisePayload",
+    "build_constrained_dg_guide_model",
+    "build_constrained_level_plan_model",
+    "build_manual_edit_conflict_classification_model",
+    "select_binary_discovery_schema",
 ]

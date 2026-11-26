@@ -18,7 +18,19 @@ from server.llm.grounding import (
     verify_grounding,
 )
 from server.llm.prompts.chat import build_chat_messages, build_stage_opening_messages
-from server.llm.schemas import ChatReplyPayload
+from server.llm.schemas import (
+    ChatReplyPayload,
+    OrdinaryChatReplyPayload,
+    OrdinaryChatWithDisagreementPayload,
+    StageOpeningPayload,
+)
+
+ChatSchemaType = (
+    StageOpeningPayload
+    | OrdinaryChatReplyPayload
+    | OrdinaryChatWithDisagreementPayload
+    | ChatReplyPayload
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,11 +57,23 @@ def _latest_user_message(conversation: Sequence[Mapping[str, Any]]) -> str:
     return ""
 
 
+def _has_active_disagreement(design_context: Mapping[str, Any] | None) -> bool:
+    if not isinstance(design_context, Mapping):
+        return False
+    active_dis = design_context.get("activeDisagreement")
+    return isinstance(active_dis, Mapping) and active_dis.get("status") == "active"
+
+
 def _empty_opening_guidance(links: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        "move": "observe_stage", "intentHypothesis": None, "intentConfidence": None,
-        "followUpQuestion": None, "proposalOffer": None, "disagreement": None,
-        "uiCues": [], "coordinateLinks": links,
+        "move": "observe_stage",
+        "intentHypothesis": None,
+        "intentConfidence": None,
+        "followUpQuestion": None,
+        "proposalOffer": None,
+        "disagreement": None,
+        "uiCues": [],
+        "coordinateLinks": links,
     }
 
 
@@ -83,7 +107,6 @@ def _build_snapshot_fallback_opening(
             "difficultyOpinion": "具体体感难度仍需结合你的试玩反馈一起判断。",
             "features": [f"水域 {wc} 格，可编辑内部墙 {ic} 格"],
             "suggestions": ["先试玩或分享你对开局路线与空间节奏的第一印象。"],
-            "satisfactionQuestion": None,
         }
     else:
         metric = (
@@ -102,7 +125,6 @@ def _build_snapshot_fallback_opening(
             "difficultyOpinion": "Perceived difficulty is best judged alongside playtesting.",
             "features": [f"{wc} water cells and {ic} editable internal walls"],
             "suggestions": ["Playtest or share your first impression of the opening route."],
-            "satisfactionQuestion": None,
         }
     if stage_number == 1:
         body = f"{body}\n\n{get_message('fallback.stage1_orientation', locale)}"
@@ -114,7 +136,7 @@ def _is_grounded(text: str, grid: Grid, bindings: Mapping[str, Any] | None) -> b
 
 
 def _sanitize_and_project_guidance(
-    payload: ChatReplyPayload,
+    payload: ChatSchemaType,
     *,
     body: str,
     grid: Grid,
@@ -132,10 +154,10 @@ def _sanitize_and_project_guidance(
 
     # Isolate optional card failures so a verified body is never discarded for a bad card.
     intent_hypothesis: str | None = None
-    intent_confidence = payload.intent_confidence
+    intent_confidence = getattr(payload, "intent_confidence", None)
     intent_decision_dict: dict[str, Any] | None = None
-    if payload.intent_decision is not None:
-        decision = payload.intent_decision
+    decision = getattr(payload, "intent_decision", None)
+    if decision is not None:
         valid_claims = [
             c.model_dump(by_alias=True)
             for c in decision.claims
@@ -158,10 +180,13 @@ def _sanitize_and_project_guidance(
             intent_confidence = None
             cls = decision.classification if decision.classification != "candidate" else "none"
             intent_decision_dict = {"classification": cls, "claims": [], "cardText": ""}
+    else:
+        intent_confidence = None
 
     follow_up: str | None = None
-    if payload.follow_up_question:
-        q = sanitize_visible_text(payload.follow_up_question, language)
+    raw_follow_up = getattr(payload, "follow_up_question", None)
+    if raw_follow_up:
+        q = sanitize_visible_text(raw_follow_up, language)
         if q and _is_grounded(q, grid, entity_bindings):
             follow_up = q
 
@@ -169,22 +194,24 @@ def _sanitize_and_project_guidance(
     # Ordinary chat (non-proposal route) must never emit unbound revisionOffer cards.
 
     disagreement_dict: dict[str, Any] | None = None
-    if payload.disagreement is not None:
-        raw_dis = payload.disagreement.model_dump(by_alias=True)
+    raw_disagreement = getattr(payload, "disagreement", None)
+    if raw_disagreement is not None:
+        raw_dis = raw_disagreement.model_dump(by_alias=True)
         dis_fields = ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion")
         for key in dis_fields:
             raw_dis[key] = sanitize_visible_text(raw_dis.get(key), language)
         if all(_is_grounded(raw_dis.get(k) or "", grid, entity_bindings) for k in dis_fields):
             disagreement_dict = raw_dis
 
+    ui_cues = getattr(payload, "ui_cues", ())
     cues = [
         {"type": cue.type, "text": text}
-        for cue in payload.ui_cues[:2]
+        for cue in ui_cues[:2]
         if (text := sanitize_visible_text(cue.text, language))
         and _is_grounded(text, grid, entity_bindings)
     ]
     guidance: dict[str, Any] = {
-        "move": payload.move,
+        "move": getattr(payload, "move", "offer_perspective"),
         "intentHypothesis": intent_hypothesis,
         "intentConfidence": intent_confidence,
         "followUpQuestion": follow_up,
@@ -198,21 +225,29 @@ def _sanitize_and_project_guidance(
     return guidance
 
 
-def _validate_chat_body(
-    parsed: ChatReplyPayload,
+def _validate_chat_body[T: ChatSchemaType](
+    parsed: T,
     grid: Grid,
     locale: str,
     entity_bindings: Mapping[str, Any] | None,
-) -> ChatReplyPayload:
+) -> T:
     body = sanitize_visible_text(parsed.assistant_message, locale)
     if not body:
-        raise LLMValidationError("EMPTY_BODY", "Assistant message cannot be empty.")
+        raise LLMValidationError(
+            "EMPTY_BODY", "assistantMessage cannot be empty after sanitization."
+        )
     grounding_issues = verify_grounding(body, grid, entity_bindings)
     if grounding_issues:
-        raise LLMValidationError("GROUNDING_MISMATCH", grounding_issues[0].message)
+        joined = "; ".join(dict.fromkeys(issue.message for issue in grounding_issues[:4]))
+        raise LLMValidationError(
+            "GROUNDING_MISMATCH", f"assistantMessage grounding error(s): {joined}"
+        )
     lang_issues = validate_visible_language(body, locale)
     if lang_issues:
-        raise LLMValidationError("INTERNAL_TOKEN_LEAK", lang_issues[0])
+        joined = "; ".join(dict.fromkeys(lang_issues[:4]))
+        raise LLMValidationError(
+            "INTERNAL_TOKEN_LEAK", f"assistantMessage internal token leak(s): {joined}"
+        )
     return parsed
 
 
@@ -254,8 +289,17 @@ class ChatPipeline:
             else None
         )
         return ChatPipelineResult(
-            body, "observe_stage", guidance, assessment, None,
-            res.model, res.attempts_used, res.request_id, res.latency_ms, "llm", res.usage,
+            body,
+            "observe_stage",
+            guidance,
+            assessment,
+            None,
+            res.model,
+            res.attempts_used,
+            res.request_id,
+            res.latency_ms,
+            "llm",
+            res.usage,
         )
 
     async def generate_stage_opening(
@@ -290,7 +334,7 @@ class ChatPipeline:
                 task="stage_opening",
                 model=self.model,
                 messages=messages,
-                response_model=ChatReplyPayload,
+                response_model=StageOpeningPayload,
                 validator=lambda p: _validate_chat_body(p, grid, locale, entity_bindings),
                 deadline=deadline,
                 max_attempts=max_attempts,
@@ -308,9 +352,16 @@ class ChatPipeline:
                 grid, stage_number=stage_number, language=locale, solver_metrics=solver_metrics
             )
             return ChatPipelineResult(
-                body, "observe_stage", _empty_opening_guidance([]), assessment, None,
-                self.model, exc.attempts_used, exc.request_id or request_id,
-                round((self.clock.perf_counter() - started) * 1000), "snapshot_fallback",
+                body,
+                "observe_stage",
+                _empty_opening_guidance([]),
+                assessment,
+                None,
+                self.model,
+                exc.attempts_used,
+                exc.request_id or request_id,
+                round((self.clock.perf_counter() - started) * 1000),
+                "snapshot_fallback",
             )
 
         body = sanitize_visible_text(result.parsed.assistant_message, locale)
@@ -340,6 +391,12 @@ class ChatPipeline:
         grid = parse_structural_grid(grid_or_rows)
         facts = build_stage_facts(grid, entity_bindings)
         latest_user = _latest_user_message(conversation)
+        has_active_disagreement = _has_active_disagreement(design_context)
+        response_model: type[OrdinaryChatReplyPayload] = (
+            OrdinaryChatWithDisagreementPayload
+            if has_active_disagreement
+            else OrdinaryChatReplyPayload
+        )
         messages = build_chat_messages(
             conversation=conversation,
             stage_snapshot=facts.to_prompt_dict(),
@@ -348,13 +405,14 @@ class ChatPipeline:
             play_summary=play_summary,
             design_context=design_context,
             routing_hint=routing_hint,
+            has_active_disagreement=has_active_disagreement,
         )
         result = await call_structured(
             self.transport,
             task="ordinary_chat",
             model=self.model,
             messages=messages,
-            response_model=ChatReplyPayload,
+            response_model=response_model,
             validator=lambda p: _validate_chat_body(p, grid, locale, entity_bindings),
             deadline=deadline,
             max_attempts=max_attempts,
@@ -381,7 +439,15 @@ class ChatPipeline:
             else None
         )
         return ChatPipelineResult(
-            body, result.parsed.move, guidance, None, patch,
-            result.model, result.attempts_used, result.request_id,
-            result.latency_ms, "llm", result.usage,
+            body,
+            result.parsed.move,
+            guidance,
+            None,
+            patch,
+            result.model,
+            result.attempts_used,
+            result.request_id,
+            result.latency_ms,
+            "llm",
+            result.usage,
         )

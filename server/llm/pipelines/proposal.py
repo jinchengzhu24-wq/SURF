@@ -36,18 +36,18 @@ from server.domain.proposals import (
     validate_revision_plan_against_map,
 )
 from server.i18n.messages import normalize_language
+from server.llm._schemas_proposals import (
+    MapOperationsPayload,
+    ProposalFailureAnalysisPayload,
+    RequirementRecordPayload,
+    RevisionPlanPayload,
+)
 from server.llm.grounding import build_stage_facts, sanitize_visible_text
 from server.llm.prompts.proposal import (
     build_failure_analysis_messages,
     build_map_operations_messages,
     build_requirements_messages,
     build_revision_plan_messages,
-)
-from server.llm.schemas import (
-    MapOperationsPayload,
-    ProposalFailureAnalysisPayload,
-    RequirementRecordPayload,
-    RevisionPlanPayload,
 )
 
 from ._proposal_eval import (
@@ -58,6 +58,39 @@ from ._proposal_eval import (
     select_best_llm_candidate,
     step_budget,
 )
+
+
+def format_preflight_issues(issues: Sequence[Mapping[str, Any]]) -> str:
+    """Format requirement preflight conflicts as concise, actionable repair guidance."""
+    parts: list[str] = []
+    for issue in list(issues)[:3]:
+        reason = str(issue.get("reason") or "conflict")
+        req_id = issue.get("requirementId")
+        point = issue.get("point")
+        if reason == "protected_entity_change":
+            parts.append(
+                f"{req_id or 'requirement'} requests modifying a protected entity "
+                "(player, boxes, and targets cannot be added, removed, or moved)"
+            )
+        elif reason == "conflicting_fixed_requirements":
+            parts.append(
+                f"{req_id or 'requirement'} conflicts with another invariant requirement"
+            )
+        elif reason == "exact_transition_conflicts_with_snapshot":
+            parts.append(
+                f"exactTransition at {point} does not match the current editable tile "
+                "or targets the immutable outer_shell"
+            )
+        elif reason == "conflicting_exact_transitions":
+            parts.append(f"exactTransitions specify conflicting target tiles at {point}")
+        elif reason == "exact_transition_conflicts_with_preservation":
+            parts.append(
+                f"exactTransition conflicts with preserved invariant {req_id or 'requirement'}"
+            )
+        else:
+            detail = req_id or point or "conflict"
+            parts.append(f"{reason} ({detail})")
+    return "; ".join(parts)
 
 
 def merge_revision_strategies(strategies: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -250,9 +283,10 @@ class ProposalPipeline:
             record = validate_requirement_record(normalized_payload, designer_turns, snapshot)
             issues = preflight_requirements(grid.rows, record)
             if issues:
+                formatted = format_preflight_issues(issues)
                 raise LLMValidationError(
                     "REQUIREMENT_PREFLIGHT_CONFLICT",
-                    f"Requirements conflict with map permissions: {issues[0]}",
+                    f"Requirements conflict with map permissions: {formatted}",
                 )
             holder["record"] = record
             return parsed
@@ -428,6 +462,67 @@ class ProposalPipeline:
             requirements=resolved_record,
             language=locale,
         )
+        preserved_base = set(preserved_components)
+        applicable_candidates: list[tuple[Grid, int]] = []
+
+        def _validate_map_operations(parsed: MapOperationsPayload) -> MapOperationsPayload:
+            applicable_candidates.clear()
+            failure_reasons: list[str] = []
+            for c_idx, cand in enumerate(parsed.candidates, start=1):
+                if not (1 <= cand.strategy_index <= len(plan.strategies)):
+                    failure_reasons.append(
+                        f"candidate {c_idx}: strategyIndex={cand.strategy_index} is outside "
+                        f"1..{len(plan.strategies)}"
+                    )
+                    continue
+                strategy = plan.strategies[cand.strategy_index - 1]
+                max_ops = min(MAX_EDIT_BUDGET, strategy.edit_budget)
+                raw_ops = [item.model_dump(by_alias=True) for item in cand.operations]
+                if not raw_ops or len(raw_ops) > max_ops:
+                    failure_reasons.append(
+                        f"candidate {c_idx}: {len(raw_ops)} operation(s) exceed "
+                        f"editBudget={max_ops}"
+                    )
+                    continue
+                effective_preserved = preserved_base | set(strategy.preserve)
+                blocked_ops = sorted(
+                    {
+                        item["op"]
+                        for item in raw_ops
+                        if OPERATOR_COMPONENT.get(item["op"]) in effective_preserved
+                    }
+                )
+                if blocked_ops:
+                    blocked_components = sorted(effective_preserved & {"walls", "water"})
+                    failure_reasons.append(
+                        f"candidate {c_idx}: operator(s) {blocked_ops} edit preserved "
+                        f"component(s) {blocked_components}"
+                    )
+                    continue
+                try:
+                    cand_grid = apply_operations(base_grid, raw_ops)
+                except GridValidationError as exc:
+                    failure_reasons.append(f"candidate {c_idx}: {exc.code} ({exc})")
+                    continue
+                changed_count = len(diff_grids(base_grid, cand_grid))
+                if changed_count > max_ops:
+                    failure_reasons.append(
+                        f"candidate {c_idx}: {changed_count} changed cells exceed "
+                        f"editBudget={max_ops}"
+                    )
+                    continue
+                applicable_candidates.append((cand_grid, cand.strategy_index))
+
+            if not applicable_candidates:
+                raise LLMValidationError(
+                    "MAP_OPERATIONS_INVALID",
+                    (
+                        "No map_operations candidate applied cleanly to the saved Stage: "
+                        + "; ".join(failure_reasons[:3])
+                    ),
+                )
+            return parsed
+
         try:
             op_res = await call_structured(
                 self.transport,
@@ -435,6 +530,7 @@ class ProposalPipeline:
                 model=self.model,
                 messages=op_messages,
                 response_model=MapOperationsPayload,
+                validator=_validate_map_operations,
                 deadline=deadline,
                 max_attempts=2,
                 temperature=0.6,
@@ -445,27 +541,10 @@ class ProposalPipeline:
                 request_id=request_id,
             )
             attempts_total += op_res.attempts_used
-            preserved_base = set(preserved_components)
-            for cand in op_res.parsed.candidates:
-                if not (1 <= cand.strategy_index <= len(plan.strategies)):
-                    continue
-                strategy = plan.strategies[cand.strategy_index - 1]
-                max_ops = min(MAX_EDIT_BUDGET, strategy.edit_budget)
-                raw_ops = [item.model_dump(by_alias=True) for item in cand.operations]
-                if not raw_ops or len(raw_ops) > max_ops:
-                    continue
-                effective_preserved = preserved_base | set(strategy.preserve)
-                if any(
-                    OPERATOR_COMPONENT.get(item["op"]) in effective_preserved
-                    for item in raw_ops
-                ):
-                    continue
+            for cand_grid, strategy_index in applicable_candidates:
                 try:
-                    cand_grid = apply_operations(base_grid, raw_ops)
-                    if len(diff_grids(base_grid, cand_grid)) > max_ops:
-                        continue
                     solved = validate_candidate(cand_grid.rows)
-                    verified.append((cand_grid, solved, cand.strategy_index))
+                    verified.append((cand_grid, solved, strategy_index))
                 except (GridValidationError, SolverError, ValueError):
                     continue
         except LLMError:

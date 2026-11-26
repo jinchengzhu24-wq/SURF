@@ -220,22 +220,13 @@ def make_opening_json(msg: str = "Stage 1 ready.") -> str:
     return json.dumps(
         {
             "assistantMessage": msg,
-            "move": "observe_stage",
-            "followUpQuestion": None,
-            "intentDecision": None,
-            "intentConfidence": None,
-            "revisionOffer": None,
-            "disagreement": None,
-            "uiCues": [],
             "coordinateLinks": [],
             "assessment": {
                 "solutionSummary": "Direct push from (3,6) to (3,9).",
                 "difficultyOpinion": "Straightforward layout.",
                 "features": ["Open center"],
                 "suggestions": ["Consider adding a small detour."],
-                "satisfactionQuestion": None,
             },
-            "designContextPatch": None,
         }
     )
 
@@ -250,7 +241,6 @@ def make_routing_json(target: str = "ordinary", *, evidence_span: str = "the cen
             "routeTarget": target,
             "evidenceSpan": evidence_span,
             "changes": [],
-            "humanEditEngagement": None,
         }
     )
 
@@ -260,54 +250,52 @@ def make_chat_json(
     *,
     hyp: str = "",
     evidence_span: str = "the center",
+    follow_up: str | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "assistantMessage": msg,
-            "move": "clarify_intent",
-            "followUpQuestion": "Do you prefer a wider center?",
-            "intentDecision": (
-                {
-                    "classification": "candidate",
-                    "claims": [
-                        {
-                            "normalizedMeaning": "Widen the center area",
-                            "subjectType": "space",
-                            "subjectText": "center",
-                            "attributeType": "clarity",
-                            "attributeText": "openness",
-                            "direction": "increase",
-                            "degree": "neutral",
-                            "aspect": "gameplay",
-                            "scopeType": "region",
-                            "scopeText": "center",
-                            "evidenceSpan": evidence_span,
-                        }
-                    ],
-                    "cardText": hyp,
-                }
-                if hyp
-                else None
-            ),
-            "intentConfidence": "medium" if hyp else None,
-            "revisionOffer": None,
-            "disagreement": None,
-            "uiCues": [],
-            "coordinateLinks": [],
-            "assessment": None,
-            "designContextPatch": {
-                "goals": [{"text": "Keep route brisk", "evidenceText": msg}],
-                "constraints": [],
-                "openQuestions": [
+    payload: dict[str, Any] = {
+        "assistantMessage": msg,
+        "move": "clarify_intent",
+        "intentDecision": (
+            {
+                "classification": "candidate",
+                "claims": [
                     {
-                        "question": "Should water stay centered?",
-                        "status": "open",
-                        "evidenceText": msg,
+                        "normalizedMeaning": "Widen the center area",
+                        "subjectType": "space",
+                        "subjectText": "center",
+                        "attributeType": "clarity",
+                        "attributeText": "openness",
+                        "direction": "increase",
+                        "degree": "neutral",
+                        "aspect": "gameplay",
+                        "scopeType": "region",
+                        "scopeText": "center",
+                        "evidenceSpan": evidence_span,
                     }
                 ],
-            },
-        }
-    )
+                "cardText": hyp,
+            }
+            if hyp
+            else {"classification": "none", "claims": [], "cardText": ""}
+        ),
+        "intentConfidence": "medium" if hyp else None,
+        "uiCues": [],
+        "coordinateLinks": [],
+        "designContextPatch": {
+            "goals": [{"text": "Keep route brisk", "evidenceText": msg}],
+            "constraints": [],
+            "openQuestions": [
+                {
+                    "question": "Should water stay centered?",
+                    "status": "open",
+                    "evidenceText": msg,
+                }
+            ],
+        },
+    }
+    if follow_up is not None:
+        payload["followUpQuestion"] = follow_up
+    return json.dumps(payload)
 
 
 def make_binary_ask_json(kwargs: dict[str, Any]) -> str:
@@ -458,12 +446,11 @@ def make_binary_plan_json() -> str:
                     "effect": "adjust_internal_walls",
                     "focus": {"row": 4, "column": 6, "radius": 1},
                     "operators": ["remove_wall"],
-                    "preserve": ["boxes", "targets", "player"],
+                    "preserve": ["water"],
                     "editBudget": 1,
                 }
             ],
             "protectedEntities": [],
-            "initialRequirements": None,
         }
     )
 
@@ -489,30 +476,36 @@ def make_translation_json(session_payload: dict[str, Any], target_language: str 
     items: list[dict[str, Any]] = []
     for turn in pending_turns:
         guidance = turn["guidance"]
+        raw_cues = [f"提示:{cue}" for cue in (guidance.get("uiCueTexts") or [])]
+        has_structured = bool(
+            raw_cues
+            or guidance.get("followUpQuestion")
+            or guidance.get("intentHypothesis")
+            or isinstance(guidance.get("proposalOffer"), dict)
+            or guidance.get("proposalQuestion")
+            or guidance.get("disagreement")
+            or guidance.get("coordinateLinks")
+        )
         item: dict[str, Any] = {
             "turnId": turn["turnId"],
             "body": f"中文:{turn['content'][:40]}",
-            "uiCueTexts": [f"提示:{cue}" for cue in (guidance.get("uiCueTexts") or [])],
         }
+        if has_structured:
+            item["uiCueTexts"] = raw_cues
         if guidance.get("intentHypothesis"):
             item["intentHypothesis"] = "中文意图"
         if isinstance(guidance.get("proposalOffer"), dict) and guidance["proposalOffer"].get(
             "summary"
         ):
-            item["proposalSummary"] = "中文提案摘要"
+            item["proposalOfferSummary"] = "中文提案摘要"
         if guidance.get("proposalQuestion"):
             pq = guidance["proposalQuestion"]
             item["proposalQuestion"] = {
-                "questionId": pq["questionId"],
-                "topicId": pq["topicId"],
-                "baseVersionId": pq["baseVersionId"],
                 "question": "中文问题？",
                 "note": "说明",
-                "number": pq["number"],
                 "choices": [
                     {
                         "choiceId": choice["choiceId"],
-                        "letter": choice["letter"],
                         "label": f"选项{choice['letter']}",
                     }
                     for choice in pq["choices"]

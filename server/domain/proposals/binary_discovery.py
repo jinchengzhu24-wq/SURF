@@ -8,7 +8,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from server.domain.blueprints import GRID_HEIGHT, GRID_WIDTH
 from server.i18n.messages import format_protected_refusal
@@ -54,9 +54,23 @@ class BinaryPromise(BaseModel):
     ) -> CorridorSpec | None:
         kind = info.data.get("kind")
         if kind == "widen_corridor" and value is None:
-            raise BinaryError("BINARY_CORRIDOR_INVALID")
+            raise BinaryError(
+                "BINARY_CORRIDOR_INVALID",
+                "promise.corridor",
+                detail=(
+                    "promise.kind='widen_corridor' requires a non-null 'corridor' object "
+                    "with row, column, and axis."
+                ),
+            )
         if kind != "widen_corridor" and value is not None:
-            raise BinaryError("BINARY_CORRIDOR_UNEXPECTED")
+            raise BinaryError(
+                "BINARY_CORRIDOR_UNEXPECTED",
+                "promise.corridor",
+                detail=(
+                    f"promise.kind={kind!r} must set corridor=null "
+                    "(only 'widen_corridor' accepts corridor)."
+                ),
+            )
         return value
 
 
@@ -189,30 +203,144 @@ def binary_signature(value: Any) -> str:
     ).hexdigest()
 
 
+def _unwrap_binary_error(error: Exception, default_code: str) -> tuple[str, str]:
+    if isinstance(error, BinaryError):
+        return error.code, error.detail or str(error)
+    if isinstance(error, ValidationError):
+        for err in error.errors():
+            ctx_err = (err.get("ctx") or {}).get("error")
+            if isinstance(ctx_err, BinaryError):
+                return ctx_err.code, ctx_err.detail or str(ctx_err)
+        first = error.errors()[0] if error.errors() else {}
+        loc = ".".join(str(part) for part in first.get("loc", ()))
+        msg = str(first.get("msg") or error)
+        return default_code, f"{loc}: {msg}" if loc else msg
+    return getattr(error, "code", default_code), str(error)
+
+
+def _validate_binary_strategy_dict(
+    strategy: Any,
+    *,
+    field_prefix: str,
+    fallback_code: str,
+) -> None:
+    if not isinstance(strategy, Mapping):
+        raise BinaryError(
+            fallback_code,
+            field_prefix,
+            detail=f"{field_prefix} must be a strategy object.",
+        )
+    raw_goals = strategy.get("metricGoals")
+    if raw_goals:
+        raise BinaryError(
+            "BINARY_METRIC_GOALS_FORBIDDEN",
+            f"{field_prefix}.metricGoals",
+            detail=(
+                "strategy.metricGoals must be empty [] in binary discovery; "
+                "express step/difficulty goals via branch.promise instead."
+            ),
+        )
+    raw_ops = strategy.get("operators")
+    if isinstance(raw_ops, list):
+        non_editable = sorted(
+            {str(op) for op in raw_ops if op not in EDITABLE_OPERATORS}
+        )
+        if non_editable:
+            raise BinaryError(
+                "BINARY_PROTECTED_STRATEGY",
+                f"{field_prefix}.operators",
+                detail=(
+                    f"{field_prefix}.operators contains non-editable operator(s) {non_editable}; "
+                    f"only {sorted(EDITABLE_OPERATORS)} are permitted."
+                ),
+            )
+    strategy_for_parse = (
+        dict(strategy) if "metricGoals" in strategy else {**dict(strategy), "metricGoals": []}
+    )
+    try:
+        plan = parse_revision_plan({"strategies": [strategy_for_parse]})
+    except (ValueError, TypeError, KeyError) as error:
+        code, detail = _unwrap_binary_error(error, fallback_code)
+        raise BinaryError(
+            code,
+            field_prefix,
+            detail=f"{field_prefix}: {detail}",
+        ) from error
+    if set(plan.strategies[0].operators) - EDITABLE_OPERATORS:
+        bad = sorted(set(plan.strategies[0].operators) - EDITABLE_OPERATORS)
+        raise BinaryError(
+            "BINARY_PROTECTED_STRATEGY",
+            f"{field_prefix}.operators",
+            detail=(
+                f"{field_prefix}.operators contains non-editable operator(s) {bad}; "
+                f"only {sorted(EDITABLE_OPERATORS)} are permitted."
+            ),
+        )
+
+
 def parse_binary_step(value: Any, question_count: int) -> dict[str, Any]:
     core_keys = {"action", "question", "note", "branches", "initialRequirements"}
     allowed_keys = core_keys | {"planStrategies", "protectedEntities"}
-    if not isinstance(value, Mapping) or not core_keys.issubset(value) or set(value) - allowed_keys:
-        raise BinaryError("BINARY_ENVELOPE_INVALID", "envelope")
+    if not isinstance(value, Mapping):
+        raise BinaryError(
+            "BINARY_ENVELOPE_INVALID",
+            "envelope",
+            detail="Binary discovery step must be a JSON object.",
+        )
+    missing_keys = sorted(core_keys - set(value))
+    extra_keys = sorted(set(value) - allowed_keys)
+    if missing_keys or extra_keys:
+        parts = []
+        if missing_keys:
+            parts.append(f"missing keys {missing_keys}")
+        if extra_keys:
+            parts.append(f"unexpected keys {extra_keys}")
+        raise BinaryError(
+            "BINARY_ENVELOPE_INVALID",
+            "envelope",
+            detail=f"Invalid binary discovery envelope: {', '.join(parts)}.",
+        )
     data = copy.deepcopy(dict(value))
     data.setdefault("planStrategies", [])
     data.setdefault("protectedEntities", [])
-    if (
-        data["action"] not in {"ask", "plan", "protected_refusal", "blocked"}
-        or not isinstance(data["branches"], list)
-        or not isinstance(data["planStrategies"], list)
-        or not isinstance(data["protectedEntities"], list)
-    ):
-        raise BinaryError("BINARY_ACTION_INVALID", "action")
+    if data["action"] not in {"ask", "plan", "protected_refusal", "blocked"}:
+        raise BinaryError(
+            "BINARY_ACTION_INVALID",
+            "action",
+            detail=(
+                f"action={data['action']!r} is invalid; expected one of "
+                "['ask', 'plan', 'protected_refusal', 'blocked']."
+            ),
+        )
+    for list_field in ("branches", "planStrategies", "protectedEntities"):
+        if not isinstance(data[list_field], list):
+            raise BinaryError(
+                "BINARY_ACTION_INVALID",
+                list_field,
+                detail=f"{list_field} must be a list.",
+            )
 
     for field_name in ("question", "note"):
         if not isinstance(data[field_name], str) or len(data[field_name]) > 1200:
-            raise BinaryError("BINARY_TEXT_INVALID", field_name)
+            raise BinaryError(
+                "BINARY_TEXT_INVALID",
+                field_name,
+                detail=f"{field_name} must be a string of at most 1200 characters.",
+            )
         data[field_name] = " ".join(data[field_name].split())
 
     if data["action"] == "protected_refusal":
-        if data["question"] or data["branches"] or data["planStrategies"]:
-            raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
+        populated = [
+            f
+            for f in ("question", "branches", "planStrategies")
+            if data[f]
+        ]
+        if populated:
+            raise BinaryError(
+                "BINARY_UNUSED_FIELDS",
+                "envelope",
+                detail=f"action='protected_refusal' requires {', '.join(populated)} to be empty.",
+            )
         entities = data["protectedEntities"]
         if (
             not entities
@@ -222,75 +350,161 @@ def parse_binary_step(value: Any, question_count: int) -> dict[str, Any]:
                 for item in entities
             )
         ):
-            raise BinaryError("BINARY_PROTECTED_ENTITIES_REQUIRED", "protectedEntities")
+            raise BinaryError(
+                "BINARY_PROTECTED_ENTITIES_REQUIRED",
+                "protectedEntities",
+                detail=(
+                    f"action='protected_refusal' requires 1..4 items from "
+                    f"{list(PROTECTED_ENTITY_KEYS)}; got {entities!r}."
+                ),
+            )
         data["protectedEntities"] = list(dict.fromkeys(entities))
         return data
 
     if data["action"] == "plan":
-        if data["question"] or data["branches"] or data["protectedEntities"]:
-            raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
+        populated = [
+            f
+            for f in ("question", "branches", "protectedEntities")
+            if data[f]
+        ]
+        if populated:
+            raise BinaryError(
+                "BINARY_UNUSED_FIELDS",
+                "envelope",
+                detail=f"action='plan' requires {', '.join(populated)} to be empty.",
+            )
         if len(data["planStrategies"]) > 3:
-            raise BinaryError("BINARY_PLAN_STRATEGY_INVALID", "planStrategies")
-        for item in data["planStrategies"]:
-            try:
-                plan = parse_revision_plan({"strategies": [item]})
-                if (
-                    set(plan.strategies[0].operators) - EDITABLE_OPERATORS
-                    or plan.strategies[0].metric_goals
-                ):
-                    raise BinaryError("BINARY_PLAN_STRATEGY_INVALID", "planStrategies")
-            except (ValueError, TypeError, KeyError) as error:
-                raise BinaryError("BINARY_PLAN_STRATEGY_INVALID", "planStrategies") from error
+            raise BinaryError(
+                "BINARY_PLAN_STRATEGY_INVALID",
+                "planStrategies",
+                detail=(
+                    f"planStrategies allows at most 3 strategies, "
+                    f"got {len(data['planStrategies'])}."
+                ),
+            )
+        for index, item in enumerate(data["planStrategies"]):
+            _validate_binary_strategy_dict(
+                item,
+                field_prefix=f"planStrategies[{index}]",
+                fallback_code="BINARY_PLAN_STRATEGY_INVALID",
+            )
         return data
 
     if data["action"] == "blocked":
-        if (
-            data["question"]
-            or data["branches"]
-            or data["planStrategies"]
-            or data["protectedEntities"]
-        ):
-            raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
+        populated = [
+            f
+            for f in ("question", "branches", "planStrategies", "protectedEntities")
+            if data[f]
+        ]
+        if populated:
+            raise BinaryError(
+                "BINARY_UNUSED_FIELDS",
+                "envelope",
+                detail=f"action='blocked' requires {', '.join(populated)} to be empty.",
+            )
         if not data["note"]:
-            raise BinaryError("BINARY_TEXT_INVALID", "note")
+            raise BinaryError(
+                "BINARY_TEXT_INVALID",
+                "note",
+                detail=(
+                    "action='blocked' requires a non-blank 'note' explaining why no editable "
+                    "path is available."
+                ),
+            )
         return data
 
-    if data["planStrategies"] or data["protectedEntities"]:
-        raise BinaryError("BINARY_UNUSED_FIELDS", "envelope")
+    populated = [f for f in ("planStrategies", "protectedEntities") if data[f]]
+    if populated:
+        raise BinaryError(
+            "BINARY_UNUSED_FIELDS",
+            "envelope",
+            detail=f"action='ask' requires {', '.join(populated)} to be empty [].",
+        )
     if question_count >= 3:
-        raise BinaryError("BINARY_QUESTION_LIMIT", "action")
-    if not data["question"] or len(data["branches"]) != 2:
-        raise BinaryError("BINARY_TWO_BRANCHES_REQUIRED")
+        raise BinaryError(
+            "BINARY_QUESTION_LIMIT",
+            "action",
+            detail=(
+                f"action='ask' is forbidden when questionCount={question_count} >= 3; "
+                "use action='plan' or action='blocked'."
+            ),
+        )
+    if not data["question"]:
+        raise BinaryError(
+            "BINARY_TWO_BRANCHES_REQUIRED",
+            "question",
+            detail="action='ask' requires a non-blank 'question' string.",
+        )
+    if len(data["branches"]) != 2:
+        raise BinaryError(
+            "BINARY_TWO_BRANCHES_REQUIRED",
+            "branches",
+            detail=f"action='ask' requires exactly 2 branches, got {len(data['branches'])}.",
+        )
 
     for index, branch in enumerate(data["branches"]):
+        branch_field = f"branch-{index + 1}"
+        if not isinstance(branch, dict) or set(branch) != {"label", "strategy", "promise"}:
+            got_keys = (
+                sorted(branch.keys()) if isinstance(branch, Mapping) else type(branch).__name__
+            )
+            raise BinaryError(
+                "BINARY_BRANCH_INVALID",
+                branch_field,
+                detail=(
+                    f"{branch_field} must be an object with exact keys "
+                    "['label', 'promise', 'strategy']; "
+                    f"got {got_keys}."
+                ),
+            )
+        if (
+            not isinstance(branch["label"], str)
+            or not branch["label"].strip()
+            or len(branch["label"]) > 240
+        ):
+            raise BinaryError(
+                "BINARY_LABEL_INVALID",
+                f"{branch_field}.label",
+                detail=(
+                    f"{branch_field}.label must be a non-blank string of at most 240 characters."
+                ),
+            )
+        branch["label"] = " ".join(branch["label"].split())
+        _validate_binary_strategy_dict(
+            branch["strategy"],
+            field_prefix=f"{branch_field}.strategy",
+            fallback_code="BINARY_STRATEGY_INVALID",
+        )
         try:
-            if not isinstance(branch, dict) or set(branch) != {"label", "strategy", "promise"}:
-                raise BinaryError("BINARY_BRANCH_INVALID")
-            if (
-                not isinstance(branch["label"], str)
-                or not branch["label"].strip()
-                or len(branch["label"]) > 240
-            ):
-                raise BinaryError("BINARY_LABEL_INVALID")
-            branch["label"] = " ".join(branch["label"].split())
-            plan = parse_revision_plan({"strategies": [branch["strategy"]]})
-            if (
-                set(plan.strategies[0].operators) - EDITABLE_OPERATORS
-                or plan.strategies[0].metric_goals
-            ):
-                raise BinaryError("BINARY_PROTECTED_STRATEGY")
             branch["promise"] = BinaryPromise.model_validate(branch["promise"]).model_dump()
         except (ValueError, TypeError, KeyError) as error:
+            code, detail = _unwrap_binary_error(error, "BINARY_STRATEGY_INVALID")
             raise BinaryError(
-                getattr(error, "code", "BINARY_STRATEGY_INVALID"), f"branch-{index + 1}"
+                code,
+                f"{branch_field}.promise",
+                detail=f"{branch_field}.promise: {detail}",
             ) from error
 
-    if (
-        data["branches"][0]["label"] == data["branches"][1]["label"]
-        or binary_signature(data["branches"][0]["promise"])
-        == binary_signature(data["branches"][1]["promise"])
+    if data["branches"][0]["label"] == data["branches"][1]["label"]:
+        raise BinaryError(
+            "BINARY_DUPLICATE_BRANCHES",
+            "branches",
+            detail=(
+                f"Both branches share the same label {data['branches'][0]['label']!r}; "
+                "branch labels must be distinct."
+            ),
+        )
+    if binary_signature(data["branches"][0]["promise"]) == binary_signature(
+        data["branches"][1]["promise"]
     ):
-        raise BinaryError("BINARY_DUPLICATE_BRANCHES")
+        raise BinaryError(
+            "BINARY_DUPLICATE_BRANCHES",
+            "branches",
+            detail=(
+                f"Both branches share the same normalized promise "
+                f"{data['branches'][0]['promise']}; branch promises must be materially distinct."
+            ),
+        )
     return data
 
 
@@ -365,7 +579,13 @@ def check_promises(
             passed = before > 0 and along >= 3 and before < along and after > before
         else:
             if baseline is None or validation is None:
-                raise BinaryError("BINARY_METRIC_UNVERIFIED")
+                raise BinaryError(
+                    "BINARY_METRIC_UNVERIFIED",
+                    "promise",
+                    detail=(
+                        "shorter_solution promise requires baseline and candidate solver metrics."
+                    ),
+                )
             before = (
                 baseline.get("solutionSteps")
                 if isinstance(baseline, Mapping)
@@ -377,12 +597,29 @@ def check_promises(
                 else validation.solution_steps
             )
             if type(before) is not int or type(after) is not int:
-                raise BinaryError("BINARY_METRIC_UNVERIFIED")
+                raise BinaryError(
+                    "BINARY_METRIC_UNVERIFIED",
+                    "promise",
+                    detail=(
+                        "shorter_solution promise requires integer solutionSteps "
+                        f"(got before={before!r}, after={after!r})."
+                    ),
+                )
             passed = after < before
         outcomes.append({"kind": kind, "passed": bool(passed), "before": before, "after": after})
 
-    if any(not item["passed"] for item in outcomes):
-        raise BinaryError("BINARY_PROMISE_NOT_REALIZED", retryable=False)
+    failed = [item for item in outcomes if not item["passed"]]
+    if failed:
+        summary = "; ".join(
+            f"{item['kind']} (before={item['before']}, after={item['after']})"
+            for item in failed
+        )
+        raise BinaryError(
+            "BINARY_PROMISE_NOT_REALIZED",
+            "promise",
+            retryable=False,
+            detail=f"Candidate did not realize branch promise(s): {summary}.",
+        )
     return outcomes
 
 

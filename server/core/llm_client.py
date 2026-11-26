@@ -447,6 +447,69 @@ def _build_repair_messages(
     return repaired
 
 
+def _strip_schema_titles(node: Any) -> Any:
+    """Recursively strip noisy JSON Schema 'title' metadata while preserving property names."""
+    if isinstance(node, list):
+        return [_strip_schema_titles(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "title":
+            continue
+        if key in {"properties", "$defs", "definitions"} and isinstance(value, dict):
+            out[key] = {
+                child_name: _strip_schema_titles(child_schema)
+                for child_name, child_schema in value.items()
+            }
+        else:
+            out[key] = _strip_schema_titles(value)
+    return out
+
+
+def _normalize_strict_json_schema(node: Any) -> Any:
+    """Ensure every object node satisfies OpenAI strict json_schema rules."""
+    if isinstance(node, list):
+        return [_normalize_strict_json_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "discriminator":
+            continue
+        target_key = "anyOf" if key == "oneOf" else key
+        if key in {"properties", "$defs", "definitions"} and isinstance(value, dict):
+            out[target_key] = {
+                child_name: _normalize_strict_json_schema(child_schema)
+                for child_name, child_schema in value.items()
+            }
+        elif target_key == "anyOf" and target_key in out and isinstance(out[target_key], list):
+            normalized = _normalize_strict_json_schema(value)
+            if isinstance(normalized, list):
+                out[target_key] = [*out[target_key], *normalized]
+            else:
+                out[target_key].append(normalized)
+        else:
+            out[target_key] = _normalize_strict_json_schema(value)
+    if isinstance(out.get("properties"), dict):
+        out["additionalProperties"] = False
+        existing_req = list(out.get("required") or [])
+        req_set = set(existing_req)
+        for prop_name in out["properties"]:
+            if prop_name not in req_set:
+                existing_req.append(prop_name)
+                req_set.add(prop_name)
+        out["required"] = existing_req
+    return out
+
+
+def _prepare_schema_for_mode(schema: dict[str, Any], mode: str) -> dict[str, Any]:
+    """Normalize a Pydantic JSON schema for the active response_format_mode."""
+    if mode in {"json_object", "prompt_only"}:
+        return dict(_strip_schema_titles(schema))
+    return dict(_normalize_strict_json_schema(schema))
+
+
 def _append_schema_to_messages(
     messages: Sequence[Mapping[str, Any]],
     schema: Mapping[str, Any],
@@ -502,10 +565,10 @@ async def call_structured[T: BaseModel](
     if isinstance(default_key, str) and default_key.strip():
         secret_tuple = (*secret_tuple, default_key.strip())
 
-    schema = response_model.model_json_schema()
     response_format_mode = str(
         getattr(transport, "response_format_mode", "json_schema") or "json_schema"
     )
+    schema = _prepare_schema_for_mode(response_model.model_json_schema(), response_format_mode)
     if response_format_mode == "json_object":
         response_format: dict[str, Any] | None = {"type": "json_object"}
         base_messages = _append_schema_to_messages(messages, schema)

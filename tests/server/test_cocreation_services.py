@@ -231,22 +231,13 @@ def _opening_json(msg: str = "Stage 1 ready.") -> str:
     return json.dumps(
         {
             "assistantMessage": msg,
-            "move": "observe_stage",
-            "followUpQuestion": None,
-            "intentDecision": None,
-            "intentConfidence": None,
-            "revisionOffer": None,
-            "disagreement": None,
-            "uiCues": [],
             "coordinateLinks": [],
             "assessment": {
                 "solutionSummary": "Direct push from (3,6) to (3,9).",
                 "difficultyOpinion": "Straightforward layout.",
                 "features": ["Open center"],
                 "suggestions": ["Consider adding a small detour."],
-                "satisfactionQuestion": None,
             },
-            "designContextPatch": None,
         }
     )
 
@@ -261,7 +252,6 @@ def _routing_json(target: str = "ordinary", *, evidence_span: str = "the center"
             "routeTarget": target,
             "evidenceSpan": evidence_span,
             "changes": [],
-            "humanEditEngagement": None,
         }
     )
 
@@ -276,7 +266,6 @@ def _chat_json(
         {
             "assistantMessage": msg,
             "move": "clarify_intent",
-            "followUpQuestion": "Do you prefer a wider center?",
             "intentDecision": (
                 {
                     "classification": "candidate",
@@ -298,14 +287,11 @@ def _chat_json(
                     "cardText": hyp,
                 }
                 if hyp
-                else None
+                else {"classification": "none", "claims": [], "cardText": ""}
             ),
             "intentConfidence": "medium" if hyp else None,
-            "revisionOffer": None,
-            "disagreement": None,
             "uiCues": [],
             "coordinateLinks": [],
-            "assessment": None,
             "designContextPatch": {
                 "goals": [{"text": "Keep route brisk", "evidenceText": msg}],
                 "constraints": [],
@@ -611,12 +597,11 @@ async def test_dialogue_idempotency_binary_proposal_intent_translation_recovery(
                     "effect": "adjust_internal_walls",
                     "focus": {"row": 4, "column": 6, "radius": 1},
                     "operators": ["remove_wall"],
-                    "preserve": ["boxes", "targets", "player"],
+                    "preserve": ["water"],
                     "editBudget": 1,
                 }
             ],
             "protectedEntities": [],
-            "initialRequirements": None,
         }
     )
 
@@ -696,8 +681,27 @@ async def test_dialogue_idempotency_binary_proposal_intent_translation_recovery(
             content="Different message body",
         )
 
-    # Open question + intent feedback
-    ctx = after_chat["progressContexts"][0]
+    # Open question + intent feedback (seed a visible_output question as ordinary chat omits
+    # followUpQuestion unless resolving an active disagreement)
+    from server.domain.memory import add_open_question
+
+    with env["db"].write_tx() as conn:
+        v1_rec = env["sessions_repo"].get_version(sid, v1)
+        assert v1_rec is not None
+        q_ctx = add_open_question(
+            ensure_design_context(v1_rec.design_context),
+            "Do you prefer a wider center?",
+            stage_id=v1,
+            turn_id=after_chat["turns"][-1]["turnId"],
+            source_kind="visible_output",
+        )
+        conn.execute(
+            "UPDATE level_versions SET design_context_json = ? "
+            "WHERE session_id = ? AND version_id = ?",
+            (dump_json(q_ctx.to_wire_dict()), sid, v1),
+        )
+    refreshed_chat = await env["read_model"].get_session_payload(sid)
+    ctx = refreshed_chat["progressContexts"][0]
     q_id = ctx["questionRecords"][0]["questionId"]
     after_q = await env["intent"].submit_question_feedback(
         sid, q_id, access, action="ignore", base_version_id=v1, idempotency_key="qf-1"
@@ -757,8 +761,18 @@ async def test_dialogue_idempotency_binary_proposal_intent_translation_recovery(
         tr_item: dict[str, Any] = {
             "turnId": t["turnId"],
             "body": f"中文:{t['content'][:40]}",
-            "uiCueTexts": [f"提示:{c}" for c in raw_cues],
         }
+        has_structured = bool(
+            raw_cues
+            or g.get("followUpQuestion")
+            or g.get("intentHypothesis")
+            or isinstance(g.get("proposalOffer"), dict)
+            or g.get("proposalQuestion")
+            or g.get("disagreement")
+            or g.get("coordinateLinks")
+        )
+        if has_structured:
+            tr_item["uiCueTexts"] = [f"提示:{c}" for c in raw_cues]
         if g.get("followUpQuestion"):
             tr_item["followUpQuestion"] = "中文追问？"
         if g.get("intentHypothesis"):
@@ -766,7 +780,6 @@ async def test_dialogue_idempotency_binary_proposal_intent_translation_recovery(
         if isinstance(g.get("proposalOffer"), dict):
             offer = g["proposalOffer"]
             if offer.get("summary"):
-                tr_item["proposalSummary"] = "中文提案摘要"
                 tr_item["proposalOfferSummary"] = "中文提案摘要"
             if offer.get("rationale"):
                 tr_item["proposalOfferRationale"] = "中文提案原因"
@@ -781,16 +794,11 @@ async def test_dialogue_idempotency_binary_proposal_intent_translation_recovery(
         if g.get("proposalQuestion"):
             q = g["proposalQuestion"]
             tr_item["proposalQuestion"] = {
-                "questionId": q["questionId"],
-                "topicId": q["topicId"],
-                "baseVersionId": q["baseVersionId"],
                 "question": "中文问题？",
                 "note": "说明",
-                "number": q["number"],
                 "choices": [
                     {
                         "choiceId": c["choiceId"],
-                        "letter": c["letter"],
                         "label": f"选项{c['letter']}",
                     }
                     for c in q["choices"]
@@ -799,7 +807,17 @@ async def test_dialogue_idempotency_binary_proposal_intent_translation_recovery(
         if idx == 0:
             env["transport"].responses.append("{not-json")
         env["transport"].responses.append(json.dumps({"translations": [tr_item]}))
-        env["transport"].responses.append(json.dumps({"accepted": True, "reason": "Verified"}))
+        needs_verify = bool(
+            g.get("proposalQuestion")
+            or (
+                isinstance(g.get("proposalOffer"), dict)
+                and isinstance(g["proposalOffer"].get("proposalPresentation"), dict)
+                and g["proposalOffer"]["proposalPresentation"].get("binaryCompact")
+                and g["proposalOffer"]["proposalPresentation"].get("verifiedActions")
+            )
+        )
+        if needs_verify:
+            env["transport"].responses.append(json.dumps({"accepted": True, "reason": "Verified"}))
     env["transport"].responses.append(recovery_resp)
 
     translated = await env["translation"].translate_turns(
@@ -992,7 +1010,6 @@ async def test_shared_context_patch_resilience_evidence_trail_and_binary_guards(
         {
             "assistantMessage": "Center opening helps push clarity.",
             "move": "clarify_intent",
-            "followUpQuestion": "Confirm widening the center?",
             "intentDecision": {
                 "classification": "candidate",
                 "claims": [
@@ -1013,11 +1030,8 @@ async def test_shared_context_patch_resilience_evidence_trail_and_binary_guards(
                 "cardText": "Keep the center open",
             },
             "intentConfidence": "medium",
-            "revisionOffer": None,
-            "disagreement": None,
             "uiCues": [{"type": "clarification", "text": "Review intent card"}],
             "coordinateLinks": [],
-            "assessment": None,
             "designContextPatch": {
                 "goals": [{"text": "   ", "evidenceText": "Center opening"}],
                 "constraints": [],
@@ -1036,12 +1050,11 @@ async def test_shared_context_patch_resilience_evidence_trail_and_binary_guards(
                     "effect": "adjust_internal_walls",
                     "focus": {"row": 4, "column": 6, "radius": 1},
                     "operators": ["remove_wall"],
-                    "preserve": ["boxes", "targets", "player"],
+                    "preserve": ["water"],
                     "editBudget": 1,
                 }
             ],
             "protectedEntities": [],
-            "initialRequirements": None,
         }
     )
     valid_ops = json.dumps(
@@ -1559,13 +1572,14 @@ async def test_human_edit_engagement_recovery_intent_idempotency_and_partial_tra
             "humanEditEngagement": {"decision": "engage", "evidenceSpan": "Let us discuss"},
         }
     )
+    engage_recovery = json.dumps({"decision": "engage", "evidenceSpan": "Let us discuss"})
     responses: list[Any] = [
         # 1. Active human_edit + routing LLM failure -> body still delivered + recovery enqueued
         UpstreamLLMError("MODEL_UNAVAILABLE", "routing timeout", retryable=True),
         UpstreamLLMError("MODEL_UNAVAILABLE", "routing timeout", retryable=True),
         _chat_json("Got your thoughts on the manual edit."),
         # 2. Recovery retry (human_edit_engagement) succeeds
-        engage_routing,
+        engage_recovery,
         # 3. Direct chat with humanEditEngagement.decision == engage clears disagreement
         engage_routing,
         _chat_json("Great, disagreement resolved."),
@@ -1576,7 +1590,6 @@ async def test_human_edit_engagement_recovery_intent_idempotency_and_partial_tra
         UpstreamLLMError("MODEL_RATE_LIMIT", "rate limited", retryable=True),
         # 5. Partial translation: 1st turn succeeds, 2nd fails -> 1st saved, 2nd kept original
         "",  # populated dynamically
-        json.dumps({"accepted": True, "reason": "Verified"}),
         UpstreamLLMError("MODEL_TIMEOUT", "translation timeout", retryable=True),
         UpstreamLLMError("MODEL_TIMEOUT", "translation timeout", retryable=True),
     ]
@@ -1747,11 +1760,13 @@ async def test_human_edit_engagement_recovery_intent_idempotency_and_partial_tra
     en_turns = [t for t in engaged_res["turns"] if t["language"] != "zh-CN"]
     assert len(en_turns) >= 2
     t0, t1 = en_turns[0], en_turns[1]
-    t0_tr_item = {
+    t0_cues = [f"提示:{c['text']}" for c in (t0["guidance"].get("uiCues") or [])]
+    t0_tr_item: dict[str, Any] = {
         "turnId": t0["turnId"],
         "body": f"中文:{t0['content'][:30]}",
-        "uiCueTexts": [f"提示:{c['text']}" for c in (t0["guidance"].get("uiCues") or [])],
     }
+    if t0_cues or t0["guidance"].get("followUpQuestion"):
+        t0_tr_item["uiCueTexts"] = t0_cues
     if t0["guidance"].get("followUpQuestion"):
         t0_tr_item["followUpQuestion"] = "中文追问？"
     env["transport"].responses[0] = json.dumps({"translations": [t0_tr_item]})
@@ -1849,8 +1864,7 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
         {
             "assistantMessage": "Just chatting about the center.",
             "move": "offer_perspective",
-            "followUpQuestion": None,
-            "intentDecision": None,
+            "intentDecision": {"classification": "none", "claims": [], "cardText": ""},
             "intentConfidence": None,
             "revisionOffer": {
                 "summary": "Rogue offer",
@@ -1862,10 +1876,19 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
                 "preserve": ["boxes", "targets", "player"],
                 "expectedEffect": "Faster",
             },
-            "disagreement": None,
             "uiCues": [],
             "coordinateLinks": [],
-            "assessment": None,
+            "designContextPatch": None,
+        }
+    )
+    clean_ordinary_chat = json.dumps(
+        {
+            "assistantMessage": "Just chatting about the center.",
+            "move": "offer_perspective",
+            "intentDecision": {"classification": "none", "claims": [], "cardText": ""},
+            "intentConfidence": None,
+            "uiCues": [],
+            "coordinateLinks": [],
             "designContextPatch": None,
         }
     )
@@ -1929,6 +1952,7 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
     responses: list[Any] = [
         _routing_json("ordinary", evidence_span="Just chatting"),
         chat_with_rogue_offer,
+        clean_ordinary_chat,
         lambda kw: alt_req.replace('"t"', json.dumps(_extract_turn_id(kw, index=-1))),
         alt_plan,
         alt_ops,
@@ -2151,7 +2175,6 @@ async def test_binary_no_pre_tx_strategy_merge_and_source_language(tmp_path: Pat
                 ],
                 "planStrategies": [],
                 "protectedEntities": [],
-                "initialRequirements": None,
             }
         )
 
@@ -2163,7 +2186,6 @@ async def test_binary_no_pre_tx_strategy_merge_and_source_language(tmp_path: Pat
             "branches": [],
             "planStrategies": [],
             "protectedEntities": [],
-            "initialRequirements": None,
         }
     )
     merged_ops = json.dumps(
@@ -2280,18 +2302,7 @@ async def test_recovery_validation_redaction_single_tx_cancellation_and_replay(
     from server.application.dialogue._shared import generate_safe_failure_analysis
     from server.core.llm_client import LLMValidationError
 
-    bad_engage = json.dumps(
-        {
-            "acts": ["evaluation"],
-            "elements": ["internal_walls"],
-            "mapRelated": True,
-            "directionSufficient": True,
-            "routeTarget": "ordinary",
-            "evidenceSpan": "Let us discuss",
-            "changes": [],
-            "humanEditEngagement": {"decision": "engage", "evidenceSpan": "NOT IN USER TEXT"},
-        }
-    )
+    bad_engage = json.dumps({"decision": "engage", "evidenceSpan": "NOT IN USER TEXT"})
     responses: list[Any] = [
         # 1. Routing fails on active human_edit -> single atomic write_tx
         UpstreamLLMError("MODEL_UNAVAILABLE", "route timeout", retryable=True),
@@ -2299,10 +2310,22 @@ async def test_recovery_validation_redaction_single_tx_cancellation_and_replay(
         _chat_json("Reply delivered despite routing failure."),
         # 2. Recovery fails validation (evidenceSpan mismatch -> LLMValidationError, 1024 tokens)
         bad_engage,
+        bad_engage,
         # 3. Recovery fails with secret in exception -> redacted in lastError
         UpstreamLLMError("UPSTREAM_SERVER_ERROR", "leaked super-secret-key-xyz", retryable=False),
-        # 4. Routing before CancelledError on ordinary handler
-        _routing_json("ordinary", evidence_span="Cancel"),
+        # 4. Routing before CancelledError on ordinary handler (active human_edit still present)
+        json.dumps(
+            {
+                "acts": ["evaluation"],
+                "elements": ["internal_walls"],
+                "mapRelated": True,
+                "directionSufficient": True,
+                "routeTarget": "ordinary",
+                "evidenceSpan": "Cancel",
+                "changes": [],
+                "humanEditEngagement": {"decision": "unchanged", "evidenceSpan": ""},
+            }
+        ),
         # 5. Translation non-retryable LLMError aborts immediately
         UpstreamLLMError("UPSTREAM_AUTHENTICATION_FAILED", "bad key", retryable=False),
     ]

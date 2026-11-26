@@ -43,6 +43,17 @@ import { ensureVisibleTranslations } from "./translationQueue";
 
 let binaryRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
+const BINARY_BUSY_ERROR_CODES = new Set([
+  "BINARY_BUSY",
+  "BINARY_CHOICE_IN_PROGRESS",
+  "CLARIFICATION_IN_PROGRESS",
+]);
+
+const BINARY_STALE_ERROR_CODES = new Set([
+  "STALE_TOPIC",
+  "TOPIC_NOT_FOUND",
+]);
+
 function isBinaryActionCommitted(
   latest: Session | null,
   action: { idempotencyKey?: string; baseVersionId?: string } | null,
@@ -119,6 +130,8 @@ export async function submitBinaryAction(action: PendingBinaryAction): Promise<v
     let err = asStructuredError(error);
     chatError.value = err;
     chatStatus.value = "error";
+    const isBusy = Boolean(err.code && BINARY_BUSY_ERROR_CODES.has(err.code));
+    const isStale = Boolean(err.code && BINARY_STALE_ERROR_CODES.has(err.code));
     try {
       const latest = await api.getSession(sid);
       applySession(latest);
@@ -126,11 +139,11 @@ export async function submitBinaryAction(action: PendingBinaryAction): Promise<v
       chatError.value = err;
       if (isBinaryActionCommitted(latest, action)) {
         clearBinaryPendingState();
-      } else if (!err.retryable && err.code !== "BINARY_BUSY") {
+      } else if (isStale || (!err.retryable && !isBusy)) {
         persistPendingBinary(null);
       }
     } catch {
-      if (!err.retryable && err.code !== "BINARY_BUSY") {
+      if (isStale || (!err.retryable && !isBusy)) {
         persistPendingBinary(null);
       }
     }

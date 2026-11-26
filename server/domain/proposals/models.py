@@ -135,7 +135,7 @@ class BinaryError(ValueError):
         self.field = field
         self.retryable = retryable
         self.detail = detail
-        super().__init__(code)
+        super().__init__(detail or code)
 
 
 class RequirementItem(BaseModel):

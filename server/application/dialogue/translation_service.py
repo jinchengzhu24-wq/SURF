@@ -53,7 +53,6 @@ def _build_translation_item(
     offer = guidance.get("proposalOffer")
     if isinstance(offer, Mapping):
         if offer.get("summary"):
-            item["proposalSummary"] = str(offer["summary"])
             item["proposalOfferSummary"] = str(offer["summary"])
         if offer.get("rationale"):
             item["proposalOfferRationale"] = str(offer["rationale"])
@@ -68,7 +67,7 @@ def _build_translation_item(
 
     if isinstance(guidance.get("proposalQuestion"), Mapping):
         pq = guidance["proposalQuestion"]
-        item["proposalQuestion"] = {
+        pq_source: dict[str, Any] = {
             "questionId": pq.get("questionId"),
             "topicId": pq.get("topicId", ""),
             "baseVersionId": pq.get("baseVersionId", ""),
@@ -84,7 +83,15 @@ def _build_translation_item(
                 for c in (pq.get("choices") or ())
             ],
         }
+        if "selectedChoiceId" in pq:
+            pq_source["selectedChoiceId"] = pq.get("selectedChoiceId")
+        if "status" in pq:
+            pq_source["status"] = pq.get("status")
+        item["proposalQuestion"] = pq_source
     if isinstance(guidance.get("disagreement"), Mapping):
+        # Retain full authoritative disagreement metadata here; build_translation_messages
+        # strips non-translatable IDs/statuses before the LLM call and TranslationPipeline
+        # merges translated text back onto this authoritative object.
         item["disagreement"] = dict(guidance["disagreement"])
     if isinstance(guidance.get("coordinateLinks"), list) and guidance["coordinateLinks"]:
         item["coordinateLinks"] = list(guidance["coordinateLinks"])
@@ -139,7 +146,11 @@ def _apply_translated_guidance(
         tr_guidance["proposalOffer"] = tr_offer
 
     if isinstance(tr.get("proposalQuestion"), Mapping):
-        tr_guidance["proposalQuestion"] = dict(tr["proposalQuestion"])
+        src_pq = src_guidance.get("proposalQuestion")
+        if isinstance(src_pq, Mapping):
+            tr_guidance["proposalQuestion"] = {**src_pq, **tr["proposalQuestion"]}
+        else:
+            tr_guidance["proposalQuestion"] = dict(tr["proposalQuestion"])
     if isinstance(tr.get("disagreement"), Mapping):
         src_dis = src_guidance.get("disagreement")
         if isinstance(src_dis, Mapping):
@@ -241,7 +252,8 @@ class TranslationService:
                     payload = {
                         "body": str(tr.get("body") or ""),
                         "guidance": _apply_translated_guidance(src, tr),
-                        "proposalSummary": tr.get("proposalSummary"),
+                        "proposalSummary": tr.get("proposalOfferSummary")
+                        or tr.get("proposalSummary"),
                         "createdAt": now_iso,
                     }
                     self._dialogue_repo.upsert_turn_translation(

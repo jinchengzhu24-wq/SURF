@@ -176,12 +176,12 @@ def validate_requirement_record(
     snapshot: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Validate an evidence-bound requirement envelope strictly."""
-    if not isinstance(payload, Mapping) or set(payload) != {
-        "requirements",
-        "automaticBindings",
-        "exactTransitions",
-    }:
-        raise ValueError("Requirements need an evidence-bound envelope.")
+    expected_envelope = {"requirements", "automaticBindings", "exactTransitions"}
+    if not isinstance(payload, Mapping) or set(payload) != expected_envelope:
+        got = sorted(payload.keys()) if isinstance(payload, Mapping) else type(payload).__name__
+        raise ValueError(
+            f"Requirements envelope must have exact keys {sorted(expected_envelope)}; got {got}."
+        )
     sources = {str(item["id"]): str(item["content"]) for item in user_turns}
     labels = {
         str(item.get("id") or item.get("label") or "").upper()
@@ -189,7 +189,7 @@ def validate_requirement_record(
     }
     raw_requirements = payload["requirements"]
     if not isinstance(raw_requirements, list) or len(raw_requirements) > 48:
-        raise ValueError("Invalid requirements collection.")
+        raise ValueError("requirements must be a list of at most 48 items.")
 
     required_fields = {
         "component",
@@ -207,31 +207,46 @@ def validate_requirement_record(
     }
     requirements: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for raw in raw_requirements:
-        if (
-            not isinstance(raw, Mapping)
-            or not required_fields.issubset(raw)
-            or set(raw) - required_fields - {"scope", "sourceTurnIds"}
-        ):
-            raise ValueError("Invalid typed requirement.")
+    for idx, raw in enumerate(raw_requirements):
+        prefix = f"requirements[{idx}]"
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{prefix} must be a JSON object.")
+        missing = sorted(required_fields - set(raw))
+        extra = sorted(set(raw) - required_fields - {"scope", "sourceTurnIds"})
+        if missing or extra:
+            parts = []
+            if missing:
+                parts.append(f"missing {missing}")
+            if extra:
+                parts.append(f"unexpected {extra}")
+            raise ValueError(f"{prefix} has invalid fields: {', '.join(parts)}.")
         item = dict(raw)
         scope = item.get("scope", "all")
         if scope not in {"all", "original_cells"}:
-            raise ValueError("Invalid requirement scope.")
+            raise ValueError(
+                f"{prefix}.scope={scope!r} is invalid; allowed values: ['all', 'original_cells']."
+            )
         if scope == "original_cells" and (
             item["property"] != "count" or item["component"] not in {"water", "wall"}
         ):
-            raise ValueError("Original-cell scope is only supported for editable component counts.")
+            raise ValueError(
+                f"{prefix}.scope='original_cells' is only supported for component in "
+                f"('water', 'wall') and property='count'; got component={item['component']!r}, "
+                f"property={item['property']!r}."
+            )
         source_id = item.get("sourceTurnId")
         source = sources.get(source_id) if isinstance(source_id, str) else None
         span = item["evidenceSpan"]
-        if (
-            source is None
-            or not isinstance(span, str)
-            or not span.strip()
-            or span not in source
-        ):
-            raise ValueError("Requirement lacks exact designer evidence.")
+        if source is None:
+            raise ValueError(
+                f"{prefix}.sourceTurnId={source_id!r} does not match any designer turn "
+                f"(valid IDs: {sorted(sources)})."
+            )
+        if not isinstance(span, str) or not span.strip() or span not in source:
+            raise ValueError(
+                f"{prefix}.evidenceSpan={span!r} is not an exact verbatim substring of "
+                f"turn {source_id!r}."
+            )
         if "sourceTurnIds" in item:
             raw_turn_ids = item["sourceTurnIds"]
             if (
@@ -241,38 +256,62 @@ def validate_requirement_record(
                 or source_id not in raw_turn_ids
             ):
                 raise ValueError(
-                    "Requirement sourceTurnIds must reference existing designer turns."
+                    f"{prefix}.sourceTurnIds={raw_turn_ids!r} must reference existing designer "
+                    f"turns (valid IDs: {sorted(sources)}) and include {source_id!r}."
                 )
             deduped_ids = list(dict.fromkeys(raw_turn_ids))
             if len(deduped_ids) > 1:
                 item["sourceTurnIds"] = deduped_ids
             else:
                 item.pop("sourceTurnIds", None)
-        if (
-            item["component"] not in REQ_COMPONENTS
-            or item["property"] not in REQ_PROPERTIES
-            or item["relation"] not in REQ_RELATIONS
-        ):
-            raise ValueError("Unsupported requirement attribute.")
+        if item["component"] not in REQ_COMPONENTS:
+            raise ValueError(
+                f"{prefix}.component={item['component']!r} is unsupported; "
+                f"allowed: {sorted(REQ_COMPONENTS)}."
+            )
+        if item["property"] not in REQ_PROPERTIES:
+            raise ValueError(
+                f"{prefix}.property={item['property']!r} is unsupported; "
+                f"allowed: {sorted(REQ_PROPERTIES)}."
+            )
+        if item["relation"] not in REQ_RELATIONS:
+            raise ValueError(
+                f"{prefix}.relation={item['relation']!r} is unsupported; "
+                f"allowed: {sorted(REQ_RELATIONS)}."
+            )
         if item["strength"] not in {"invariant", "goal", "preference"}:
-            raise ValueError("Invalid requirement strength.")
-        if not isinstance(item["entities"], list) or any(
-            not isinstance(x, str) or x.upper() not in labels for x in item["entities"]
-        ):
-            raise ValueError("Requirement references an unknown current entity.")
+            raise ValueError(
+                f"{prefix}.strength={item['strength']!r} is invalid; "
+                "allowed: ['goal', 'invariant', 'preference']."
+            )
+        if not isinstance(item["entities"], list):
+            raise ValueError(f"{prefix}.entities must be a list.")
+        unknown_entities = [
+            x for x in item["entities"] if not isinstance(x, str) or x.upper() not in labels
+        ]
+        if unknown_entities:
+            raise ValueError(
+                f"{prefix}.entities references unknown entity {unknown_entities!r}; "
+                f"available snapshot entities: {sorted(labels)}."
+            )
         item["entities"] = list(dict.fromkeys(x.upper() for x in item["entities"]))
         value = item["value"]
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, int) or value < 0
         ):
-            raise ValueError("Requirement value must be an explicit nonnegative integer.")
-        if item["unit"] not in {"absolute", "delta", "none"} or not isinstance(
-            item["focused"], bool
-        ):
-            raise ValueError("Invalid value unit or focus.")
+            raise ValueError(
+                f"{prefix}.value={value!r} must be a nonnegative integer or null."
+            )
+        if item["unit"] not in {"absolute", "delta", "none"}:
+            raise ValueError(
+                f"{prefix}.unit={item['unit']!r} is invalid; "
+                "allowed: ['absolute', 'delta', 'none']."
+            )
+        if not isinstance(item["focused"], bool):
+            raise ValueError(f"{prefix}.focused must be a boolean.")
         if item["unit"] == "delta" and item["relation"] in {"increase", "decrease"} and value == 0:
             raise ValueError(
-                "Delta increase/decrease requirements must have a positive value."
+                f"{prefix}: delta {item['relation']!r} requirement must have value >= 1, got 0."
             )
         if value is not None:
             without_labels = re.sub(
@@ -284,39 +323,60 @@ def validate_requirement_record(
                 and not (value == 2 and "二" in without_labels)
             ):
                 raise ValueError(
-                    "Numeric requirement is not supported by designer evidence."
+                    f"{prefix}: numeric value={value} is not explicitly stated in "
+                    f"evidenceSpan={span!r}; set value=null and unit='none' for qualitative wishes."
                 )
         priority_span = item["priorityEvidenceSpan"]
         if not isinstance(priority_span, str) or (priority_span and priority_span not in source):
-            raise ValueError("Priority lacks exact designer evidence.")
+            raise ValueError(
+                f"{prefix}.priorityEvidenceSpan={priority_span!r} is not an exact substring of "
+                f"turn {source_id!r}."
+            )
         if not isinstance(item["statement"], str) or not item["statement"].strip():
-            raise ValueError("Requirement needs a readable statement.")
+            raise ValueError(f"{prefix}.statement must be a non-blank string.")
         item["statement"] = item["statement"].strip()[:400]
         prop, relation = item["property"], item["relation"]
         if item["strength"] == "invariant" and not (
             (prop in {"count", "positions", "distribution"} and relation in {"preserve", "equal"})
             or (prop == "change_scope" and value is not None)
         ):
-            raise ValueError("A directional goal cannot become an immutable constraint.")
+            raise ValueError(
+                f"{prefix}: strength='invariant' is invalid for property={prop!r}, "
+                f"relation={relation!r}; directional goals must use strength='goal'."
+            )
         if (
             prop in {"count", "positions", "distribution", "distance"}
             and item["component"] == "gameplay"
         ):
-            raise ValueError("Map attribute needs an actual map component.")
+            raise ValueError(
+                f"{prefix}: component='gameplay' cannot use map property {prop!r}; "
+                "use a map component ('water', 'wall', 'player', 'box', 'target')."
+            )
         if prop in REQ_METRICS and relation not in PROPERTY_RELATIONS[prop]:
-            raise ValueError("Metric direction is invalid.")
+            raise ValueError(
+                f"{prefix}: metric property {prop!r} does not allow relation={relation!r}; "
+                f"allowed: {sorted(PROPERTY_RELATIONS[prop])}."
+            )
         if (
             prop in {"count", "distribution", "change_scope"}
             and relation not in PROPERTY_RELATIONS[prop]
         ):
-            raise ValueError("Numeric map attribute needs a numeric relation.")
+            raise ValueError(
+                f"{prefix}: numeric property {prop!r} does not allow relation={relation!r}; "
+                f"allowed: {sorted(PROPERTY_RELATIONS[prop])}."
+            )
         if prop == "distance" and relation not in PROPERTY_RELATIONS[prop]:
-            raise ValueError("Distance needs a distance relation.")
+            raise ValueError(
+                f"{prefix}: property='distance' does not allow relation={relation!r}; "
+                f"allowed: {sorted(PROPERTY_RELATIONS[prop])}."
+            )
         if prop == "appearance" and (
             relation not in PROPERTY_RELATIONS[prop] or value is not None or item["unit"] != "none"
         ):
             raise ValueError(
-                "Qualitative appearance uses seek/avoid without numeric units or values."
+                f"{prefix}: property='appearance' requires relation in ['avoid', 'seek'] with "
+                f"value=null and unit='none'; got relation={relation!r}, value={value!r}, "
+                f"unit={item['unit']!r}."
             )
 
         identity = json.dumps(
@@ -376,22 +436,31 @@ def validate_requirement_record(
         requirements.append(item)
 
     bindings = payload["automaticBindings"]
-    if not isinstance(bindings, list) or any(
-        not isinstance(x, Mapping)
-        or set(x) != {"entity", "reason"}
-        or not isinstance(x.get("entity"), str)
-        or x["entity"].upper() not in labels
-        or not isinstance(x["reason"], str)
-        for x in bindings
-    ):
-        raise ValueError("Automatic binding must reference the current snapshot.")
+    if not isinstance(bindings, list):
+        raise ValueError("automaticBindings must be a list.")
+    for b_idx, binding in enumerate(bindings):
+        if not isinstance(binding, Mapping) or set(binding) != {"entity", "reason"}:
+            raise ValueError(
+                f"automaticBindings[{b_idx}] must be an object with keys ['entity', 'reason']."
+            )
+        if not isinstance(binding.get("entity"), str) or binding["entity"].upper() not in labels:
+            raise ValueError(
+                f"automaticBindings[{b_idx}].entity={binding.get('entity')!r} is not in current "
+                f"snapshot entities {sorted(labels)}."
+            )
+        if not isinstance(binding["reason"], str) or not binding["reason"].strip():
+            raise ValueError(f"automaticBindings[{b_idx}].reason must be a non-blank string.")
     if bindings and not any(not r["entities"] for r in requirements):
-        raise ValueError("Automatic binding needs an unspecified goal.")
+        raise ValueError(
+            "automaticBindings must be empty [] when every requirement already specifies entities "
+            "(or when requirements is empty)."
+        )
 
     transitions = payload["exactTransitions"]
     if not isinstance(transitions, list) or len(transitions) > 12:
-        raise ValueError("Invalid exact transitions.")
-    for transition in transitions:
+        raise ValueError("exactTransitions must be a list of at most 12 items.")
+    for t_idx, transition in enumerate(transitions):
+        t_prefix = f"exactTransitions[{t_idx}]"
         if not isinstance(transition, Mapping) or set(transition) != {
             "row",
             "column",
@@ -400,7 +469,10 @@ def validate_requirement_record(
             "sourceTurnId",
             "evidenceSpan",
         }:
-            raise ValueError("Invalid exact transition evidence.")
+            raise ValueError(
+                f"{t_prefix} must have exact keys "
+                "['column', 'evidenceSpan', 'from', 'row', 'sourceTurnId', 'to']."
+            )
         span = transition["evidenceSpan"]
         if (
             not isinstance(transition.get("sourceTurnId"), str)
@@ -408,7 +480,10 @@ def validate_requirement_record(
             or not span
             or span not in sources.get(transition["sourceTurnId"], "")
         ):
-            raise ValueError("Exact transition lacks designer evidence.")
+            raise ValueError(
+                f"{t_prefix}: evidenceSpan={span!r} is not a verbatim substring of "
+                f"sourceTurnId={transition.get('sourceTurnId')!r}."
+            )
         r, c = transition["row"], transition["column"]
         if (
             type(r) is not int
@@ -416,13 +491,21 @@ def validate_requirement_record(
             or not re.search(rf"(?<!\d){r}(?!\d)", span)
             or not re.search(rf"(?<!\d){c}(?!\d)", span)
         ):
-            raise ValueError("Exact coordinates lack designer evidence.")
-        if (
-            transition["from"] not in {".", "#", "@"}
-            or transition["to"] not in {".", "#", "@"}
-            or transition["from"] == transition["to"]
-        ):
-            raise ValueError("Exact transition outside editable tile types.")
+            raise ValueError(
+                f"{t_prefix}: coordinates ({r}, {c}) are not explicitly stated in "
+                f"evidenceSpan={span!r}."
+            )
+        if transition["from"] not in {".", "#", "@"} or transition["to"] not in {".", "#", "@"}:
+            raise ValueError(
+                f"{t_prefix} at ({r}, {c}) uses non-editable tile(s) "
+                f"from={transition['from']!r}, to={transition['to']!r}; "
+                "only '.', '#', '@' are editable."
+            )
+        if transition["from"] == transition["to"]:
+            raise ValueError(
+                f"{t_prefix} at ({r}, {c}) has identical 'from' and 'to' tile "
+                f"{transition['from']!r}; 'from' and 'to' must differ."
+            )
 
     return {
         "policyVersion": POLICY_VERSION,

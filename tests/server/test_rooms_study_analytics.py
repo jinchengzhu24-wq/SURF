@@ -876,22 +876,13 @@ async def test_assess_version_human_edit_review_idempotency_sweep_and_cas(
     opening_resp = json.dumps(
         {
             "assistantMessage": "Stage 1 ready.",
-            "move": "observe_stage",
-            "followUpQuestion": None,
-            "intentDecision": None,
-            "intentConfidence": None,
-            "revisionOffer": None,
-            "disagreement": None,
-            "uiCues": [],
             "coordinateLinks": [],
             "assessment": {
                 "solutionSummary": "Solvable.",
                 "difficultyOpinion": "Manageable.",
                 "features": ["Open"],
                 "suggestions": ["Test"],
-                "satisfactionQuestion": None,
             },
-            "designContextPatch": None,
         }
     )
     conflict_resp = json.dumps(
@@ -913,7 +904,6 @@ async def test_assess_version_human_edit_review_idempotency_sweep_and_cas(
                 "difficultyOpinion": "Tighter center.",
                 "features": ["Center wall"],
                 "suggestions": ["Compare routes"],
-                "satisfactionQuestion": None,
             },
             "reviewMessage": "This edit adds a center wall opposite to keeping center open.",
             "conflict": {

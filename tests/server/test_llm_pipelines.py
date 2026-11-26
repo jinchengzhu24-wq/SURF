@@ -87,25 +87,34 @@ class FakeAsyncTransport:
         )
 
 
+def _opening_payload(
+    message: str,
+    *,
+    assessment: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "assistantMessage": message,
+        "coordinateLinks": [],
+        "assessment": assessment,
+    }
+
+
 def _chat_payload(
     message: str,
     *,
     move: str = "offer_perspective",
     intent_decision: dict[str, Any] | None = None,
     intent_confidence: str | None = None,
-    assessment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "assistantMessage": message,
         "move": move,
-        "followUpQuestion": None,
-        "intentDecision": intent_decision,
+        "intentDecision": intent_decision
+        if intent_decision is not None
+        else {"classification": "none", "claims": [], "cardText": ""},
         "intentConfidence": intent_confidence,
-        "revisionOffer": None,
-        "disagreement": None,
         "uiCues": [],
         "coordinateLinks": [],
-        "assessment": assessment,
         "designContextPatch": None,
     }
 
@@ -120,15 +129,13 @@ async def test_chat_pipeline_stage_opening_and_ordinary_structured_json() -> Non
     grid = parse_grid(SAMPLE_ROWS)
     transport = FakeAsyncTransport(
         [
-            _chat_payload(
+            _opening_payload(
                 "This Stage keeps P near B1 with an open lane toward T1.",
-                move="observe_stage",
                 assessment={
                     "solutionSummary": "Cleanly solvable.",
                     "difficultyOpinion": "In my view this feels approachable.",
                     "features": ["Central wall and water"],
                     "suggestions": ["Try the top push first"],
-                    "satisfactionQuestion": None,
                 },
             ),
             _chat_payload(
@@ -241,7 +248,6 @@ async def test_understanding_pipeline_routing_manual_edit_and_challenge() -> Non
                         "evidenceSpan": "move B1 right",
                     }
                 ],
-                "humanEditEngagement": None,
             },
             {
                 "comparisons": [
@@ -259,7 +265,6 @@ async def test_understanding_pipeline_routing_manual_edit_and_challenge() -> Non
                     "difficultyOpinion": "In my view tighter now.",
                     "features": ["Central obstacle"],
                     "suggestions": ["Compare the opening move"],
-                    "satisfactionQuestion": None,
                 },
                 "reviewMessage": "This edit adds a barrier where you earlier wanted open space.",
                 "conflict": {
@@ -446,26 +451,13 @@ async def test_binary_discovery_pipeline_ask_preflight_and_protected_refusal() -
                             "effect": "open_route",
                             "focus": None,
                             "operators": ["remove_wall"],
-                            "preserve": [
-                                "outer_shell",
-                                "player",
-                                "boxes",
-                                "targets",
-                                "water",
-                                "unrelated_areas",
-                            ],
+                            "preserve": ["water"],
                             "editBudget": 2,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "internal_walls",
                             "focus": None,
-                            "corridor": None,
                         },
                     },
                     {
@@ -474,26 +466,13 @@ async def test_binary_discovery_pipeline_ask_preflight_and_protected_refusal() -
                             "effect": "open_route",
                             "focus": None,
                             "operators": ["remove_water"],
-                            "preserve": [
-                                "outer_shell",
-                                "player",
-                                "boxes",
-                                "targets",
-                                "walls",
-                                "unrelated_areas",
-                            ],
+                            "preserve": ["walls"],
                             "editBudget": 2,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "water",
                             "focus": None,
-                            "corridor": None,
                         },
                     },
                 ],
@@ -589,18 +568,12 @@ async def test_translation_pipeline_independent_generation_and_verification_budg
                 "body": "请先选择清理哪个障碍。",
                 "uiCueTexts": [],
                 "proposalQuestion": {
-                    "questionId": "q1",
-                    "topicId": "top1",
-                    "baseVersionId": "v1",
                     "question": "先清理哪一类障碍？",
                     "note": "两者都保持地图可解。",
-                    "number": 1,
                     "choices": [
-                        {"choiceId": "c1", "letter": "A", "label": "清理中间内墙"},
-                        {"choiceId": "c2", "letter": "B", "label": "清理中间水域"},
+                        {"choiceId": "c1", "label": "清理中间内墙"},
+                        {"choiceId": "c2", "label": "清理中间水域"},
                     ],
-                    "selectedChoiceId": None,
-                    "status": "pending",
                 },
             }
         ]
@@ -984,8 +957,8 @@ async def test_normalize_requirement_record_prunes_protected_invariants_in_compi
 async def test_chat_pipeline_strips_unbound_revision_offer_in_ordinary_chat() -> None:
     clock = FakeClock()
     grid = parse_grid(SAMPLE_ROWS)
-    payload = _chat_payload("We can open the center lane.")
-    payload["revisionOffer"] = {
+    bad_payload = _chat_payload("We can open the center lane.")
+    bad_payload["revisionOffer"] = {
         "summary": "Remove center wall",
         "rationale": "Clears the middle passage.",
         "objective": "Open lane",
@@ -995,13 +968,15 @@ async def test_chat_pipeline_strips_unbound_revision_offer_in_ordinary_chat() ->
         "preserve": ["boxes", "targets", "player"],
         "expectedEffect": "Shorter route",
     }
-    transport = FakeAsyncTransport([payload])
+    clean_payload = _chat_payload("We can open the center lane.")
+    transport = FakeAsyncTransport([bad_payload, clean_payload])
     pipeline = ChatPipeline(transport, model="kimi-k2.6", clock=clock)
     reply = await pipeline.generate_chat_reply(
         conversation=[{"role": "user", "content": "Any thoughts?"}],
         grid_or_rows=grid,
         language="en",
     )
+    assert reply.attempts_used == 2
     assert reply.guidance["proposalOffer"] is None
     assert transport.calls[0]["max_tokens"] == 3200
 
@@ -1027,19 +1002,13 @@ async def test_binary_discovery_merges_strategies_normalizes_reqs_checks_lang_an
                             "effect": "open_route",
                             "focus": {"row": 4, "column": 6, "radius": 1},
                             "operators": ["remove_wall"],
-                            "preserve": ["water", "boxes", "targets", "player"],
+                            "preserve": ["water"],
                             "editBudget": 1,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "internal_walls",
                             "focus": {"row": 4, "column": 6, "radius": 1},
-                            "corridor": None,
                         },
                     },
                     {
@@ -1048,19 +1017,13 @@ async def test_binary_discovery_merges_strategies_normalizes_reqs_checks_lang_an
                             "effect": "open_route",
                             "focus": {"row": 5, "column": 6, "radius": 1},
                             "operators": ["remove_water"],
-                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "preserve": ["walls"],
                             "editBudget": 1,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "water",
                             "focus": {"row": 5, "column": 6, "radius": 1},
-                            "corridor": None,
                         },
                     },
                 ],
@@ -1099,19 +1062,13 @@ async def test_binary_discovery_merges_strategies_normalizes_reqs_checks_lang_an
                             "effect": "open_route",
                             "focus": {"row": 4, "column": 6, "radius": 1},
                             "operators": ["remove_wall"],
-                            "preserve": ["water", "boxes", "targets", "player"],
+                            "preserve": ["water"],
                             "editBudget": 1,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "internal_walls",
                             "focus": {"row": 4, "column": 6, "radius": 1},
-                            "corridor": None,
                         },
                     },
                     {
@@ -1120,19 +1077,13 @@ async def test_binary_discovery_merges_strategies_normalizes_reqs_checks_lang_an
                             "effect": "open_route",
                             "focus": {"row": 5, "column": 6, "radius": 1},
                             "operators": ["remove_water"],
-                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "preserve": ["walls"],
                             "editBudget": 1,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "water",
                             "focus": {"row": 5, "column": 6, "radius": 1},
-                            "corridor": None,
                         },
                     },
                 ],
@@ -1228,19 +1179,13 @@ async def test_binary_discovery_merges_strategies_normalizes_reqs_checks_lang_an
                             "effect": "open_route",
                             "focus": {"row": 5, "column": 6, "radius": 1},
                             "operators": ["remove_water"],
-                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "preserve": ["walls"],
                             "editBudget": 1,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "water",
                             "focus": {"row": 5, "column": 6, "radius": 1},
-                            "corridor": None,
                         },
                     },
                     {
@@ -1249,25 +1194,18 @@ async def test_binary_discovery_merges_strategies_normalizes_reqs_checks_lang_an
                             "effect": "open_route",
                             "focus": None,
                             "operators": ["remove_water"],
-                            "preserve": ["walls", "boxes", "targets", "player"],
+                            "preserve": ["walls"],
                             "editBudget": 2,
-                            "metricGoals": [],
-                            "requiredTransitions": [],
-                            "anchorEntities": [],
-                            "playObjective": None,
-                            "displayReason": None,
                         },
                         "promise": {
                             "kind": "reduce_obstacles",
                             "component": "water",
                             "focus": None,
-                            "corridor": None,
                         },
                     },
                 ],
                 "planStrategies": [],
                 "protectedEntities": [],
-                "initialRequirements": None,
             }
         ]
     )
@@ -1315,7 +1253,18 @@ async def test_proposal_pipeline_merges_mutually_exclusive_branches_and_enforces
                         ],
                     }
                 ]
-            }
+            },
+            {
+                "candidates": [
+                    {
+                        "strategyIndex": 1,
+                        "rationale": "Retry still removes only wall",
+                        "operations": [
+                            {"row": 4, "column": 6, "op": "remove_wall", "from": "#", "to": "."}
+                        ],
+                    }
+                ]
+            },
         ]
     )
     pipeline = ProposalPipeline(t, model="kimi-k2.6", clock=clock)
@@ -1400,6 +1349,17 @@ async def test_proposal_pipeline_merges_mutually_exclusive_branches_and_enforces
                     }
                 ]
             },
+            {
+                "candidates": [
+                    {
+                        "strategyIndex": 1,
+                        "rationale": "Retry still touches wall even though walls preserved",
+                        "operations": [
+                            {"row": 4, "column": 6, "op": "remove_wall", "from": "#", "to": "."}
+                        ],
+                    }
+                ]
+            },
         ]
     )
     p_pres = ProposalPipeline(t_pres, model="kimi-k2.6", clock=clock)
@@ -1453,7 +1413,6 @@ async def test_pipeline_max_tokens_budgets() -> None:
                 "routeTarget": "ordinary",
                 "evidenceSpan": "center",
                 "changes": [],
-                "humanEditEngagement": None,
             },
             {
                 "comparisons": [

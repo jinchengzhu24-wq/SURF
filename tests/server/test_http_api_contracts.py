@@ -569,8 +569,28 @@ async def test_cocreation_api_parity_demo_ttl_and_full_dialogue_stage_contracts(
         assert msg1_conflict.status_code == 409
         assert msg1_conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
 
-        # Question & intent-hypothesis feedback
-        v3_ctx = next(pc for pc in msg1.json()["progressContexts"] if pc["versionId"] == v3)
+        # Question & intent-hypothesis feedback (seed a visible_output open question as ordinary
+        # chat omits followUpQuestion unless resolving an active disagreement)
+        from server.domain.memory import add_open_question, ensure_design_context
+        from server.persistence.database import dump_json
+
+        with bundle.container.db.write_tx() as conn:
+            v3_rec = bundle.container.sessions_repo.get_version(sid, v3)
+            assert v3_rec is not None
+            q_ctx = add_open_question(
+                ensure_design_context(v3_rec.design_context),
+                "Do you prefer a wider center?",
+                stage_id=v3,
+                turn_id=msg1.json()["turns"][-1]["turnId"],
+                source_kind="visible_output",
+            )
+            conn.execute(
+                "UPDATE level_versions SET design_context_json = ? "
+                "WHERE session_id = ? AND version_id = ?",
+                (dump_json(q_ctx.to_wire_dict()), sid, v3),
+            )
+        refreshed_v3 = (await client.get(f"/api/sessions/{sid}")).json()
+        v3_ctx = next(pc for pc in refreshed_v3["progressContexts"] if pc["versionId"] == v3)
         q_id = v3_ctx["questionRecords"][0]["questionId"]
         qf = await client.post(
             f"/api/sessions/{sid}/questions/{q_id}/feedback",
@@ -690,15 +710,26 @@ async def test_cocreation_api_parity_demo_ttl_and_full_dialogue_stage_contracts(
         turn_ids = [t["turnId"] for t in pending_turns]
         for turn in pending_turns:
             g = turn["guidance"]
+            raw_cues = [
+                f"提示:{i}"
+                for i, cue in enumerate(g.get("uiCues") or [])
+                if isinstance(cue, dict) and str(cue.get("text") or "").strip()
+            ]
+            has_structured = bool(
+                raw_cues
+                or str(g.get("followUpQuestion") or "").strip()
+                or g.get("intentHypothesis")
+                or isinstance(g.get("proposalOffer"), dict)
+                or isinstance(g.get("proposalQuestion"), dict)
+                or isinstance(g.get("disagreement"), dict)
+                or g.get("coordinateLinks")
+            )
             tr_item: dict[str, object] = {
                 "turnId": turn["turnId"],
                 "body": f"中文:{turn['content'][:40]}",
-                "uiCueTexts": [
-                    f"提示:{i}"
-                    for i, cue in enumerate(g.get("uiCues") or [])
-                    if isinstance(cue, dict) and str(cue.get("text") or "").strip()
-                ],
             }
+            if has_structured:
+                tr_item["uiCueTexts"] = raw_cues
             if str(g.get("followUpQuestion") or "").strip():
                 tr_item["followUpQuestion"] = "中文追问？"
             if g.get("intentHypothesis"):
@@ -707,7 +738,6 @@ async def test_cocreation_api_parity_demo_ttl_and_full_dialogue_stage_contracts(
             needs_verify = False
             if isinstance(offer, dict):
                 if offer.get("summary"):
-                    tr_item["proposalSummary"] = "中文提案摘要"
                     tr_item["proposalOfferSummary"] = "中文提案摘要"
                 if offer.get("rationale"):
                     tr_item["proposalOfferRationale"] = "中文理由"
@@ -725,16 +755,11 @@ async def test_cocreation_api_parity_demo_ttl_and_full_dialogue_stage_contracts(
             if isinstance(g.get("proposalQuestion"), dict):
                 pq_src = g["proposalQuestion"]
                 tr_item["proposalQuestion"] = {
-                    "questionId": pq_src["questionId"],
-                    "topicId": pq_src.get("topicId", ""),
-                    "baseVersionId": pq_src.get("baseVersionId", ""),
                     "question": "中文问题？",
                     "note": "说明" if pq_src.get("note") else "",
-                    "number": pq_src.get("number", 1),
                     "choices": [
                         {
                             "choiceId": ch["choiceId"],
-                            "letter": ch["letter"],
                             "label": f"选项{ch['letter']}",
                         }
                         for ch in (pq_src.get("choices") or [])

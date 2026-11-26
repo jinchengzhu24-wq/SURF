@@ -138,6 +138,49 @@ export function formatValidationDetails(
 
 const GROUPED_ERROR_KEYS: ReadonlyArray<readonly [TranslationKey, readonly string[]]> = [
   [
+    "errors.BINARY_STEP_FAILED",
+    [
+      "BINARY_PROTECTED_STRATEGY",
+      "BINARY_METRIC_GOALS_FORBIDDEN",
+      "BINARY_STRATEGY_INVALID",
+      "BINARY_PLAN_STRATEGY_INVALID",
+      "BINARY_UNUSED_FIELDS",
+      "BINARY_ENVELOPE_INVALID",
+      "BINARY_ACTION_INVALID",
+      "BINARY_TEXT_INVALID",
+      "BINARY_PROTECTED_ENTITIES_REQUIRED",
+      "BINARY_QUESTION_LIMIT",
+      "BINARY_TWO_BRANCHES_REQUIRED",
+      "BINARY_BRANCH_INVALID",
+      "BINARY_LABEL_INVALID",
+      "BINARY_DUPLICATE_BRANCHES",
+      "BINARY_CORRIDOR_INVALID",
+      "BINARY_CORRIDOR_UNEXPECTED",
+      "BINARY_METRIC_UNVERIFIED",
+      "BINARY_ALREADY_SELECTED_DIRECTION",
+      "BINARY_INITIAL_REQUIREMENTS_REQUIRED",
+      "BINARY_INITIAL_REQUIREMENTS_INVALID",
+      "BINARY_INITIAL_REQUIREMENTS_LOCKED",
+      "BINARY_PREFLIGHT_NOT_FOUND",
+    ],
+  ],
+  [
+    "errors.ACTION_IN_PROGRESS",
+    [
+      "MESSAGE_IN_PROGRESS",
+      "BINARY_CHOICE_IN_PROGRESS",
+      "CLARIFICATION_IN_PROGRESS",
+      "PROPOSAL_DECISION_IN_PROGRESS",
+      "QUESTION_FEEDBACK_IN_PROGRESS",
+      "INTENT_FEEDBACK_IN_PROGRESS",
+      "SAVE_IN_PROGRESS",
+      "RESTORE_IN_PROGRESS",
+      "ASSESSMENT_IN_PROGRESS",
+      "FINALIZE_IN_PROGRESS",
+      "RECOVERY_IN_PROGRESS",
+    ],
+  ],
+  [
     "errors.REPLY_FAILED",
     [
       "UPSTREAM_TIMEOUT",
@@ -159,6 +202,24 @@ const GROUPED_ERROR_KEYS: ReadonlyArray<readonly [TranslationKey, readonly strin
       "CHALLENGE_REVIEW_FAILED",
       "NETWORK_ERROR",
       "INVALID_JSON",
+      "EMPTY_BODY",
+      "GROUNDING_MISMATCH",
+      "INTERNAL_TOKEN_LEAK",
+      "EVIDENCE_SPAN_MISMATCH",
+      "CHANGE_EVIDENCE_MISMATCH",
+      "ENGAGEMENT_EVIDENCE_MISMATCH",
+      "DIRECTION_SLOTS_MISMATCH",
+      "CONFLICT_CARD_REQUIRED",
+      "CONFLICT_CARD_FORBIDDEN",
+      "REVIEW_MUST_BE_DECLARATIVE",
+      "CONFLICT_QUESTION_COUNT",
+      "REQUIREMENT_PREFLIGHT_CONFLICT",
+      "MAP_OPERATIONS_INVALID",
+      "LEVEL_PLAN_INVALID",
+      "DG_GUIDE_INVALID",
+      "DG_DIFFICULTY_RULE_VIOLATION",
+      "DG_LAYOUT_RULE_VIOLATION",
+      "DG_SUMMARY_INVALID",
     ],
   ],
   [
@@ -177,8 +238,14 @@ const GROUPED_ERROR_KEYS: ReadonlyArray<readonly [TranslationKey, readonly strin
       "INVALID_CARD_SOURCE",
       "PROPOSAL_STALE",
       "STALE_PROPOSAL",
+      "PROPOSAL_NOT_FOUND",
+      "TOPIC_NOT_FOUND",
+      "STALE_TOPIC",
+      "CHALLENGE_NOT_FOUND",
+      "CHALLENGE_NOT_READY",
       "TURN_NOT_FOUND",
       "STALE_REVISION_BINDING",
+      "INVALID_REVISION_BINDING",
       "UNBOUND_REVISION",
     ],
   ],
@@ -192,6 +259,45 @@ function lookupExactErrorKey(code: string | undefined): TranslationKey | null {
   if (!code) return null;
   const candidate = `errors.${code}` as TranslationKey;
   return Object.prototype.hasOwnProperty.call(en, candidate) ? candidate : null;
+}
+
+function lookupGroupedErrorKey(code: string | undefined): TranslationKey | null {
+  if (!code) return null;
+  for (const [groupKey, codes] of GROUPED_ERROR_KEYS) {
+    if (codes.includes(code)) {
+      return groupKey;
+    }
+  }
+  return null;
+}
+
+function lookupPatternErrorKey(code: string | undefined): TranslationKey | null {
+  if (!code) return null;
+  if (code.startsWith("BINARY_")) return "errors.BINARY_STEP_FAILED";
+  if (code.startsWith("TRANSLATION_")) return "errors.REPLY_FAILED";
+  if (code.endsWith("_IN_PROGRESS")) return "errors.ACTION_IN_PROGRESS";
+  return null;
+}
+
+function resolveBaseErrorKey(
+  code: string | undefined,
+  preferGrouped = false,
+): TranslationKey {
+  if (!code) return "errors.GENERIC";
+  if (preferGrouped) {
+    return (
+      lookupGroupedErrorKey(code) ??
+      lookupExactErrorKey(code) ??
+      lookupPatternErrorKey(code) ??
+      "errors.GENERIC"
+    );
+  }
+  return (
+    lookupExactErrorKey(code) ??
+    lookupGroupedErrorKey(code) ??
+    lookupPatternErrorKey(code) ??
+    "errors.GENERIC"
+  );
 }
 
 /**
@@ -216,14 +322,7 @@ export function localizeError(
     return t(language, "proposalPreconditionFailed");
   }
 
-  for (const [groupKey, codes] of GROUPED_ERROR_KEYS) {
-    if (error.code && codes.includes(error.code)) {
-      return t(language, groupKey);
-    }
-  }
-
-  const exactKey = lookupExactErrorKey(error.code);
-  const baseMessage = exactKey ? t(language, exactKey) : t(language, "errors.GENERIC");
+  const baseMessage = t(language, resolveBaseErrorKey(error.code, true));
   const details = formatValidationDetails(language, error);
   return details ? `${baseMessage} ${details}` : baseMessage;
 }
@@ -256,8 +355,7 @@ export function formatTechnicalError(
             ? t(language, "proposalAlreadyExecuted")
             : t(language, "proposalPreconditionFailed");
   } else {
-    const exactKey = lookupExactErrorKey(error.code);
-    base = exactKey ? t(language, exactKey) : t(language, "errors.GENERIC");
+    base = t(language, resolveBaseErrorKey(error.code, false));
   }
 
   const attemptsUsed = Number(error.details?.attemptsUsed);

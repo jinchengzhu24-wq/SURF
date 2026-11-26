@@ -347,7 +347,7 @@ class MessageOrchestrator:
 
             if routing is not None:
                 if active_human_edit:
-                    eng = routing.payload.human_edit_engagement
+                    eng = getattr(routing.payload, "human_edit_engagement", None)
                     if eng is None:
                         human_edit_recovery_needed = True
                     elif eng.decision == "engage":

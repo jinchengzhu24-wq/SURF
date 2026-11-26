@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,9 +25,11 @@ from server.llm.prompts.understanding import (
 )
 from server.llm.schemas import (
     ChallengeReasonReviewPayload,
-    ManualEditConflictClassificationPayload,
-    ManualEditReviewPayload,
+    ManualEditReviewNoConflictPayload,
+    ManualEditReviewWithConflictPayload,
     TurnRoutingPayload,
+    TurnRoutingWithHumanEditPayload,
+    build_manual_edit_conflict_classification_model,
 )
 
 _PROTECTED_COMPONENTS = frozenset({"outer_shell", "player", "boxes", "targets"})
@@ -120,6 +123,10 @@ class UnderstandingPipeline:
         active_human_edit = (
             isinstance(active_disagreement, Mapping)
             and active_disagreement.get("subject") == "human_edit"
+            and active_disagreement.get("status", "active") == "active"
+        )
+        response_model: type[TurnRoutingPayload] = (
+            TurnRoutingWithHumanEditPayload if active_human_edit else TurnRoutingPayload
         )
         messages = build_turn_routing_messages(
             latest_user_message=latest,
@@ -131,20 +138,26 @@ class UnderstandingPipeline:
         def _validate(parsed: TurnRoutingPayload) -> TurnRoutingPayload:
             if parsed.evidence_span and parsed.evidence_span not in latest:
                 raise LLMValidationError(
-                    "EVIDENCE_SPAN_MISMATCH", "evidenceSpan must be verbatim from latest message."
+                    "EVIDENCE_SPAN_MISMATCH",
+                    f"evidenceSpan {parsed.evidence_span!r} must appear verbatim in "
+                    "latestUserMessage.",
                 )
-            for change in parsed.changes:
+            for idx, change in enumerate(parsed.changes):
                 if not change.evidence_span or change.evidence_span not in latest:
                     raise LLMValidationError(
-                        "CHANGE_EVIDENCE_MISMATCH", "Each change needs a verbatim evidenceSpan."
+                        "CHANGE_EVIDENCE_MISMATCH",
+                        f"changes[{idx}].evidenceSpan {change.evidence_span!r} must appear "
+                        "verbatim in latestUserMessage.",
                     )
-            if active_human_edit and parsed.human_edit_engagement is not None:
+            if isinstance(parsed, TurnRoutingWithHumanEditPayload):
                 eng = parsed.human_edit_engagement
                 if eng.decision == "engage" and (
                     not eng.evidence_span or eng.evidence_span not in latest
                 ):
                     raise LLMValidationError(
-                        "ENGAGEMENT_EVIDENCE_MISMATCH", "engage requires a verbatim evidenceSpan."
+                        "ENGAGEMENT_EVIDENCE_MISMATCH",
+                        f"humanEditEngagement.evidenceSpan {eng.evidence_span!r} must appear "
+                        "verbatim in latestUserMessage when decision='engage'.",
                     )
             return parsed
 
@@ -153,7 +166,7 @@ class UnderstandingPipeline:
             task="turn_routing",
             model=self.model,
             messages=messages,
-            response_model=TurnRoutingPayload,
+            response_model=response_model,
             validator=_validate,
             deadline=deadline,
             max_attempts=max_attempts,
@@ -172,8 +185,13 @@ class UnderstandingPipeline:
             )
         )
         return TurnRoutingResult(
-            result.parsed, bool(protected_hits), protected_hits,
-            result.attempts_used, result.request_id, result.latency_ms, result.usage,
+            result.parsed,
+            bool(protected_hits),
+            protected_hits,
+            result.attempts_used,
+            result.request_id,
+            result.latency_ms,
+            result.usage,
         )
 
     async def classify_manual_edit_conflict(
@@ -188,7 +206,7 @@ class UnderstandingPipeline:
     ) -> ManualEditConflictResult:
         """Adjudicate whether a verified manual edit conflicts with confirmed directions."""
         effect_ids = tuple(str(e["id"]) for e in effect_evidence if e.get("id"))
-        expected_ids = [str(d["id"]) for d in directions if d.get("id")]
+        expected_ids = list(dict.fromkeys(str(d["id"]) for d in directions if d.get("id")))
         if not expected_ids or not effect_ids:
             return ManualEditConflictResult(
                 verdict="unrelated",
@@ -200,17 +218,29 @@ class UnderstandingPipeline:
             )
 
         expected_set = set(expected_ids)
+        response_model = build_manual_edit_conflict_classification_model(expected_ids)
         messages = build_manual_edit_conflict_messages(
             directions=directions, effect_evidence=effect_evidence, language=language
         )
 
-        def _validate(
-            parsed: ManualEditConflictClassificationPayload,
-        ) -> ManualEditConflictClassificationPayload:
+        def _validate(parsed: Any) -> Any:
             returned = [item.direction_id for item in parsed.comparisons]
-            if len(returned) != len(expected_ids) or set(returned) != expected_set:
+            counts = Counter(returned)
+            missing = [did for did in expected_ids if did not in counts]
+            unexpected = [did for did in dict.fromkeys(returned) if did not in expected_set]
+            duplicates = [did for did, count in counts.items() if count > 1]
+            if missing or unexpected or duplicates:
+                details: list[str] = []
+                if missing:
+                    details.append(f"missing={missing}")
+                if unexpected:
+                    details.append(f"unexpected={unexpected}")
+                if duplicates:
+                    details.append(f"duplicates={duplicates}")
                 raise LLMValidationError(
-                    "DIRECTION_SLOTS_MISMATCH", "Cover every supplied directionId exactly once."
+                    "DIRECTION_SLOTS_MISMATCH",
+                    "comparisons must cover every supplied directionId exactly once "
+                    f"({', '.join(details)}).",
                 )
             return parsed
 
@@ -219,7 +249,7 @@ class UnderstandingPipeline:
             task="manual_edit_conflict_classification",
             model=self.model,
             messages=messages,
-            response_model=ManualEditConflictClassificationPayload,
+            response_model=response_model,
             validator=_validate,
             deadline=deadline,
             max_attempts=max_attempts,
@@ -249,9 +279,14 @@ class UnderstandingPipeline:
         )
         relevant = conflicts or list(comparisons)
         return ManualEditConflictResult(
-            verdict, "llm_adjudication",
-            tuple(c["confirmedDirectionId"] for c in relevant), effect_ids,
-            comparisons, result.attempts_used, result.request_id, result.latency_ms,
+            verdict,
+            "llm_adjudication",
+            tuple(c["confirmedDirectionId"] for c in relevant),
+            effect_ids,
+            comparisons,
+            result.attempts_used,
+            result.request_id,
+            result.latency_ms,
         )
 
     async def generate_manual_edit_review(
@@ -270,6 +305,11 @@ class UnderstandingPipeline:
         locale = normalize_language(language)
         grid = parse_structural_grid(grid_or_rows)
         requires_conflict = conflict_decision.verdict == "conflict"
+        response_model: type[ManualEditReviewNoConflictPayload] = (
+            ManualEditReviewWithConflictPayload
+            if requires_conflict
+            else ManualEditReviewNoConflictPayload
+        )
         messages = build_manual_edit_review_messages(
             stage_snapshot=build_stage_facts(grid, entity_bindings).to_prompt_dict(),
             conflict_verdict=conflict_decision.verdict,
@@ -277,35 +317,81 @@ class UnderstandingPipeline:
             language=locale,
         )
 
-        def _validate(parsed: ManualEditReviewPayload) -> ManualEditReviewPayload:
-            if requires_conflict and parsed.conflict is None:
-                raise LLMValidationError("CONFLICT_CARD_REQUIRED", "conflict card is required.")
-            if not requires_conflict and parsed.conflict is not None:
-                raise LLMValidationError("CONFLICT_CARD_FORBIDDEN", "conflict must be null.")
-            review_clean = sanitize_visible_text(parsed.review_message, locale)
+        def _validate(
+            parsed: ManualEditReviewNoConflictPayload,
+        ) -> ManualEditReviewNoConflictPayload:
             opening_clean = sanitize_visible_text(parsed.opening_message, locale)
+            review_clean = sanitize_visible_text(parsed.review_message, locale)
+            if not opening_clean:
+                raise LLMValidationError(
+                    "EMPTY_BODY", "openingMessage cannot be empty after sanitization."
+                )
+            if not review_clean:
+                raise LLMValidationError(
+                    "EMPTY_BODY", "reviewMessage cannot be empty after sanitization."
+                )
+            if opening_clean.count("?") + opening_clean.count("？") > 0:
+                raise LLMValidationError(
+                    "REVIEW_MUST_BE_DECLARATIVE",
+                    "openingMessage must be declarative and contain no '?' or '？'.",
+                )
             if review_clean.count("?") + review_clean.count("？") > 0:
-                raise LLMValidationError("REVIEW_MUST_BE_DECLARATIVE", "No questions in review.")
-            texts = [opening_clean, review_clean]
-            if parsed.conflict is not None:
-                nq = parsed.conflict.next_question
-                if nq.count("?") + nq.count("？") != 1:
-                    raise LLMValidationError("CONFLICT_QUESTION_COUNT", "Need 1 nextQuestion.")
-                texts.extend(
+                raise LLMValidationError(
+                    "REVIEW_MUST_BE_DECLARATIVE",
+                    "reviewMessage must be declarative and contain no '?' or '？'.",
+                )
+            labeled_texts: list[tuple[str, str]] = [
+                ("openingMessage", opening_clean),
+                ("reviewMessage", review_clean),
+            ]
+            conflict = getattr(parsed, "conflict", None)
+            if conflict is not None:
+                c_user = sanitize_visible_text(conflict.user_position, locale)
+                c_ai = sanitize_visible_text(conflict.ai_position, locale)
+                c_core = sanitize_visible_text(conflict.core_disagreement, locale)
+                c_next = sanitize_visible_text(conflict.next_question, locale)
+                for field_name, value in (
+                    ("conflict.userPosition", c_user),
+                    ("conflict.aiPosition", c_ai),
+                    ("conflict.coreDisagreement", c_core),
+                    ("conflict.nextQuestion", c_next),
+                ):
+                    if not value:
+                        raise LLMValidationError(
+                            "EMPTY_BODY", f"{field_name} cannot be empty after sanitization."
+                        )
+                q_count = c_next.count("?") + c_next.count("？")
+                if q_count != 1:
+                    raise LLMValidationError(
+                        "CONFLICT_QUESTION_COUNT",
+                        f"conflict.nextQuestion must contain exactly one '?' or '？' "
+                        f"(found {q_count}).",
+                    )
+                labeled_texts.extend(
                     (
-                        parsed.conflict.user_position,
-                        parsed.conflict.ai_position,
-                        parsed.conflict.core_disagreement,
-                        nq,
+                        ("conflict.userPosition", c_user),
+                        ("conflict.aiPosition", c_ai),
+                        ("conflict.coreDisagreement", c_core),
+                        ("conflict.nextQuestion", c_next),
                     )
                 )
-            for text in texts:
-                issues = verify_grounding(text, grid, entity_bindings)
-                if issues:
-                    raise LLMValidationError("GROUNDING_MISMATCH", issues[0].message)
-                leaks = validate_visible_language(text, locale)
-                if leaks:
-                    raise LLMValidationError("INTERNAL_TOKEN_LEAK", leaks[0])
+            grounding_msgs: list[str] = []
+            leak_msgs: list[str] = []
+            for field_name, text in labeled_texts:
+                for issue in verify_grounding(text, grid, entity_bindings):
+                    msg = f"{field_name}: {issue.message}"
+                    if msg not in grounding_msgs:
+                        grounding_msgs.append(msg)
+                for leak in validate_visible_language(text, locale):
+                    msg = f"{field_name}: {leak}"
+                    if msg not in leak_msgs:
+                        leak_msgs.append(msg)
+            if grounding_msgs:
+                raise LLMValidationError(
+                    "GROUNDING_MISMATCH", "; ".join(grounding_msgs[:4])
+                )
+            if leak_msgs:
+                raise LLMValidationError("INTERNAL_TOKEN_LEAK", "; ".join(leak_msgs[:4]))
             return parsed
 
         result = await call_structured(
@@ -313,7 +399,7 @@ class UnderstandingPipeline:
             task="manual_edit_review",
             model=self.model,
             messages=messages,
-            response_model=ManualEditReviewPayload,
+            response_model=response_model,
             validator=_validate,
             deadline=deadline,
             max_attempts=max_attempts,
@@ -325,15 +411,17 @@ class UnderstandingPipeline:
             request_id=request_id,
         )
         conflict_dict: dict[str, Any] | None = None
-        if result.parsed.conflict is not None:
-            c = result.parsed.conflict
+        parsed_conflict = getattr(result.parsed, "conflict", None)
+        if parsed_conflict is not None:
             conflict_dict = {
                 "status": "active",
                 "subject": "human_edit",
-                "userPosition": sanitize_visible_text(c.user_position, locale),
-                "aiPosition": sanitize_visible_text(c.ai_position, locale),
-                "coreDisagreement": sanitize_visible_text(c.core_disagreement, locale),
-                "nextQuestion": sanitize_visible_text(c.next_question, locale),
+                "userPosition": sanitize_visible_text(parsed_conflict.user_position, locale),
+                "aiPosition": sanitize_visible_text(parsed_conflict.ai_position, locale),
+                "coreDisagreement": sanitize_visible_text(
+                    parsed_conflict.core_disagreement, locale
+                ),
+                "nextQuestion": sanitize_visible_text(parsed_conflict.next_question, locale),
                 "resolution": None,
             }
         return ManualEditReviewResult(
@@ -368,12 +456,28 @@ class UnderstandingPipeline:
             secondary_hypothesis=secondary_hypothesis,
             language=locale,
         )
+
+        def _validate_challenge(
+            parsed: ChallengeReasonReviewPayload,
+        ) -> ChallengeReasonReviewPayload:
+            cleaned = sanitize_visible_text(parsed.comparison, locale)
+            if not cleaned:
+                raise LLMValidationError(
+                    "EMPTY_BODY", "comparison cannot be empty after sanitization."
+                )
+            leaks = validate_visible_language(cleaned, locale)
+            if leaks:
+                joined = "; ".join(dict.fromkeys(leaks[:4]))
+                raise LLMValidationError("INTERNAL_TOKEN_LEAK", f"comparison: {joined}")
+            return parsed
+
         result = await call_structured(
             self.transport,
             task="challenge_reason_review",
             model=self.model,
             messages=messages,
             response_model=ChallengeReasonReviewPayload,
+            validator=_validate_challenge,
             deadline=deadline,
             max_attempts=max_attempts,
             temperature=0.0,

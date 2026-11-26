@@ -17,6 +17,7 @@ from server.core.llm_client import (
     LLMValidationError,
     TransportResponse,
     UpstreamLLMError,
+    _prepare_schema_for_mode,
     call_structured,
 )
 
@@ -90,7 +91,9 @@ async def test_call_structured_uses_json_schema_and_explicit_max_tokens() -> Non
     assert call["max_tokens"] == 512
     assert call["response_format"]["type"] == "json_schema"
     assert call["response_format"]["json_schema"]["strict"] is True
-    assert call["response_format"]["json_schema"]["schema"] == SampleSchema.model_json_schema()
+    assert call["response_format"]["json_schema"]["schema"] == _prepare_schema_for_mode(
+        SampleSchema.model_json_schema(), "json_schema"
+    )
 
 
 async def test_call_structured_retries_on_validation_error_with_repair_prompt() -> None:
@@ -272,7 +275,9 @@ async def test_call_structured_prompt_only_mode_omits_response_format_and_keeps_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected_schema = json.dumps(
-        SampleSchema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+        _prepare_schema_for_mode(SampleSchema.model_json_schema(), "prompt_only"),
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
     transport = PromptOnlyFakeTransport(
@@ -353,7 +358,9 @@ async def test_call_structured_prompt_only_mode_omits_response_format_and_keeps_
 
 async def test_call_structured_json_object_mode_appends_schema_and_keeps_it_on_repair() -> None:
     expected_schema = json.dumps(
-        SampleSchema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+        _prepare_schema_for_mode(SampleSchema.model_json_schema(), "json_object"),
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
     transport = JsonObjectFakeTransport(
@@ -559,3 +566,55 @@ async def test_call_structured_truncation_repair_omits_raw_and_supports_async_va
     assert huge_partial not in repair_msgs[1]["content"]
     assert "truncated" in repair_msgs[2]["content"].lower()
     assert "concise" in repair_msgs[2]["content"].lower()
+
+
+def test_prepare_schema_for_mode_strict_and_title_stripping() -> None:
+    class NestedChild(BaseModel):
+        title: str
+        note: str | None = None
+
+    class ParentWithTitleProp(BaseModel):
+        title: str
+        child: NestedChild
+        optional_flag: bool = False
+
+    raw = ParentWithTitleProp.model_json_schema()
+    assert "title" in raw  # Pydantic emits top-level title metadata
+
+    # json_schema strict mode: additionalProperties=False and all properties in required recursively
+    strict_schema = _prepare_schema_for_mode(raw, "json_schema")
+    assert strict_schema["additionalProperties"] is False
+    assert set(strict_schema["required"]) == {"title", "child", "optional_flag"}
+    child_def = strict_schema["$defs"]["NestedChild"]
+    assert child_def["additionalProperties"] is False
+    assert set(child_def["required"]) == {"title", "note"}
+
+    # json_object & prompt_only: strip noisy 'title' metadata but keep literal 'title' property!
+    for mode in ("json_object", "prompt_only"):
+        compact = _prepare_schema_for_mode(raw, mode)
+        assert "title" not in compact
+        assert "title" in compact["properties"]
+        assert "title" not in compact["properties"]["title"]
+        assert "title" in compact["required"]
+        nested = compact["$defs"]["NestedChild"]
+        assert "title" not in nested
+        assert "title" in nested["properties"]
+        assert "title" not in nested["properties"]["title"]
+
+    # json_schema strict mode strips 'discriminator' and converts 'oneOf' -> 'anyOf'
+    raw_union = {
+        "type": "object",
+        "properties": {
+            "branch": {
+                "oneOf": [{"type": "object", "properties": {"kind": {"const": "a"}}}],
+                "discriminator": {"propertyName": "kind"},
+            }
+        },
+    }
+    norm_union = _prepare_schema_for_mode(raw_union, "json_schema")
+    branch_node = norm_union["properties"]["branch"]
+    assert "discriminator" not in branch_node
+    assert "oneOf" not in branch_node
+    assert "anyOf" in branch_node
+    assert branch_node["anyOf"][0]["additionalProperties"] is False
+    assert branch_node["anyOf"][0]["required"] == ["kind"]

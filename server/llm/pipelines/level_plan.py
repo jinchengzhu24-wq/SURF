@@ -14,7 +14,7 @@ from server.domain.blueprints import (
     validate_level_plan,
 )
 from server.llm.prompts.level_plan import build_level_plan_messages
-from server.llm.schemas import LevelPlanPayload
+from server.llm.schemas import LevelPlanPayload, build_constrained_level_plan_model
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,16 +71,24 @@ class LevelPlanPipeline:
         )
         normalized_prefs = normalize_generation_preferences(raw_prefs)
         constraints = resolve_zero_feature_constraints(ctx)
-        if (
-            normalized_prefs.get("minWaterAreas") == 0
-            and normalized_prefs.get("maxWaterAreas") == 0
-        ):
-            constraints["noWater"] = True
-        if (
-            normalized_prefs.get("minWallObstacleBlocks") == 0
-            and normalized_prefs.get("maxWallObstacleBlocks") == 0
-        ):
-            constraints["noInternalWalls"] = True
+        if "minWaterAreas" in normalized_prefs:
+            constraints["noWater"] = (
+                normalized_prefs["minWaterAreas"] == 0
+                and normalized_prefs["maxWaterAreas"] == 0
+            )
+        if "minWallObstacleBlocks" in normalized_prefs:
+            constraints["noInternalWalls"] = (
+                normalized_prefs["minWallObstacleBlocks"] == 0
+                and normalized_prefs["maxWallObstacleBlocks"] == 0
+            )
+        elif normalized_prefs.get("corridorPlacement") not in (None, "", "none"):
+            constraints["noInternalWalls"] = False
+
+        response_model = build_constrained_level_plan_model(
+            no_water=constraints["noWater"],
+            no_internal_walls=constraints["noInternalWalls"],
+            generation_preferences=normalized_prefs,
+        )
 
         messages = build_level_plan_messages(
             variation_seed=variation_seed,
@@ -109,7 +117,7 @@ class LevelPlanPipeline:
             task="level_plan",
             model=self.model,
             messages=messages,
-            response_model=LevelPlanPayload,
+            response_model=response_model,
             validator=_validate,
             deadline=deadline,
             max_attempts=max_attempts,

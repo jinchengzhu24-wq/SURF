@@ -19,11 +19,14 @@ from server.domain.proposals import (
     normalize_requirement_record,
     parse_binary_step,
     parse_revision_plan,
+    preflight_requirements,
     render_protected_refusal,
     search_revision_plan,
     validate_requirement_record,
 )
 from server.i18n.messages import normalize_language
+from server.llm._schemas_proposals import select_binary_discovery_schema
+from server.llm._schemas_tasks import StrictSchema
 from server.llm.grounding import (
     build_stage_facts,
     sanitize_visible_text,
@@ -31,9 +34,45 @@ from server.llm.grounding import (
     verify_grounding,
 )
 from server.llm.prompts.binary import build_binary_discovery_messages
-from server.llm.schemas import BinaryDiscoveryPayload
 
-from .proposal import merge_revision_strategies
+from .proposal import format_preflight_issues, merge_revision_strategies
+
+
+def _normalize_binary_payload_dict(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Fill context-omitted fields and defaults so downstream domain structures stay consistent."""
+    normalized: dict[str, Any] = dict(raw)
+    normalized.setdefault("question", "")
+    normalized.setdefault("note", "")
+    normalized.setdefault("branches", [])
+    normalized.setdefault("planStrategies", [])
+    normalized.setdefault("protectedEntities", [])
+    normalized.setdefault("initialRequirements", None)
+
+    norm_branches: list[dict[str, Any]] = []
+    for branch in normalized["branches"]:
+        b = dict(branch)
+        if isinstance(b.get("strategy"), Mapping):
+            strat = dict(b["strategy"])
+            strat.setdefault("metricGoals", [])
+            b["strategy"] = strat
+        if isinstance(b.get("promise"), Mapping):
+            prom = dict(b["promise"])
+            prom.setdefault("focus", None)
+            prom.setdefault("corridor", None)
+            b["promise"] = prom
+        norm_branches.append(b)
+    normalized["branches"] = norm_branches
+
+    norm_plan_strategies: list[Any] = []
+    for strat in normalized["planStrategies"]:
+        if isinstance(strat, Mapping):
+            s = dict(strat)
+            s.setdefault("metricGoals", [])
+            norm_plan_strategies.append(s)
+        else:
+            norm_plan_strategies.append(strat)
+    normalized["planStrategies"] = norm_plan_strategies
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,13 +172,21 @@ class BinaryDiscoveryPipeline:
                 )
             return baseline_solve
 
-        async def _validate(parsed: BinaryDiscoveryPayload) -> BinaryDiscoveryPayload:
+        response_model = select_binary_discovery_schema(
+            needs_initial_requirements=verified_initial_requirements is None,
+            can_ask=question_count < 3,
+        )
+
+        async def _validate(parsed: StrictSchema) -> StrictSchema:
             nonlocal preflight_remaining
-            raw = parsed.model_dump(by_alias=True)
+            raw = _normalize_binary_payload_dict(parsed.model_dump(by_alias=True))
             try:
                 step = parse_binary_step(raw, question_count)
             except BinaryError as exc:
-                raise LLMValidationError(exc.code, f"Binary step invalid: {exc.code}") from exc
+                raise LLMValidationError(
+                    exc.code,
+                    f"Binary step invalid ({exc.field}): {exc.detail or exc.code}",
+                ) from exc
 
             if step["action"] == "protected_refusal":
                 state_holder["step"] = step
@@ -147,11 +194,40 @@ class BinaryDiscoveryPipeline:
                 state_holder["candidates"] = ()
                 return parsed
 
-            if any(binary_signature(b["promise"]) in prior_sigs for b in step["branches"]):
-                raise LLMValidationError(
-                    "BINARY_ALREADY_SELECTED_DIRECTION",
-                    "Branch repeats an already selected promise.",
+            if step["action"] == "blocked":
+                note_text = step["note"]
+                issues = verify_grounding(note_text, grid, entity_bindings)
+                if issues:
+                    raise LLMValidationError(
+                        "BINARY_TEXT_INVALID",
+                        f"note failed grounding check: {issues[0].message}",
+                    )
+                lang_issues = validate_visible_language(note_text, locale)
+                if lang_issues:
+                    raise LLMValidationError(
+                        "INTERNAL_TOKEN_LEAK",
+                        f"note leaked internal token: {lang_issues[0]}",
+                    )
+                step["note"] = sanitize_visible_text(note_text, locale)
+                state_holder["step"] = step
+                state_holder["initial_requirements"] = (
+                    dict(verified_initial_requirements)
+                    if verified_initial_requirements is not None
+                    else None
                 )
+                state_holder["candidates"] = ()
+                return parsed
+
+            for idx, branch in enumerate(step["branches"], start=1):
+                if binary_signature(branch["promise"]) in prior_sigs:
+                    raise LLMValidationError(
+                        "BINARY_ALREADY_SELECTED_DIRECTION",
+                        (
+                            f"Branch {idx} ({branch['label']!r}) repeats an already selected "
+                            f"promise {branch['promise']}; propose a new materially distinct "
+                            "direction."
+                        ),
+                    )
 
             if verified_initial_requirements is None:
                 if step["initialRequirements"] is None:
@@ -170,25 +246,46 @@ class BinaryDiscoveryPipeline:
                     raise LLMValidationError(
                         "BINARY_INITIAL_REQUIREMENTS_INVALID", str(exc)
                     ) from exc
+                preflight_issues = preflight_requirements(grid.rows, initial_req)
+                if preflight_issues:
+                    raise LLMValidationError(
+                        "BINARY_INITIAL_REQUIREMENTS_INVALID",
+                        (
+                            "initialRequirements conflict with map permissions: "
+                            f"{format_preflight_issues(preflight_issues)}"
+                        ),
+                    )
             else:
                 if step["initialRequirements"] is not None:
                     raise LLMValidationError(
                         "BINARY_INITIAL_REQUIREMENTS_LOCKED",
-                        "initialRequirements must be null once already verified.",
+                        "initialRequirements must be omitted/null once already verified.",
                     )
                 initial_req = dict(verified_initial_requirements)
 
-            for label_text in (
-                step["question"],
-                step["note"],
-                *(b["label"] for b in step["branches"]),
-            ):
+            labeled_texts: list[tuple[str, str]] = [
+                ("question", step["question"]),
+                ("note", step["note"]),
+                *(
+                    (f"branches[{idx}].label", b["label"])
+                    for idx, b in enumerate(step["branches"])
+                ),
+            ]
+            for field_name, label_text in labeled_texts:
+                if not label_text:
+                    continue
                 issues = verify_grounding(label_text, grid, entity_bindings)
                 if issues:
-                    raise LLMValidationError("BINARY_TEXT_INVALID", issues[0].message)
+                    raise LLMValidationError(
+                        "BINARY_TEXT_INVALID",
+                        f"{field_name} failed grounding check: {issues[0].message}",
+                    )
                 lang_issues = validate_visible_language(label_text, locale)
                 if lang_issues:
-                    raise LLMValidationError("INTERNAL_TOKEN_LEAK", lang_issues[0])
+                    raise LLMValidationError(
+                        "INTERNAL_TOKEN_LEAK",
+                        f"{field_name} leaked internal token: {lang_issues[0]}",
+                    )
 
             candidates: list[BranchPreflightCandidate] = []
             if step["action"] == "ask":
@@ -252,9 +349,18 @@ class BinaryDiscoveryPipeline:
                             TimeoutError,
                             ValueError,
                         ) as exc:
+                            detail = str(exc)
+                            if isinstance(exc, ProposalSearchExhausted):
+                                reasons = (exc.diagnostics or {}).get("failureReasons")
+                                if reasons:
+                                    detail = f"{detail} failureReasons={reasons}"
                             raise LLMValidationError(
                                 "BINARY_PREFLIGHT_NOT_FOUND",
-                                f"Branch {idx} failed deterministic preflight: {exc}",
+                                (
+                                    f"Branch {idx} (promise={branch['promise']['kind']}/"
+                                    f"{branch['promise']['component']}) failed deterministic "
+                                    f"preflight: {detail}"
+                                ),
                             ) from exc
 
                         candidates.append(
@@ -303,7 +409,7 @@ class BinaryDiscoveryPipeline:
             task="binary_discovery",
             model=self.model,
             messages=messages,
-            response_model=BinaryDiscoveryPayload,
+            response_model=response_model,
             validator=_validate,
             deadline=model_deadline,
             max_attempts=max_attempts,

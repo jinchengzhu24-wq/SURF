@@ -18,8 +18,11 @@ from server.llm.grounding import (
 from server.llm.prompts.translation import (
     build_translation_messages,
     build_translation_verification_messages,
+    is_plain_translation_batch,
 )
 from server.llm.schemas import (
+    PlainTranslationPayload,
+    TranslatedPlainTurnItemPayload,
     TranslatedTurnItemPayload,
     TranslationPayload,
     TranslationVerificationPayload,
@@ -31,15 +34,12 @@ _SCALAR_FIELDS: tuple[str, ...] = (
     "proposalOfferSummary",
     "proposalOfferRationale",
     "proposalPresentationReason",
-    "proposalSummary",
 )
-_QUESTION_LOCKED_KEYS = (
-    "questionId",
-    "topicId",
-    "baseVersionId",
-    "number",
-    "selectedChoiceId",
-    "status",
+_DISAGREEMENT_TEXT_KEYS: tuple[str, ...] = (
+    "userPosition",
+    "aiPosition",
+    "coreDisagreement",
+    "nextQuestion",
 )
 
 
@@ -73,18 +73,28 @@ def _validate_text(
 ) -> str | None:
     if source_value is None:
         if value is not None:
-            raise LLMValidationError("TRANSLATION_NULL_VIOLATION", f"{field_name} must be null.")
+            raise LLMValidationError(
+                "TRANSLATION_NULL_VIOLATION", f"{field_name} must remain null."
+            )
         return None
     if not isinstance(value, str):
-        raise LLMValidationError("TRANSLATION_TYPE_ERROR", f"{field_name} must be a string.")
+        raise LLMValidationError(
+            "TRANSLATION_TYPE_ERROR",
+            f"{field_name} must be a string (got {type(value).__name__}).",
+        )
     cleaned = sanitize_visible_text(value, locale)
     if not cleaned and not allow_empty and str(source_value).strip():
         raise LLMValidationError("TRANSLATION_EMPTY_FIELD", f"{field_name} must not be empty.")
-    if len(cleaned) > max(400, len(str(source_value)) * 4 + 200):
-        raise LLMValidationError("TRANSLATION_TOO_LONG", f"{field_name} is unexpectedly long.")
+    limit = max(400, len(str(source_value)) * 4 + 200)
+    if len(cleaned) > limit:
+        raise LLMValidationError(
+            "TRANSLATION_TOO_LONG",
+            f"{field_name} length {len(cleaned)} exceeds max limit {limit}.",
+        )
     leaks = validate_visible_language(cleaned, locale)
     if leaks:
-        raise LLMValidationError("TRANSLATION_INTERNAL_LEAK", leaks[0])
+        joined = "; ".join(dict.fromkeys(leaks[:4]))
+        raise LLMValidationError("TRANSLATION_INTERNAL_LEAK", f"{field_name}: {joined}")
     return cleaned
 
 
@@ -95,27 +105,46 @@ def _validate_proposal_question(
         raise LLMValidationError(
             "TRANSLATION_QUESTION_MISSING", f"{turn_id}.proposalQuestion is required."
         )
-    for key in _QUESTION_LOCKED_KEYS:
-        if key in src_q and tr_q.get(key) != src_q.get(key):
-            raise LLMValidationError(
-                "TRANSLATION_QUESTION_ID_MUTATED", f"{turn_id}.proposalQuestion.{key} changed."
-            )
     src_choices = list(src_q.get("choices") or [])
     tr_choices = list(tr_q.get("choices") or [])
     if len(tr_choices) != len(src_choices):
-        raise LLMValidationError("TRANSLATION_CHOICE_COUNT", f"{turn_id} choices count mismatch.")
+        raise LLMValidationError(
+            "TRANSLATION_CHOICE_COUNT",
+            f"{turn_id}.proposalQuestion.choices count mismatch: expected {len(src_choices)}, "
+            f"got {len(tr_choices)}.",
+        )
     norm_choices: list[dict[str, Any]] = []
     for idx, (sc, tc) in enumerate(zip(src_choices, tr_choices, strict=True)):
-        if tc.get("choiceId") != sc.get("choiceId") or tc.get("letter") != sc.get("letter"):
-            raise LLMValidationError("TRANSLATION_CHOICE_ID_MUTATED", f"choice[{idx}] ID changed.")
-        label = _validate_text(tc.get("label"), sc.get("label"), f"choice[{idx}].label", locale)
+        expected_cid = sc.get("choiceId")
+        actual_cid = tc.get("choiceId")
+        if actual_cid != expected_cid:
+            raise LLMValidationError(
+                "TRANSLATION_CHOICE_ID_MUTATED",
+                f"{turn_id}.proposalQuestion.choices[{idx}].choiceId expected "
+                f"{expected_cid!r}, got {actual_cid!r}.",
+            )
+        label = _validate_text(
+            tc.get("label"),
+            sc.get("label"),
+            f"{turn_id}.proposalQuestion.choices[{idx}].label",
+            locale,
+        )
         norm_choices.append({**sc, "label": label or ""})
     return {
         **src_q,
-        "question": _validate_text(tr_q.get("question"), src_q.get("question"), "question", locale)
+        "question": _validate_text(
+            tr_q.get("question"),
+            src_q.get("question"),
+            f"{turn_id}.proposalQuestion.question",
+            locale,
+        )
         or "",
         "note": _validate_text(
-            tr_q.get("note"), src_q.get("note", ""), "note", locale, allow_empty=True
+            tr_q.get("note"),
+            src_q.get("note", ""),
+            f"{turn_id}.proposalQuestion.note",
+            locale,
+            allow_empty=True,
         )
         or "",
         "choices": norm_choices,
@@ -135,20 +164,24 @@ def _validate_disagreement(
         raise LLMValidationError(
             "TRANSLATION_DISAGREEMENT_MISSING", f"{turn_id}.disagreement is required."
         )
-    for key in ("status", "subject", "resolution", "phase", "displayCard"):
-        if key in src_dis and tr_dis.get(key) != src_dis.get(key):
-            raise LLMValidationError(
-                "TRANSLATION_DISAGREEMENT_MUTATED", f"{turn_id}.disagreement.{key} changed."
-            )
+    # Merge translated visible text back onto authoritative server metadata
+    # (preserving disagreementId, challengeId, status, subject, resolution, phase, etc.).
     norm_dis = dict(src_dis)
-    for key in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
+    for key in _DISAGREEMENT_TEXT_KEYS:
         if key in src_dis:
-            norm_dis[key] = _validate_text(tr_dis.get(key), src_dis.get(key), key, locale)
+            norm_dis[key] = _validate_text(
+                tr_dis.get(key),
+                src_dis.get(key),
+                f"{turn_id}.disagreement.{key}",
+                locale,
+            )
     return norm_dis
 
 
 def _validate_item(
-    item: TranslatedTurnItemPayload, source: Mapping[str, Any], locale: str
+    item: TranslatedTurnItemPayload | TranslatedPlainTurnItemPayload,
+    source: Mapping[str, Any],
+    locale: str,
 ) -> dict[str, Any]:
     raw = item.model_dump(by_alias=True)
     tid = item.turn_id
@@ -164,11 +197,21 @@ def _validate_item(
     for name in _SCALAR_FIELDS:
         if name in source:
             out[name] = _validate_text(raw.get(name), source[name], f"{tid}.{name}", locale)
+    if "proposalOfferSummary" not in source and "proposalSummary" in source:
+        out["proposalOfferSummary"] = _validate_text(
+            raw.get("proposalOfferSummary"),
+            source["proposalSummary"],
+            f"{tid}.proposalOfferSummary",
+            locale,
+        )
 
     src_cues = list(source.get("uiCueTexts") or [])
     tr_cues = list(raw.get("uiCueTexts") or [])
     if len(tr_cues) != len(src_cues):
-        raise LLMValidationError("TRANSLATION_CUES_COUNT", f"{tid}.uiCueTexts count mismatch.")
+        raise LLMValidationError(
+            "TRANSLATION_CUES_COUNT",
+            f"{tid}.uiCueTexts count mismatch: expected {len(src_cues)}, got {len(tr_cues)}.",
+        )
     out["uiCueTexts"] = [
         _validate_text(t, s, f"{tid}.uiCueTexts[{i}]", locale) or ""
         for i, (t, s) in enumerate(zip(tr_cues, src_cues, strict=True))
@@ -178,7 +221,12 @@ def _validate_item(
         src_act = list(source["proposalVerifiedActions"] or [])
         tr_act = raw.get("proposalVerifiedActions")
         if not isinstance(tr_act, list) or len(tr_act) != len(src_act):
-            raise LLMValidationError("TRANSLATION_ACTIONS_COUNT", f"{tid} actions count mismatch.")
+            actual = len(tr_act) if isinstance(tr_act, list) else type(tr_act).__name__
+            raise LLMValidationError(
+                "TRANSLATION_ACTIONS_COUNT",
+                f"{tid}.proposalVerifiedActions count mismatch: expected {len(src_act)}, "
+                f"got {actual}.",
+            )
         out["proposalVerifiedActions"] = [
             _validate_text(t, s, f"{tid}.proposalVerifiedActions[{i}]", locale) or ""
             for i, (t, s) in enumerate(zip(tr_act, src_act, strict=True))
@@ -198,13 +246,20 @@ def _validate_item(
     if src_links:
         tr_links = raw.get("coordinateLinkTexts")
         if not isinstance(tr_links, list) or len(tr_links) != len(src_links):
-            raise LLMValidationError("TRANSLATION_LINKS_COUNT", f"{tid} link count mismatch.")
+            actual = len(tr_links) if isinstance(tr_links, list) else type(tr_links).__name__
+            raise LLMValidationError(
+                "TRANSLATION_LINKS_COUNT",
+                f"{tid}.coordinateLinkTexts count mismatch: expected {len(src_links)}, "
+                f"got {actual}.",
+            )
         norm_links: list[str] = []
         for idx, (lt, sl) in enumerate(zip(tr_links, src_links, strict=True)):
             clean = _validate_text(lt, sl.get("text"), f"{tid}.coordinateLinkTexts[{idx}]", locale)
             if not clean or clean not in out["body"]:
                 raise LLMValidationError(
-                    "TRANSLATION_LINK_NOT_SUBSTRING", f"{tid} link[{idx}] not in translated body."
+                    "TRANSLATION_LINK_NOT_SUBSTRING",
+                    f"{tid}.coordinateLinkTexts[{idx}] {clean!r} must appear verbatim in "
+                    f"translated {tid}.body.",
                 )
             if stage_rows and "from" in sl and "to" in sl:
                 grounded = extract_coordinate_links(
@@ -215,21 +270,46 @@ def _validate_item(
                 )
                 if not any(g["text"] == clean for g in grounded):
                     raise LLMValidationError(
-                        "TRANSLATION_LINK_UNGROUNDED", f"{tid} link[{idx}] fails endpoint check."
+                        "TRANSLATION_LINK_UNGROUNDED",
+                        f"{tid}.coordinateLinkTexts[{idx}] {clean!r} failed endpoint grounding: "
+                        f"must connect from={sl['from']} to={sl['to']} with a motion connector.",
                     )
             norm_links.append(clean)
         out["coordinateLinkTexts"] = norm_links
 
     if stage_rows:
-        check_texts = [out["body"], *out["uiCueTexts"]]
-        check_texts.extend(out[k] for k in _SCALAR_FIELDS if out.get(k))
+        labeled_texts: list[tuple[str, str]] = [(f"{tid}.body", out["body"])]
+        for idx, cue_text in enumerate(out["uiCueTexts"]):
+            labeled_texts.append((f"{tid}.uiCueTexts[{idx}]", cue_text))
+        for key in _SCALAR_FIELDS:
+            if out.get(key):
+                labeled_texts.append((f"{tid}.{key}", str(out[key])))
+        for idx, act_text in enumerate(out.get("proposalVerifiedActions") or ()):
+            labeled_texts.append((f"{tid}.proposalVerifiedActions[{idx}]", str(act_text)))
         if isinstance(out.get("proposalQuestion"), Mapping):
             pq = out["proposalQuestion"]
-            check_texts.extend([pq["question"], pq["note"], *(c["label"] for c in pq["choices"])])
-        for text in check_texts:
-            issues = verify_grounding(text, stage_rows, bindings)
-            if issues:
-                raise LLMValidationError("TRANSLATION_GROUNDING_MISMATCH", issues[0].message)
+            labeled_texts.append((f"{tid}.proposalQuestion.question", str(pq["question"])))
+            labeled_texts.append((f"{tid}.proposalQuestion.note", str(pq["note"])))
+            for idx, choice in enumerate(pq["choices"]):
+                labeled_texts.append(
+                    (f"{tid}.proposalQuestion.choices[{idx}].label", str(choice["label"]))
+                )
+        if isinstance(out.get("disagreement"), Mapping):
+            dis = out["disagreement"]
+            for key in _DISAGREEMENT_TEXT_KEYS:
+                if dis.get(key):
+                    labeled_texts.append((f"{tid}.disagreement.{key}", str(dis[key])))
+
+        grounding_msgs: list[str] = []
+        for field_path, text in labeled_texts:
+            for issue in verify_grounding(text, stage_rows, bindings):
+                msg = f"{field_path}: {issue.message}"
+                if msg not in grounding_msgs:
+                    grounding_msgs.append(msg)
+        if grounding_msgs:
+            raise LLMValidationError(
+                "TRANSLATION_GROUNDING_MISMATCH", "; ".join(grounding_msgs[:4])
+            )
     return out
 
 
@@ -272,20 +352,39 @@ class TranslationPipeline:
 
         started = self.clock.perf_counter()
         locale = normalize_language(target_language)
+        expected_ids = [str(item["turnId"]) for item in items]
         source_by_id = {str(item["turnId"]): item for item in items}
-        messages = build_translation_messages(items=items, target_language=locale)
+        plain_only = is_plain_translation_batch(items)
+        response_model: type[PlainTranslationPayload | TranslationPayload] = (
+            PlainTranslationPayload if plain_only else TranslationPayload
+        )
+        messages = build_translation_messages(
+            items=items, target_language=locale, plain_only=plain_only
+        )
         holder: dict[str, list[dict[str, Any]]] = {}
 
-        def _validate_gen(parsed: TranslationPayload) -> TranslationPayload:
+        def _validate_gen(
+            parsed: PlainTranslationPayload | TranslationPayload,
+        ) -> PlainTranslationPayload | TranslationPayload:
             if len(parsed.translations) != len(items):
+                actual_ids = [tr.turn_id for tr in parsed.translations]
                 raise LLMValidationError(
-                    "TRANSLATION_COUNT_MISMATCH", "Expected one translated item per source turn."
+                    "TRANSLATION_COUNT_MISMATCH",
+                    f"Expected {len(items)} translated items (turnIds={expected_ids}), "
+                    f"got {len(parsed.translations)} (turnIds={actual_ids}).",
                 )
             by_id: dict[str, dict[str, Any]] = {}
             for tr_item in parsed.translations:
-                if tr_item.turn_id not in source_by_id or tr_item.turn_id in by_id:
+                if tr_item.turn_id not in source_by_id:
                     raise LLMValidationError(
-                        "TRANSLATION_TURN_ID_MISMATCH", "turnIds must match requested turns."
+                        "TRANSLATION_TURN_ID_MISMATCH",
+                        f"Unexpected turnId {tr_item.turn_id!r}; expected turnIds={expected_ids}.",
+                    )
+                if tr_item.turn_id in by_id:
+                    raise LLMValidationError(
+                        "TRANSLATION_TURN_ID_MISMATCH",
+                        f"Duplicate turnId {tr_item.turn_id!r}; expected each of "
+                        f"{expected_ids} exactly once.",
                     )
                 by_id[tr_item.turn_id] = _validate_item(
                     tr_item, source_by_id[tr_item.turn_id], locale
@@ -298,7 +397,7 @@ class TranslationPipeline:
             task="translation",
             model=self.model,
             messages=messages,
-            response_model=TranslationPayload,
+            response_model=response_model,
             validator=_validate_gen,
             deadline=deadline,
             max_attempts=self.generation_max_attempts,
