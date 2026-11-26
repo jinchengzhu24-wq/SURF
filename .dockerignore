@@ -1,0 +1,67 @@
+# Version control & local AI/IDE metadata
+.git/
+.gitignore
+.vscode/
+.vsconfig
+.idea/
+.playwright-mcp/
+AI_Exchange/
+
+# Secrets, local databases, logs, and research outputs
+.env
+.env.*
+SERVER.md
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+server/data/
+logs/
+
+# Python virtualenvs and caches
+.venv/
+.venv*/
+venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Node build outputs and dependencies (installed fresh inside Docker Stage 1)
+node_modules/
+web/dist/
+
+# Unity project assets, caches, and WebGL builds
+Assets/
+Library/
+Logs/
+Temp/
+Obj/
+obj/
+ProjectSettings/
+UserSettings/
+WebGLBuild/
+Packages/manifest.json
+Packages/packages-lock.json
+*.csproj
+*.sln
+*.meta
+*.png
+
+# Legacy directories, tests, and docs not needed in production image
+Backend/
+CoCreationPrototype/
+Frontend/
+Multi-Agent/
+Tests/
+tests/
+docs/
+README.md
+AGENTS.md
+Nodes.md
+
+# Preserve web static assets (e.g. favicon.png) even though root *.png is ignored
+!web/**/*.png

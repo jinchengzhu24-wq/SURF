@@ -1,0 +1,28 @@
+[Unit]
+Description=Sokoban AI Study Platform (Unified FastAPI Server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sokoban
+Group=sokoban
+WorkingDirectory=/opt/sokoban
+EnvironmentFile=-/opt/sokoban/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sokoban/.venv/bin/uvicorn server.main:create_app --factory --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=-/opt/sokoban/server/data -/opt/sokoban/logs
+
+[Install]
+WantedBy=multi-user.target

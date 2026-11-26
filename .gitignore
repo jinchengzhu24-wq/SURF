@@ -11,6 +11,7 @@
 
 # IDE and editor generated files
 .playwright-mcp/
+Backend/.idea/
 .vs/
 /.vsconfig
 .vscode/
@@ -29,10 +30,30 @@
 *.opendb
 *.VC.db
 
-# Backend local secrets/cache
-Backend/.env
+# Python / Backend local secrets, caches, and logs
+.venv*
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
 Backend/__pycache__/
+Backend/logs/
 /Backend/study_logs/
+
+# Platform web and server runtime artifacts
+node_modules/
+web/dist/
+server/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+/CoCreationPrototype/Backend/data/
+/CoCreationPrototype/Backend/evaluation_runs/
 
 # Local essay/reference drafts
 /[Aa]ssets/[Ee]ssay[Bb]ase/

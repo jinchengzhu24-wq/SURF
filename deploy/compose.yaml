@@ -1,0 +1,18 @@
+services:
+  sokoban:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: sokoban-platform:latest
+    container_name: sokoban-platform
+    env_file:
+      - path: ../.env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - sokoban_data:/app/server/data
+    restart: unless-stopped
+
+volumes:
+  sokoban_data:

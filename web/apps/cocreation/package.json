@@ -1,0 +1,17 @@
+{
+  "name": "@sokoban/cocreation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.11.4",
+    "@sokoban/ui-core": "0.1.0",
+    "preact": "^11.2.0",
+    "zod": "^4.6.7"
+  }
+}
