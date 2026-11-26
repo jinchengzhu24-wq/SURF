@@ -5,10 +5,10 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import Iterable
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _SECRET_FIELD_MARKERS = ("key", "secret", "password", "token")
 
@@ -87,7 +87,7 @@ class BaseSokobanSettings(BaseSettings):
     )
 
     log_level: str = "INFO"
-    allowed_origins: tuple[str, ...] = ("*",)
+    allowed_origins: Annotated[tuple[str, ...], NoDecode] = ("*",)
 
     @field_validator("log_level", mode="before")
     @classmethod

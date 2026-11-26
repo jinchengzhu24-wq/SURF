@@ -109,3 +109,19 @@ def test_settings_helpers_and_base_class() -> None:
     assert "sk-demo-secret-12345" in secrets
     assert "pw-9876" in secrets
     assert "sokoban" not in secrets
+
+
+def test_sokoban_settings_loads_comma_separated_origins_from_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from server.settings import SokobanSettings
+
+    monkeypatch.setenv(
+        "COCREATION_ALLOWED_ORIGINS",
+        "https://sokobanaidemo.top,https://www.sokobanaidemo.top",
+    )
+    settings = SokobanSettings.from_env(load_dotenv_file=False)
+    assert settings.allowed_origins == (
+        "https://sokobanaidemo.top",
+        "https://www.sokobanaidemo.top",
+    )

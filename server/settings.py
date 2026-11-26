@@ -6,10 +6,11 @@ import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from dotenv import load_dotenv
 from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic_settings import NoDecode
 
 from server.core.settings import BaseSokobanSettings, parse_allowed_origins
 
@@ -158,7 +159,7 @@ class SokobanSettings(BaseSokobanSettings):
             "SOKOBAN_DB_PATH", "COCREATION_DATABASE_PATH", "db_path"
         ),
     )
-    allowed_origins: tuple[str, ...] = Field(
+    allowed_origins: Annotated[tuple[str, ...], NoDecode] = Field(
         default=DEFAULT_ALLOWED_ORIGINS,
         validation_alias=AliasChoices(
             "ALLOWED_ORIGINS",
