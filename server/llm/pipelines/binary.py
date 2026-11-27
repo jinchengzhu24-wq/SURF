@@ -16,6 +16,7 @@ from server.domain.proposals import (
     ProposalSearchExhausted,
     binary_signature,
     check_promises,
+    connected_outer_shell,
     normalize_requirement_record,
     parse_binary_step,
     parse_revision_plan,
@@ -24,6 +25,7 @@ from server.domain.proposals import (
     search_revision_plan,
     validate_requirement_record,
 )
+from server.domain.proposals.binary_discovery import _corridor_span, _focus_cells
 from server.i18n.messages import normalize_language
 from server.llm._schemas_proposals import select_binary_discovery_schema
 from server.llm._schemas_tasks import StrictSchema
@@ -36,6 +38,117 @@ from server.llm.grounding import (
 from server.llm.prompts.binary import build_binary_discovery_messages
 
 from .proposal import format_preflight_issues, merge_revision_strategies
+
+
+def _check_branch_promise_precondition(
+    rows: Sequence[str],
+    outer_shell: set[tuple[int, int]],
+    *,
+    branch_index: int,
+    promise: Mapping[str, Any],
+    strategy: Mapping[str, Any] | None = None,
+) -> None:
+    """Fast base-map precondition check before spending beam-search budget on doomed branches."""
+    kind = str(promise.get("kind") or "")
+    component = str(promise.get("component") or "")
+    if kind == "widen_corridor":
+        corridor = promise.get("corridor")
+        if isinstance(corridor, Mapping):
+            row = int(corridor["row"])
+            col = int(corridor["column"])
+            axis = str(corridor["axis"])
+            orth_axis = "vertical" if axis == "horizontal" else "horizontal"
+            before = _corridor_span(rows, row, col, axis)
+            if before == 0:
+                tile = rows[row - 1][col - 1]
+                raise LLMValidationError(
+                    "BINARY_PREFLIGHT_NOT_FOUND",
+                    (
+                        f"Branch {branch_index} widen_corridor cell ({row},{col}) is not "
+                        f"walkable (tile={tile!r}); choose a walkable floor cell inside a "
+                        "narrow corridor, or switch promise.kind to 'reduce_obstacles' or "
+                        "'shorter_solution'."
+                    ),
+                )
+            along = _corridor_span(rows, row, col, orth_axis)
+            if along < 3 or before >= along:
+                raise LLMValidationError(
+                    "BINARY_PREFLIGHT_NOT_FOUND",
+                    (
+                        f"Branch {branch_index} widen_corridor at ({row},{col}) axis='{axis}' "
+                        f"fails corridor geometry on the current Stage (width={before}, "
+                        f"orthogonal length={along}; requires width < length and length >= 3). "
+                        "Note: corridor.axis is the narrow cross-section axis to widen "
+                        "(perpendicular to travel direction: use axis='vertical' for a horizontal "
+                        "corridor and axis='horizontal' for a vertical corridor). Pick the "
+                        "narrower axis/cell, or switch promise.kind to 'reduce_obstacles' or "
+                        "'shorter_solution'."
+                    ),
+                )
+    elif kind in {"reduce_obstacles", "reshape_water"}:
+        prom_focus = promise.get("focus") if isinstance(promise.get("focus"), Mapping) else None
+        strat_focus = (
+            strategy.get("focus")
+            if isinstance(strategy, Mapping) and isinstance(strategy.get("focus"), Mapping)
+            else None
+        )
+        height = len(rows)
+        inter_cells = [
+            (y, x, tile)
+            for y, x, tile in _focus_cells(rows, prom_focus)
+            if 0 < y < height - 1
+            and 0 < x < len(rows[y]) - 1
+            and (
+                strat_focus is None
+                or max(
+                    abs(y + 1 - int(strat_focus["row"])),
+                    abs(x + 1 - int(strat_focus["column"])),
+                )
+                <= int(strat_focus["radius"])
+            )
+        ]
+        if kind == "reshape_water":
+            water_count = sum(1 for _, _, tile in inter_cells if tile == "@")
+            dest_count = sum(
+                1
+                for y, x, tile in inter_cells
+                if tile == "." or (tile == "#" and (x, y) not in outer_shell)
+            )
+            if water_count == 0 or dest_count == 0:
+                raise LLMValidationError(
+                    "BINARY_PREFLIGHT_NOT_FOUND",
+                    (
+                        f"Branch {branch_index} reshape_water/water requires both '@' "
+                        f"(got {water_count}) and destination '.' or editable '#' "
+                        f"(got {dest_count}) inside strategy.focus={strat_focus} & "
+                        f"promise.focus={prom_focus}; widen/align focus, set focus=null, "
+                        "or switch to 'reduce_obstacles'."
+                    ),
+                )
+            return
+
+        if component == "water":
+            editable_count = sum(1 for _, _, tile in inter_cells if tile == "@")
+        elif component == "internal_walls":
+            editable_count = sum(
+                1 for y, x, tile in inter_cells if tile == "#" and (x, y) not in outer_shell
+            )
+        else:
+            editable_count = sum(
+                1
+                for y, x, tile in inter_cells
+                if tile == "@" or (tile == "#" and (x, y) not in outer_shell)
+            )
+        if editable_count == 0:
+            raise LLMValidationError(
+                "BINARY_PREFLIGHT_NOT_FOUND",
+                (
+                    f"Branch {branch_index} reduce_obstacles/{component} contains 0 matching "
+                    f"editable tiles inside strategy.focus={strat_focus} & "
+                    f"promise.focus={prom_focus} on the current Stage; align/widen focus, "
+                    "set focus=null, or pick another component."
+                ),
+            )
 
 
 def _normalize_binary_payload_dict(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -137,6 +250,7 @@ class BinaryDiscoveryPipeline:
         """Execute Policy-2 single-slot binary discovery with bounded deterministic preflight."""
         locale = normalize_language(language)
         grid = parse_grid(grid_or_rows)
+        outer_shell = connected_outer_shell(grid.rows)
         snapshot = build_stage_facts(grid, entity_bindings).to_prompt_dict()
         messages = build_binary_discovery_messages(
             stage_snapshot=snapshot,
@@ -237,7 +351,10 @@ class BinaryDiscoveryPipeline:
                     )
                 try:
                     normalized_req, _ = normalize_requirement_record(
-                        step["initialRequirements"], list(initial_designer_turns)[:1], snapshot
+                        step["initialRequirements"],
+                        list(initial_designer_turns)[:1],
+                        snapshot,
+                        design_context=design_context,
                     )
                     initial_req = validate_requirement_record(
                         normalized_req, list(initial_designer_turns)[:1], snapshot
@@ -289,6 +406,19 @@ class BinaryDiscoveryPipeline:
 
             candidates: list[BranchPreflightCandidate] = []
             if step["action"] == "ask":
+                for idx, branch in enumerate(step["branches"], start=1):
+                    eff_strat = (
+                        merge_revision_strategies([*prior_strategies, branch["strategy"]])
+                        if prior_strategies
+                        else branch["strategy"]
+                    )
+                    _check_branch_promise_precondition(
+                        grid.rows,
+                        outer_shell,
+                        branch_index=idx,
+                        promise=branch["promise"],
+                        strategy=eff_strat,
+                    )
                 base_solve = await _get_baseline()
                 if preflight_remaining <= 0.0:
                     raise LLMValidationError(
@@ -350,16 +480,45 @@ class BinaryDiscoveryPipeline:
                             ValueError,
                         ) as exc:
                             detail = str(exc)
+                            advice = ""
                             if isinstance(exc, ProposalSearchExhausted):
                                 reasons = (exc.diagnostics or {}).get("failureReasons")
                                 if reasons:
                                     detail = f"{detail} failureReasons={reasons}"
+                                    if (
+                                        isinstance(reasons, Mapping)
+                                        and "BINARY_PROMISE_NOT_REALIZED" in reasons
+                                    ) or (
+                                        isinstance(reasons, str)
+                                        and "BINARY_PROMISE_NOT_REALIZED" in reasons
+                                    ):
+                                        p_kind = str(branch["promise"].get("kind") or "")
+                                        if p_kind == "reduce_obstacles":
+                                            alt_hint = (
+                                                "switching to 'shorter_solution' or 'reshape_water'"
+                                            )
+                                        elif p_kind == "shorter_solution":
+                                            alt_hint = (
+                                                "switching to 'reduce_obstacles' or 'reshape_water'"
+                                            )
+                                        else:
+                                            alt_hint = (
+                                                "switching to 'reduce_obstacles' or "
+                                                "'shorter_solution'"
+                                            )
+                                        advice = (
+                                            " Try broadening/aligning strategy.focus and "
+                                            f"promise.focus (or focus=null), increasing "
+                                            f"editBudget, {alt_hint}, or returning "
+                                            "action='blocked' if the request is "
+                                            "contradictory/impossible."
+                                        )
                             raise LLMValidationError(
                                 "BINARY_PREFLIGHT_NOT_FOUND",
                                 (
                                     f"Branch {idx} (promise={branch['promise']['kind']}/"
                                     f"{branch['promise']['component']}) failed deterministic "
-                                    f"preflight: {detail}"
+                                    f"preflight: {detail}{advice}"
                                 ),
                             ) from exc
 

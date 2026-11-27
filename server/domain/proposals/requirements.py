@@ -29,6 +29,22 @@ _PLATFORM_LOCK_PHRASE = re.compile(
     r"keep.{0,24}(?:fixed|unchanged|intact)|do\s+not\s+move|don't\s+move)",
     re.I,
 )
+_OUTER_WALL_TOKEN_RE = re.compile(r"\bouter[\s_-]*walls?\b|外墙|外围墙体?", re.I)
+_PROTECTED_ONLY_SUBJECT_RE = re.compile(
+    r"\b(?:player|character|box|boxes|crate|crates|target|targets|goal|goals|"
+    r"outer[\s_-]*walls?|outer[\s_-]*shell|perimeter|boundary|boundaries)\b|"
+    r"(?:玩家|角色|小人|箱子|木箱|目标点?|终点|外墙|外围墙体?|外框|边界)",
+    re.I,
+)
+_EDITABLE_OR_GAMEPLAY_SUBJECT_RE = re.compile(
+    r"\b(?:water|waters|pond|pool|river|moat|wall|walls|obstacle|obstacles|"
+    r"barrier|barriers|block|blocks|corridor|corridors|passage|passages|aisle|aisles|"
+    r"route|routes|path|paths|step|steps|push|pushes|detour|detours|"
+    r"space|room|floor|tile|tiles|cell|cells)\b|"
+    r"(?:水|水域|水池|水面|墙|墙体|墙壁|内墙|障碍|阻挡|通道|走廊|过道|"
+    r"路线|路径|步数|推数|推动|绕路|空间|地面|空地|格子)",
+    re.I,
+)
 _GENERIC_ENTITY_LABELS: frozenset[str] = frozenset(
     {
         "PLAYER",
@@ -45,15 +61,66 @@ _GENERIC_ENTITY_LABELS: frozenset[str] = frozenset(
 )
 
 
+_DESIGN_CONTEXT_TEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "goal",
+        "constraint",
+        "decision",
+        "reason",
+        "question",
+        "statement",
+        "displayStatement",
+        "evidenceSpan",
+        "normalizedMeaning",
+        "userPosition",
+        "aiPosition",
+        "coreDisagreement",
+        "proposalSummary",
+        "acceptedReason",
+        "primaryHypothesis",
+        "secondaryHypothesis",
+        "observation",
+    }
+)
+
+
+def _collect_design_context_texts(design_context: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(design_context, Mapping):
+        return []
+    collected: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                if (
+                    key in _DESIGN_CONTEXT_TEXT_KEYS
+                    and isinstance(value, str)
+                    and len(value.strip()) >= 4
+                ):
+                    collected.append(value.strip())
+                elif isinstance(value, (Mapping, list, tuple)):
+                    _walk(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                _walk(item)
+
+    _walk(design_context)
+    return collected
+
+
 def normalize_requirement_record(
     payload: Any,
     user_turns: Sequence[Mapping[str, Any]],
     snapshot: Mapping[str, Any] | None,
+    *,
+    design_context: Mapping[str, Any] | None = None,
 ) -> tuple[Any, list[str]]:
     """Prune redundant platform-protected invariants and normalize benign schema quirks."""
     if not isinstance(payload, Mapping) or not isinstance(payload.get("requirements"), list):
         return payload, []
     sources = {str(item["id"]): str(item["content"]) for item in user_turns or ()}
+    turn_texts = list(sources.values())
+    context_texts_folded = [t.casefold() for t in _collect_design_context_texts(design_context)]
     labels = {
         str(item.get("id") or item.get("label") or "").upper()
         for item in (snapshot or {}).get("entities") or ()
@@ -67,6 +134,14 @@ def normalize_requirement_record(
             cleaned.append(raw)
             continue
         item = dict(raw)
+        item.pop("requirementId", None)
+        if (
+            item.get("property") == "change_scope"
+            and item.get("value") is None
+            and item.get("relation") in {"preserve", "equal", "decrease"}
+        ):
+            audit_notes.append("dropped_unbounded_change_scope")
+            continue
         is_protected_component = item.get("component") in {"player", "box", "target"} and (
             item.get("property") in {"count", "positions"}
         )
@@ -81,7 +156,16 @@ def normalize_requirement_record(
                 )
             )
         )
-        if is_protected_component and has_lock_signal:
+        span_and_stmt = f"{item.get('evidenceSpan') or ''} {item.get('statement') or ''}"
+        stripped_for_editable = _OUTER_WALL_TOKEN_RE.sub(" ", span_and_stmt)
+        is_mismapped_protected_lock = (
+            item.get("value") is None
+            and item.get("relation") in {"preserve", "equal"}
+            and bool(_PLATFORM_LOCK_PHRASE.search(span_and_stmt))
+            and bool(_PROTECTED_ONLY_SUBJECT_RE.search(span_and_stmt))
+            and not bool(_EDITABLE_OR_GAMEPLAY_SUBJECT_RE.search(stripped_for_editable))
+        )
+        if (is_protected_component and has_lock_signal) or is_mismapped_protected_lock:
             audit_notes.append("dropped_platform_protection")
             continue
         if "entities" not in item or item.get("entities") is None:
@@ -116,6 +200,17 @@ def normalize_requirement_record(
             item["sourceTurnId"] = default_turn_id
             audit_notes.append("bound_single_source_turn")
         source_text = sources.get(str(item.get("sourceTurnId") or ""))
+        raw_span = item.get("evidenceSpan")
+        clean_span = raw_span.strip() if isinstance(raw_span, str) else ""
+        if (
+            context_texts_folded
+            and len(clean_span) >= 3
+            and (source_text is None or clean_span not in source_text)
+            and not any(clean_span in t for t in turn_texts)
+            and any(clean_span.casefold() in ctx_t for ctx_t in context_texts_folded)
+        ):
+            audit_notes.append("dropped_design_context_echo")
+            continue
         priority_span = item.get("priorityEvidenceSpan")
         if source_text and item.get("value") is None:
             span = item.get("evidenceSpan")
@@ -147,15 +242,19 @@ def normalize_requirement_record(
     if isinstance(raw_bindings, list):
         filtered_bindings = []
         for binding in raw_bindings:
-            if (
-                isinstance(binding, Mapping)
-                and isinstance(binding.get("entity"), str)
-                and binding["entity"].upper() in _GENERIC_ENTITY_LABELS
-                and binding["entity"].upper() not in labels
-            ):
-                audit_notes.append("dropped_generic_entity_label")
-                continue
-            filtered_bindings.append(binding)
+            if isinstance(binding, Mapping):
+                if (
+                    isinstance(binding.get("entity"), str)
+                    and binding["entity"].upper() in _GENERIC_ENTITY_LABELS
+                    and binding["entity"].upper() not in labels
+                ):
+                    audit_notes.append("dropped_generic_entity_label")
+                    continue
+                filtered_bindings.append(
+                    {k: v for k, v in binding.items() if k != "authority"}
+                )
+            else:
+                filtered_bindings.append(binding)
         if filtered_bindings and not any(
             not (isinstance(r, Mapping) and r.get("entities")) for r in cleaned
         ):
@@ -163,11 +262,13 @@ def normalize_requirement_record(
             audit_notes.append("dropped_unbound_automatic_bindings")
         cleaned_bindings = filtered_bindings
 
-    return {
+    normalized_envelope = {
         **dict(payload),
         "requirements": cleaned,
         "automaticBindings": cleaned_bindings,
-    }, list(dict.fromkeys(audit_notes))
+    }
+    normalized_envelope.pop("policyVersion", None)
+    return normalized_envelope, list(dict.fromkeys(audit_notes))
 
 
 def validate_requirement_record(

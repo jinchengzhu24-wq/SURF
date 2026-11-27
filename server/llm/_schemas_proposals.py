@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from server.domain.proposals.models import (
     EFFECT_OPERATORS,
@@ -180,8 +180,27 @@ class RevisionStrategyPayload(StrictSchema):
         return self
 
 
+def _filter_valid_backup_items(value: Any, item_cls: type[StrictSchema]) -> Any:
+    """Drop invalid backup items only when 2..3 items are supplied and >=1 is valid."""
+    if not isinstance(value, list) or not (2 <= len(value) <= 3):
+        return value
+    valid_items: list[Any] = []
+    for item in value:
+        try:
+            item_cls.model_validate(item)
+        except ValidationError:
+            continue
+        valid_items.append(item)
+    return valid_items if valid_items else value
+
+
 class RevisionPlanPayload(StrictSchema):
     strategies: list[RevisionStrategyPayload] = Field(min_length=1, max_length=3)
+
+    @field_validator("strategies", mode="before")
+    @classmethod
+    def _filter_strategies(cls, value: Any) -> Any:
+        return _filter_valid_backup_items(value, RevisionStrategyPayload)
 
 
 class RequirementItemPayload(StrictSchema):
@@ -256,6 +275,17 @@ class RequirementItemPayload(StrictSchema):
             raise ValueError("statement must be a non-blank string.")
         if len(set(self.entities)) != len(self.entities):
             raise ValueError(f"entities must not contain duplicates; got {self.entities}.")
+        if (
+            self.value is None
+            and self.relation in {"seek", "avoid"}
+            and self.property not in {"appearance", "experience", "timing", "dependency"}
+        ):
+            self.component = "gameplay"
+            self.property = "experience"
+            self.unit = "none"
+            self.scope = "all"
+            if self.strength == "invariant":
+                self.strength = "goal"
         if self.scope == "original_cells" and (
             self.property != "count" or self.component not in {"water", "wall"}
         ):
@@ -446,6 +476,11 @@ class MapOperationCandidatePayload(StrictSchema):
 class MapOperationsPayload(StrictSchema):
     candidates: list[MapOperationCandidatePayload] = Field(min_length=1, max_length=3)
 
+    @field_validator("candidates", mode="before")
+    @classmethod
+    def _filter_candidates(cls, value: Any) -> Any:
+        return _filter_valid_backup_items(value, MapOperationCandidatePayload)
+
 
 class BinaryStrategyPayload(StrictSchema):
     """Lean Policy-2 binary discovery strategy (no metricGoals or unused fields)."""
@@ -539,9 +574,43 @@ class BinaryBranchPayload(StrictSchema):
     promise: BinaryPromisePayload
 
     @model_validator(mode="after")
-    def _validate_label(self) -> BinaryBranchPayload:
+    def _validate_branch(self) -> BinaryBranchPayload:
         if not self.label.strip():
             raise ValueError("branch.label must be a non-blank string.")
+        usable = {
+            op
+            for op in self.strategy.operators
+            if OPERATOR_COMPONENT.get(op) not in self.strategy.preserve
+        }
+        kind = self.promise.kind
+        if kind in {"reduce_obstacles", "widen_corridor"}:
+            comp = self.promise.component
+            if comp == "internal_walls" and "remove_wall" not in usable:
+                raise ValueError(
+                    f"promise {kind}/internal_walls requires 'remove_wall' in usable "
+                    f"strategy.operators (got usable={sorted(usable)})."
+                )
+            if comp == "water" and "remove_water" not in usable:
+                raise ValueError(
+                    f"promise {kind}/water requires 'remove_water' in usable "
+                    f"strategy.operators (got usable={sorted(usable)})."
+                )
+            if comp == "obstacles" and not (usable & {"remove_wall", "remove_water"}):
+                raise ValueError(
+                    f"promise {kind}/obstacles requires 'remove_wall' or 'remove_water' in "
+                    f"usable strategy.operators (got usable={sorted(usable)})."
+                )
+        elif kind == "reshape_water":
+            if not {"add_water", "remove_water"}.issubset(usable):
+                raise ValueError(
+                    "promise reshape_water requires both 'add_water' and 'remove_water' in "
+                    f"usable strategy.operators (got usable={sorted(usable)})."
+                )
+            if self.strategy.edit_budget < 2:
+                raise ValueError(
+                    "promise reshape_water requires strategy.editBudget >= 2 "
+                    f"(got editBudget={self.strategy.edit_budget})."
+                )
         return self
 
 
@@ -673,6 +742,11 @@ class BinaryDiscoveryInitialPayload(StrictSchema):
         default=None, alias="initialRequirements"
     )
 
+    @field_validator("plan_strategies", mode="before")
+    @classmethod
+    def _filter_plan_strategies(cls, value: Any) -> Any:
+        return _filter_valid_backup_items(value, BinaryStrategyPayload)
+
     @model_validator(mode="after")
     def _validate_step(self) -> BinaryDiscoveryInitialPayload:
         _validate_binary_discovery_step(self, is_initial=True, can_ask=True)
@@ -692,6 +766,11 @@ class BinaryDiscoveryFollowupPayload(StrictSchema):
     protected_entities: list[ProtectedEntityKey] = Field(
         default_factory=list, alias="protectedEntities", max_length=4
     )
+
+    @field_validator("plan_strategies", mode="before")
+    @classmethod
+    def _filter_plan_strategies(cls, value: Any) -> Any:
+        return _filter_valid_backup_items(value, BinaryStrategyPayload)
 
     @model_validator(mode="after")
     def _validate_step(self) -> BinaryDiscoveryFollowupPayload:
@@ -714,6 +793,11 @@ class BinaryDiscoveryInitialFinalPayload(StrictSchema):
         default=None, alias="initialRequirements"
     )
 
+    @field_validator("plan_strategies", mode="before")
+    @classmethod
+    def _filter_plan_strategies(cls, value: Any) -> Any:
+        return _filter_valid_backup_items(value, BinaryStrategyPayload)
+
     @model_validator(mode="after")
     def _validate_step(self) -> BinaryDiscoveryInitialFinalPayload:
         _validate_binary_discovery_step(self, is_initial=True, can_ask=False)
@@ -731,6 +815,11 @@ class BinaryDiscoveryFollowupFinalPayload(StrictSchema):
     protected_entities: list[ProtectedEntityKey] = Field(
         default_factory=list, alias="protectedEntities", max_length=4
     )
+
+    @field_validator("plan_strategies", mode="before")
+    @classmethod
+    def _filter_plan_strategies(cls, value: Any) -> Any:
+        return _filter_valid_backup_items(value, BinaryStrategyPayload)
 
     @model_validator(mode="after")
     def _validate_step(self) -> BinaryDiscoveryFollowupFinalPayload:

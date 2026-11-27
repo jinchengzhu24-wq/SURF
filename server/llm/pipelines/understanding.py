@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from server.core.clock import SYSTEM_CLOCK, Clock
-from server.core.grid import Grid, parse_structural_grid
+from server.core.grid import HEIGHT, TILE_VOID, WIDTH, Grid, parse_structural_grid
 from server.core.llm_client import LLMTransport, LLMValidationError, call_structured
 from server.i18n.messages import normalize_language
 from server.llm.grounding import (
@@ -33,6 +34,106 @@ from server.llm.schemas import (
 )
 
 _PROTECTED_COMPONENTS = frozenset({"outer_shell", "player", "boxes", "targets"})
+
+_EXPLICIT_COORD_RE = re.compile(
+    r"(?:[\(（]\s*(?P<row_p>\d{1,2})\s*[,，]\s*(?P<col_p>\d{1,2})\s*[\)）]"
+    r"|(?:row|line)\s*(?P<row_e>\d{1,2})\s*,?\s*(?:column|col)\.?\s*(?P<col_e>\d{1,2})"
+    r"|第\s*(?P<row_z>\d{1,2})\s*行[\s,，、]*第\s*(?P<col_z>\d{1,2})\s*列)",
+    re.IGNORECASE,
+)
+_REVIEW_PROTECT_COORD_COMMA_RE = re.compile(r"(?<=\d)[,，](?=\s*\d)")
+_REVIEW_PROTECT_ROW_COL_COMMA_RE = re.compile(
+    r"((?:row|line)\s*\d{1,2})\s*,\s*((?:column|col)\b)"
+    r"|(第\s*\d{1,2}\s*行)\s*[,，、]\s*(第\s*\d{1,2}\s*列)",
+    re.IGNORECASE,
+)
+_REVIEW_CLAUSE_SPLIT_RE = re.compile(r"[,，;；.!?。！？\r\n]+")
+_NON_COORD_PAREN_PREFIX_RE = re.compile(
+    r"(?:\b(?:dimensions?|size|grid\s+size|steps?|pushes?|moves?|delta|deltas|"
+    r"scores?|counts?|totals?|ratio|bounds?|range|limits?|metrics?|stats?|solution)\b"
+    r"|尺寸|维度|大小|步数|推数|推动|步/推|数量|计数)\s*[:：=]?\s*$",
+    re.IGNORECASE,
+)
+_NON_COORD_PAREN_SUFFIX_RE = re.compile(
+    r"^\s*(?:\b(?:steps?|pushes?|moves?)\b|步|推)",
+    re.IGNORECASE,
+)
+_VOID_DESCRIPTION_CLAUSE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:void|exterior|outside|out\s+of\s+bounds|non-playable)(?![A-Za-z0-9_])"
+    r"|(?:地图外|边界外|外墙外|外壳外|外部|外侧|空白|虚空)",
+    re.IGNORECASE,
+)
+
+
+def _extract_explicit_coords(text: str) -> list[tuple[int, int]]:
+    """Extract explicit 1-based (row, col) coordinates from visible review prose."""
+    protected = _REVIEW_PROTECT_COORD_COMMA_RE.sub("\x00", text)
+    protected = _REVIEW_PROTECT_ROW_COL_COMMA_RE.sub(
+        lambda m: (
+            f"{m.group(1)}\x00 {m.group(2)}"
+            if m.group(1) is not None
+            else f"{m.group(3)}\x00{m.group(4)}"
+        ),
+        protected,
+    )
+    clauses = [
+        piece.replace("\x00", ",").strip() for piece in _REVIEW_CLAUSE_SPLIT_RE.split(protected)
+    ]
+    coords: list[tuple[int, int]] = []
+    for clause in clauses:
+        if not clause or _VOID_DESCRIPTION_CLAUSE_RE.search(clause):
+            continue
+        for match in _EXPLICIT_COORD_RE.finditer(clause):
+            groups = match.groupdict()
+            is_bare_paren = groups.get("row_p") is not None and groups.get("col_p") is not None
+            if is_bare_paren:
+                prefix = clause[max(0, match.start() - 32) : match.start()]
+                suffix = clause[match.end() : match.end() + 20]
+                if _NON_COORD_PAREN_PREFIX_RE.search(prefix) or _NON_COORD_PAREN_SUFFIX_RE.search(
+                    suffix
+                ):
+                    continue
+            for suffix_key in ("p", "e", "z"):
+                row_s, col_s = groups.get(f"row_{suffix_key}"), groups.get(f"col_{suffix_key}")
+                if row_s is not None and col_s is not None:
+                    coord = (int(row_s), int(col_s))
+                    if coord not in coords:
+                        coords.append(coord)
+                    break
+    return coords
+
+
+def _extract_verified_diff_coords(review_context: Mapping[str, Any]) -> list[tuple[int, int]]:
+    """Extract 1-based (row, col) coordinates from reviewContext diff / verifiedDiff entries."""
+    raw_items: Any = review_context.get("diff")
+    if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
+        raw_items = review_context.get("verifiedDiff")
+    if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
+        return []
+    coords: list[tuple[int, int]] = []
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            continue
+        row, col = item.get("row"), item.get("column")
+        x, y = item.get("x"), item.get("y")
+        coord: tuple[int, int] | None = None
+        if (
+            isinstance(row, int)
+            and not isinstance(row, bool)
+            and isinstance(col, int)
+            and not isinstance(col, bool)
+        ):
+            coord = (row, col)
+        elif (
+            isinstance(x, int)
+            and not isinstance(x, bool)
+            and isinstance(y, int)
+            and not isinstance(y, bool)
+        ):
+            coord = (y + 1, x + 1)
+        if coord is not None and coord not in coords:
+            coords.append(coord)
+    return coords
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +418,12 @@ class UnderstandingPipeline:
             language=locale,
         )
 
+        verified_diff_coords = _extract_verified_diff_coords(review_context)
+        verified_diff_coord_set = frozenset(verified_diff_coords)
+        verified_diff_label = ", ".join(
+            f"row {r}, column {c}" for r, c in verified_diff_coords[:8]
+        )
+
         def _validate(
             parsed: ManualEditReviewNoConflictPayload,
         ) -> ManualEditReviewNoConflictPayload:
@@ -378,6 +485,29 @@ class UnderstandingPipeline:
             grounding_msgs: list[str] = []
             leak_msgs: list[str] = []
             for field_name, text in labeled_texts:
+                if verified_diff_coords:
+                    for cited_row, cited_col in _extract_explicit_coords(text):
+                        if not (1 <= cited_row <= HEIGHT and 1 <= cited_col <= WIDTH):
+                            msg = (
+                                f"{field_name}: Cited out-of-bounds coordinate "
+                                f"row {cited_row}, column {cited_col}. Use exact 1-based "
+                                f"coordinates from reviewContext.diff: {verified_diff_label}."
+                            )
+                            if msg not in grounding_msgs:
+                                grounding_msgs.append(msg)
+                            continue
+                        if (
+                            grid.tile_at(cited_col - 1, cited_row - 1) == TILE_VOID
+                            and (cited_row, cited_col) not in verified_diff_coord_set
+                        ):
+                            msg = (
+                                f"{field_name}: Cited row {cited_row}, column {cited_col} "
+                                "is void (' ') outside the playable map, not a changed cell. "
+                                "Cite the exact 1-based changed coordinates from "
+                                f"reviewContext.diff: {verified_diff_label}."
+                            )
+                            if msg not in grounding_msgs:
+                                grounding_msgs.append(msg)
                 for issue in verify_grounding(text, grid, entity_bindings):
                     msg = f"{field_name}: {issue.message}"
                     if msg not in grounding_msgs:

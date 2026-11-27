@@ -278,7 +278,10 @@ class ProposalPipeline:
 
         def _validate(parsed: RequirementRecordPayload) -> RequirementRecordPayload:
             normalized_payload, _ = normalize_requirement_record(
-                parsed.model_dump(by_alias=True), designer_turns, snapshot
+                parsed.model_dump(by_alias=True),
+                designer_turns,
+                snapshot,
+                design_context=design_context,
             )
             record = validate_requirement_record(normalized_payload, designer_turns, snapshot)
             issues = preflight_requirements(grid.rows, record)
@@ -352,10 +355,39 @@ class ProposalPipeline:
             excluded_hint=excluded_hint,
         )
         holder: dict[str, RevisionPlan] = {}
+        has_exact_transitions = bool(
+            isinstance(requirements, Mapping) and requirements.get("exactTransitions")
+        )
 
         def _validate(parsed: RevisionPlanPayload) -> RevisionPlanPayload:
-            plan = parse_revision_plan(parsed.model_dump(by_alias=True))
-            validate_revision_plan_against_map(grid.rows, plan)
+            raw_plan = parsed.model_dump(by_alias=True)
+            if has_exact_transitions:
+                plan = parse_revision_plan(raw_plan)
+                validate_revision_plan_against_map(grid.rows, plan)
+                holder["plan"] = plan
+                return parsed
+
+            valid_strategy_dicts: list[dict[str, Any]] = []
+            for strat_dict in raw_plan.get("strategies") or ():
+                try:
+                    single = parse_revision_plan({"strategies": [strat_dict]})
+                    validate_revision_plan_against_map(grid.rows, single)
+                    valid_strategy_dicts.append(strat_dict)
+                except ValueError:
+                    if strat_dict.get("requiredTransitions"):
+                        stripped = {**strat_dict, "requiredTransitions": []}
+                        try:
+                            single_clean = parse_revision_plan({"strategies": [stripped]})
+                            validate_revision_plan_against_map(grid.rows, single_clean)
+                            valid_strategy_dicts.append(stripped)
+                        except ValueError:
+                            continue
+            if not valid_strategy_dicts:
+                plan = parse_revision_plan(raw_plan)
+                validate_revision_plan_against_map(grid.rows, plan)
+            else:
+                plan = parse_revision_plan({"strategies": valid_strategy_dicts})
+                validate_revision_plan_against_map(grid.rows, plan)
             holder["plan"] = plan
             return parsed
 

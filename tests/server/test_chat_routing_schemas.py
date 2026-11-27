@@ -22,6 +22,7 @@ from server.core.llm_client import (
     _prepare_schema_for_mode,
 )
 from server.domain.blueprints.validation import validate_level_plan
+from server.llm.grounding import verify_grounding
 from server.llm.pipelines.chat import ChatPipeline
 from server.llm.pipelines.dg_guide import DGGuidePipeline, normalize_dg_partner_rationale
 from server.llm.pipelines.level_plan import LevelPlanPipeline
@@ -29,6 +30,10 @@ from server.llm.pipelines.translation import TranslationPipeline
 from server.llm.pipelines.understanding import ManualEditConflictResult, UnderstandingPipeline
 from server.llm.prompts.dg_guide import _DG_GUIDE_SYSTEM, build_dg_guide_messages
 from server.llm.prompts.translation import build_translation_messages
+from server.llm.prompts.understanding import (
+    build_manual_edit_conflict_messages,
+    build_manual_edit_review_messages,
+)
 from server.llm.schemas import (
     ChatReplyPayload,
     CoordinateLinkPayload,
@@ -681,6 +686,152 @@ async def test_understanding_manual_edit_review_classification_and_challenge_val
     )
     assert ch_res.attempts_used == 2
     assert "comparison" in transport.calls[5]["messages"][-1]["content"]
+
+
+def test_manual_edit_prompts_convert_zero_based_diff_coords_without_mutation() -> None:
+    raw_diff_item = {"x": 3, "y": 1, "before": ".", "after": "#"}
+    effect_evidence = [
+        {
+            "id": "diff:v2",
+            "kind": "verified_diff",
+            "diff": [raw_diff_item],
+        }
+    ]
+    review_context = {
+        "stageNumber": 2,
+        "diff": [raw_diff_item],
+        "changeSummary": {"changedCellCount": 1},
+    }
+
+    conflict_msgs = build_manual_edit_conflict_messages(
+        directions=[{"id": "dir-1", "fact": "Keep center open"}],
+        effect_evidence=effect_evidence,
+        language="en",
+    )
+    conflict_payload = json.loads(conflict_msgs[1]["content"])
+    conflict_diff = conflict_payload["effectEvidence"][0]["diff"]
+    assert conflict_diff == [{"row": 2, "column": 4, "before": ".", "after": "#"}]
+    assert "x" not in conflict_diff[0] and "y" not in conflict_diff[0]
+
+    review_msgs = build_manual_edit_review_messages(
+        stage_snapshot={"rows": list(SAMPLE_ROWS)},
+        conflict_verdict="no_conflict",
+        review_context=review_context,
+        language="en",
+    )
+    assert "1-based (row, column)" in review_msgs[0]["content"]
+    assert "reviewContext.diff" in review_msgs[0]["content"]
+    review_payload = json.loads(review_msgs[1]["content"])
+    review_diff = review_payload["reviewContext"]["diff"]
+    assert review_diff == [{"row": 2, "column": 4, "before": ".", "after": "#"}]
+    assert "x" not in review_diff[0] and "y" not in review_diff[0]
+
+    # Caller dicts and lists must NOT be mutated
+    assert raw_diff_item == {"x": 3, "y": 1, "before": ".", "after": "#"}
+    assert effect_evidence[0]["diff"][0] == {"x": 3, "y": 1, "before": ".", "after": "#"}
+    assert review_context["diff"][0] == {"x": 3, "y": 1, "before": ".", "after": "#"}
+
+
+async def test_manual_edit_review_rejects_void_coordinate_and_recovers_on_retry() -> None:
+    # Inset playable shell so (row=3, col=1) is VOID ' ' while (row=2, col=4) [x=3, y=1] is '#'
+    inset_rows: tuple[str, ...] = (
+        "  ########  ",
+        "  ##....##  ",
+        "  #..p...#  ",
+        "  #..s.t.#  ",
+        "  #......#  ",
+        "  #..s.t.#  ",
+        "  #....@.#  ",
+        "  #......#  ",
+        "  ########  ",
+        "            ",
+    )
+    grid = parse_grid(inset_rows)
+    assert grid.tile_at(0, 2) == " "  # row 3, column 1 is VOID
+    assert grid.tile_at(3, 1) == "#"  # row 2, column 4 (x=3, y=1) is wall
+
+    # Direct verify_grounding checks on void claims and safe non-void/negated/prose cases
+    void_issues = verify_grounding(
+        "The internal wall cell changed from floor to wall at row 3, column 1.", grid
+    )
+    assert any(issue.code == "VOID_TILE_MISMATCH" for issue in void_issues)
+    assert any(
+        issue.code == "TILE_MISMATCH"
+        for issue in verify_grounding("Row 3, column 1 is a wall.", grid)
+    )
+    for safe_prose in (
+        "There is no wall at row 3, column 1.",
+        "Add a wall at (3, 5).",
+        "Previously P was at (3, 7).",
+        "The space outside the wall at row 1, column 1 stays empty.",
+        "Beyond the outer wall at row 1, column 1 is exterior void.",
+        "You cannot place a wall at row 1, column 1 because it is outside the outer shell.",
+        "If you added a wall at (1, 1), it would break the outer shell.",
+        "Adding water at (1, 1) would breach the map boundary.",
+        "The background at (1, 1) is void.",
+        "地图外的边界墙位于第1行第1列旁。",
+        "第2行第5列是水平走廊的入口。",
+        "第2行第5列是墙体旁边的空地。",
+        "Row 2, column 5 is a wall-free corridor.",
+        "Row 2, column 5 is the player's first step.",
+        "Row 2, column 5 is the start of the upper corridor.",
+        "Row 2, column 5 has water nearby.",
+        "The internal wall cell changed from wall to floor at row 2, column 5.",
+    ):
+        assert verify_grounding(safe_prose, grid) == [], safe_prose
+
+    transport = FakeAsyncTransport(
+        [
+            # Attempt 1: swaps 0-based (x=3, y=1) into void row 3, column 1
+            {
+                "openingMessage": "Stage 2 adds an interior wall and keeps the puzzle solvable.",
+                "assessment": {"solutionSummary": "Solvable.", "difficultyOpinion": "Balanced."},
+                "reviewMessage": (
+                    "The internal wall cell changed from floor to wall at row 3, column 1, "
+                    "tightening the upper lane."
+                ),
+            },
+            # Attempt 2: cites row 2, column 4 plus benign metric/dimension/void-description prose
+            {
+                "openingMessage": (
+                    "Map dimensions (10, 12) remain unchanged. "
+                    "Stage 2 keeps (1, 1) as exterior void."
+                ),
+                "assessment": {"solutionSummary": "Solvable.", "difficultyOpinion": "Balanced."},
+                "reviewMessage": (
+                    "Solved in fewer steps (24, 6); the internal wall cell changed from floor "
+                    "to wall at row 2, column 4, tightening the upper lane."
+                ),
+            },
+        ]
+    )
+    pipeline = UnderstandingPipeline(transport, model="kimi-k2.6", clock=FakeClock())
+    caller_diff = [{"x": 3, "y": 1, "before": ".", "after": "#"}]
+
+    result = await pipeline.generate_manual_edit_review(
+        grid_or_rows=grid,
+        conflict_decision=ManualEditConflictResult(
+            "no_conflict", "llm_adjudication", ("dir-1",), ("diff:v2",), ()
+        ),
+        review_context={
+            "stageNumber": 2,
+            "diff": caller_diff,
+            "changeSummary": {"changedCellCount": 1},
+        },
+        language="en",
+    )
+    assert result.attempts_used == 2
+    assert "row 2, column 4" in result.review_message
+    assert caller_diff == [{"x": 3, "y": 1, "before": ".", "after": "#"}]
+
+    sent_payload = json.loads(transport.calls[0]["messages"][1]["content"])
+    assert sent_payload["reviewContext"]["diff"] == [
+        {"row": 2, "column": 4, "before": ".", "after": "#"}
+    ]
+
+    repair_msg = transport.calls[1]["messages"][-1]["content"]
+    assert "row 3, column 1" in repair_msg
+    assert "row 2, column 4" in repair_msg
 
 
 # ---------------------------------------------------------------------------

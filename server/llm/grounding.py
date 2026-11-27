@@ -15,6 +15,7 @@ from server.core.grid import (
     TILE_LEGEND,
     TILE_PLAYER,
     TILE_TARGET,
+    TILE_VOID,
     TILE_WALL,
     TILE_WATER,
     WALKABLE_TILES,
@@ -26,6 +27,74 @@ from server.core.grid import (
 from . import _grounding_patterns as gp
 
 COORDINATE_LINK_LIMIT = 12
+
+_TERRAIN_NOUN_TOKEN = (
+    r"(?:墙体?|墙|地板|空地|水域|水(?![平准位面])|"
+    r"(?<![A-Za-z0-9_-])(?:(?:a|an|the)\s+)?(?:wall|floor|ground|water)(?![A-Za-z0-9_'’\-]))"
+)
+_ANY_TILE_TOKEN = (
+    r"(?:墙体?|墙|地板|空地|水域|水(?![平准位面])|箱子?|目标点?|玩家|起点|"
+    r"(?<![A-Za-z0-9_-])(?:(?:a|an|the)\s+)?"
+    r"(?:wall|floor|ground|water|box|crate|target|goal|player|start)(?![A-Za-z0-9_'’\-])|"
+    r"#|\.|@|(?<![A-Za-z0-9_-])(?:p|s|t)(?![A-Za-z0-9_'’\-]))"
+)
+_ANY_COORD_TOKEN = (
+    r"(?:[\(（]\s*(?P<row_p>\d{1,2})\s*[,，]\s*(?P<col_p>\d{1,2})\s*[\)）]"
+    r"|(?:row|line)\s*(?P<row_e>\d{1,2})\s*,?\s*(?:column|col)\.?\s*(?P<col_e>\d{1,2})"
+    r"|第\s*(?P<row_z>\d{1,2})\s*行[\s,，、]*第\s*(?P<col_z>\d{1,2})\s*列)"
+)
+_NAMED_COORD_TILE_CLAIM_RE = re.compile(
+    r"(?:(?:row|line)\s*(?P<row_e>\d{1,2})\s*,?\s*(?:column|col)\.?\s*(?P<col_e>\d{1,2})"
+    r"|第\s*(?P<row_z>\d{1,2})\s*行[\s,，、]*第\s*(?P<col_z>\d{1,2})\s*列)\s*"
+    r"(?:是|为|属于|is|contains(?:\s+the)?|has)\s*"
+    r"(?:(?:(?:a|an|the)\s+)?(?:(?:internal|interior|inner|outer|editable)\s+)?)?"
+    rf"(?P<tile>{_ANY_TILE_TOKEN})",
+    re.IGNORECASE,
+)
+_DIRECT_TILE_CLAIM_END_RE = re.compile(
+    r"^\s*(?:(?:(?:cell|tile|block|square)\b|格子|格)\s*)?"
+    r"(?:$|(?:\b(?:and|but|while|whereas|which|that|so|because|instead|now|currently)\b)"
+    r"|(?:而不是|而非|且|并|并且|同时|而|现在|当前|，|,|。|\.|;|；|!|！|\?|？|\)|）))",
+    re.IGNORECASE,
+)
+_VOID_TRANSITION_TO_TERRAIN_RE = re.compile(
+    rf"(?:to|into|becomes?|变成|改成|换成|变为)\s*(?P<tile>{_TERRAIN_NOUN_TOKEN})\s*"
+    rf"(?:cell|tile|block|area|格子)?\s*(?:at|on|in|位于|在)\s*{_ANY_COORD_TOKEN}",
+    re.IGNORECASE,
+)
+_VOID_COORD_TRANSITION_RE = re.compile(
+    rf"{_ANY_COORD_TOKEN}\s*.{{0,24}}?(?:从|由|from)\s*(?:{_TERRAIN_NOUN_TOKEN})\s*"
+    rf"(?:变成|改成|换成|变为|to|into|becomes?)\s*(?P<tile>{_TERRAIN_NOUN_TOKEN})",
+    re.IGNORECASE,
+)
+_VOID_TERRAIN_AT_COORD_RE = re.compile(
+    rf"(?P<tile>{_TERRAIN_NOUN_TOKEN})\s*(?:cell|tile|block|area|格子)?\s*"
+    rf"(?:at|on|in|位于|在)\s*{_ANY_COORD_TOKEN}",
+    re.IGNORECASE,
+)
+_HYPOTHETICAL_CLAUSE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:if|when|would|could|might|suppose|hypothetically)(?![A-Za-z0-9_])"
+    r"|(?:如果|若|假设|假如)",
+    re.IGNORECASE,
+)
+_REFUSAL_OR_EXTERIOR_CLAUSE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:cannot|can't|couldn't|shouldn't|mustn't|won't|unable|invalid|illegal|"
+    r"impossible|forbidden|prohibited|void|exterior|outside|beyond)(?![A-Za-z0-9_])"
+    r"|(?:无法|不能|不可|禁止|不允许|无效|地图外|外部|外侧|边界外|外墙外|空白)",
+    re.IGNORECASE,
+)
+_EXTERIOR_OR_REMOVAL_PREFIX_RE = re.compile(
+    r"(?:\b(?:remov(?:e|ed|ing)|delet(?:e|ed|ing)|clear(?:ed|ing)?|eras(?:e|ed|ing)|"
+    r"outside|beyond|past|near|beside|next\s+to|adjacent\s+to|around|facing)\b"
+    r"|移除|删除|清除|去掉|外侧|外部|外面|之外|旁|靠近|相邻)\s*"
+    r"(?:(?:the|an?|this|that)\s+)?(?:(?:outer|shell|boundary|border|internal|interior)\s+)?$",
+    re.IGNORECASE,
+)
+_TRAILING_RELATION_RE = re.compile(
+    r"^\s*(?:(?:is\s+)?(?:nearby|beside|next\s+to|adjacent|outside|beyond|away)\b|"
+    r"旁|旁边|边|侧|外|外侧|附近|周围)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,18 +220,95 @@ def verify_grounding(
     clauses = [piece.replace("\x00", ",").strip() for piece in gp.CLAUSE_SPLIT_RE.split(protected)]
 
     for clause in clauses:
-        if not clause or _is_non_current_clause(clause):
+        if not clause:
             continue
+
+        flagged_coords: set[tuple[int, int]] = set()
+        refusal_or_exterior = bool(
+            gp.NEGATION_RE.search(clause) or _REFUSAL_OR_EXTERIOR_CLAUSE_RE.search(clause)
+        )
+        if not refusal_or_exterior and not _HYPOTHETICAL_CLAUSE_RE.search(clause):
+            for pat in (_VOID_TRANSITION_TO_TERRAIN_RE, _VOID_COORD_TRANSITION_RE):
+                for m in pat.finditer(clause):
+                    prefix = clause[max(0, m.start() - 32) : m.start()]
+                    if gp.NEIGHBOR_PREFIX_RE.search(prefix) or _TRAILING_RELATION_RE.search(
+                        clause[m.end() :]
+                    ):
+                        continue
+                    row, col = _extract_coord_from_match(m)
+                    expected = _tile_from_claim(m.group("tile"))
+                    if (row, col) in flagged_coords:
+                        continue
+                    if not (1 <= row <= HEIGHT and 1 <= col <= WIDTH):
+                        flagged_coords.add((row, col))
+                        issues.append(
+                            GroundingIssue("OUT_OF_BOUNDS", f"({row},{col}) out of bounds.")
+                        )
+                        continue
+                    actual = facts.grid.tile_at(col - 1, row - 1)
+                    if expected is not None and actual == TILE_VOID:
+                        flagged_coords.add((row, col))
+                        msg = f"Claimed ({row},{col}) is {expected!r}, actual is {actual!r} (void)."
+                        issues.append(GroundingIssue("VOID_TILE_MISMATCH", msg))
+
+        if _is_non_current_clause(clause):
+            continue
+
+        if not refusal_or_exterior:
+            for m in _VOID_TERRAIN_AT_COORD_RE.finditer(clause):
+                prefix = clause[max(0, m.start() - 32) : m.start()]
+                if (
+                    gp.NEIGHBOR_PREFIX_RE.search(prefix)
+                    or _EXTERIOR_OR_REMOVAL_PREFIX_RE.search(prefix)
+                    or _TRAILING_RELATION_RE.search(clause[m.end() :])
+                ):
+                    continue
+                row, col = _extract_coord_from_match(m)
+                expected = _tile_from_claim(m.group("tile"))
+                if (row, col) in flagged_coords:
+                    continue
+                if not (1 <= row <= HEIGHT and 1 <= col <= WIDTH):
+                    flagged_coords.add((row, col))
+                    issues.append(GroundingIssue("OUT_OF_BOUNDS", f"({row},{col}) out of bounds."))
+                    continue
+                actual = facts.grid.tile_at(col - 1, row - 1)
+                if expected is not None and actual == TILE_VOID:
+                    flagged_coords.add((row, col))
+                    msg = f"Claimed ({row},{col}) is {expected!r}, actual is {actual!r} (void)."
+                    issues.append(GroundingIssue("VOID_TILE_MISMATCH", msg))
 
         for m in gp.COORD_TILE_CLAIM_RE.finditer(clause):
             if gp.NEIGHBOR_PREFIX_RE.search(clause[max(0, m.start() - 24) : m.start()]):
                 continue
             row, col, expected = int(m.group(1)), int(m.group(2)), _tile_from_claim(m.group(3))
+            if (row, col) in flagged_coords:
+                continue
             if not (1 <= row <= HEIGHT and 1 <= col <= WIDTH):
+                flagged_coords.add((row, col))
                 issues.append(GroundingIssue("OUT_OF_BOUNDS", f"({row},{col}) out of bounds."))
                 continue
             actual = facts.grid.tile_at(col - 1, row - 1)
             if expected is not None and actual != expected:
+                flagged_coords.add((row, col))
+                msg = f"Claimed ({row},{col}) is {expected!r}, actual is {actual!r}."
+                issues.append(GroundingIssue("TILE_MISMATCH", msg))
+
+        for m in _NAMED_COORD_TILE_CLAIM_RE.finditer(clause):
+            if gp.NEIGHBOR_PREFIX_RE.search(clause[max(0, m.start() - 24) : m.start()]):
+                continue
+            if not _DIRECT_TILE_CLAIM_END_RE.match(clause[m.end() :]):
+                continue
+            row, col = _extract_coord_from_match(m)
+            expected = _tile_from_claim(m.group("tile"))
+            if (row, col) in flagged_coords:
+                continue
+            if not (1 <= row <= HEIGHT and 1 <= col <= WIDTH):
+                flagged_coords.add((row, col))
+                issues.append(GroundingIssue("OUT_OF_BOUNDS", f"({row},{col}) out of bounds."))
+                continue
+            actual = facts.grid.tile_at(col - 1, row - 1)
+            if expected is not None and actual != expected:
+                flagged_coords.add((row, col))
                 msg = f"Claimed ({row},{col}) is {expected!r}, actual is {actual!r}."
                 issues.append(GroundingIssue("TILE_MISMATCH", msg))
 

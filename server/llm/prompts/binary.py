@@ -22,8 +22,10 @@ def _build_binary_discovery_system(
         "platform. In strategy.preserve, list ONLY 'water' and/or 'walls' when needed (never "
         "include 'walls' while editing walls, or 'water' while editing water).",
         "Strategy fields: effect, focus, operators (unique subset of add_wall/remove_wall/"
-        "add_water/remove_water that realizes effect), preserve ([] or ['water']/['walls']), "
-        "and editBudget (1..12). Do NOT output metricGoals or extra keys.",
+        "add_water/remove_water with >=1 usable operator matching effect: open_route -> "
+        "remove_wall|remove_water; narrow_route -> add_wall|add_water; adjust_internal_walls -> "
+        "add_wall|remove_wall; reshape_water -> add_water|remove_water), preserve ([] or "
+        "['water']/['walls']), and editBudget (1..12). Do NOT output metricGoals or extra keys.",
         "Choose action:",
         "- 'protected_refusal': ONLY when the designer explicitly requests moving/adding/removing/"
         "reshaping player, boxes, targets, or outer_shell. Set protectedEntities (1..4 unique), "
@@ -49,10 +51,19 @@ def _build_binary_discovery_system(
             "branches (different label AND promise), planStrategies=[], protectedEntities=[]. "
             "Each branch has label (short natural action without letter prefixes), strategy, and "
             "tagged promise: "
-            "reduce_obstacles (component in water/internal_walls/obstacles, optional focus), "
-            "widen_corridor (component in water/internal_walls/obstacles, REQUIRED corridor with "
-            "interior row 2..9, column 2..11, axis horizontal/vertical), "
-            "reshape_water (component='water', optional focus), or "
+            "reduce_obstacles (component in water/internal_walls/obstacles; requires matching "
+            "remove_wall/remove_water in usable operators; optional focus containing matching "
+            "editable tiles on the current Stage or null), "
+            "widen_corridor (component in water/internal_walls/obstacles; requires matching "
+            "remove_wall/remove_water in usable operators; REQUIRED corridor with "
+            "interior walkable floor cell row 2..9, column 2..11 where axis is the narrow "
+            "cross-section axis to widen, perpendicular to travel direction — use axis='vertical' "
+            "to widen a horizontal corridor and axis='horizontal' to widen a vertical corridor — "
+            "with span along axis strictly narrower than perpendicular length >= 3; prefer "
+            "reduce_obstacles or shorter_solution when unsure), "
+            "reshape_water (component='water'; requires both add_water and remove_water in "
+            "usable operators with editBudget>=2; optional focus containing both '@' and interior "
+            "'.'/editable '#' or null), or "
             "shorter_solution (component='obstacles'). "
             "Prefer removing obstacles when compatible. When selectedChoices is non-empty, each "
             "branch strategy MUST satisfy ALL prior promises plus its new promise on the ORIGINAL "
@@ -64,7 +75,8 @@ def _build_binary_discovery_system(
             "from the schema); choose 'plan', 'protected_refusal', or 'blocked'."
         )
     lines.append(
-        "- 'blocked': when no safe editable path exists; provide a concise non-blank note and "
+        "- 'blocked': when the request is contradictory/impossible or no safe editable path "
+        "exists (do NOT guess unachievable ask branches); provide a brief non-blank note and "
         "keep all other action fields empty"
         + (" (initialRequirements=null)." if needs_initial_requirements else ".")
     )
@@ -72,8 +84,19 @@ def _build_binary_discovery_system(
         lines.append(
             "initialRequirements rule: for action='ask' or action='plan', populate "
             "initialRequirements using ONLY initialDesignerTurns with verbatim sourceTurnId/"
-            "evidenceSpan (NEVER include player/box/target/outer_shell change requirements); "
-            "for action='protected_refusal' or action='blocked', set initialRequirements=null."
+            "evidenceSpan (NEVER copy text from designContext into evidenceSpan). OMIT clauses "
+            "that merely keep platform-locked entities (player, boxes, "
+            "targets, outer_shell) fixed — NEVER remap them onto component='wall' or "
+            "property='change_scope'. Use property='change_scope' ONLY when the designer gives an "
+            "explicit numeric cell-change cap (value >= 1); never use change_scope with "
+            "value=null. Allowed (property -> relations): count/distribution/change_scope/"
+            "solutionSteps/minimumPushes/solutionPushes/boxAlternations/longestPushRun -> "
+            "increase|decrease|equal|preserve; positions -> preserve|equal|relocate; distance -> "
+            "nearer|farther|equal|preserve; appearance -> seek|avoid (value=null, unit='none'); "
+            "experience/dependency -> seek|avoid (use component='gameplay', "
+            "property='experience', relation='seek', value=null, unit='none' for qualitative "
+            "corridor/route/feel wishes); timing -> early|later|seek|avoid. "
+            "For action='protected_refusal' or action='blocked', set initialRequirements=null."
         )
     else:
         lines.append(

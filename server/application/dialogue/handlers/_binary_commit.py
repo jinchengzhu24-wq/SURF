@@ -405,21 +405,26 @@ async def commit_binary_step_impl(
                 + compile_choice_requirements_deterministic(clean_choices, initial_turns)
             )
         ]
+        compiled_bindings = [
+            {k: v for k, v in binding.items() if k != "authority"}
+            if isinstance(binding, Mapping)
+            else binding
+            for binding in ((verified_initial_req or {}).get("automaticBindings") or ())
+        ]
         snapshot = build_stage_facts(
             parse_grid(current_ver.rows), current_ver.entity_bindings
         ).to_prompt_dict()
         raw_req_payload, _ = normalize_requirement_record(
             {
                 "requirements": compiled_reqs,
-                "automaticBindings": list(
-                    (verified_initial_req or {}).get("automaticBindings") or ()
-                ),
+                "automaticBindings": compiled_bindings,
                 "exactTransitions": list(
                     (verified_initial_req or {}).get("exactTransitions") or ()
                 ),
             },
             initial_turns,
             snapshot,
+            design_context=current_ver.design_context,
         )
         req_record = validate_requirement_record(raw_req_payload, initial_turns, snapshot)
         plan_strategies = list(step.get("planStrategies") or ())

@@ -48,16 +48,19 @@ _MANUAL_EDIT_CONFLICT_SYSTEM = (
     "You are the manual-edit conflict adjudicator. Compare the verified manual map diff, solver "
     "delta, and play evidence against each supplied confirmed design direction. Return ONLY JSON "
     "matching the required schema.\n"
-    "Tile legend: # wall, . floor, @ water, p player, s box, t target. Trust verifiedChangeSummary "
-    "as authoritative. Return one entry for EVERY supplied directionId exactly once (no missing, "
-    "extra, or duplicate IDs) with relation in ('conflict', 'aligned', 'tradeoff', 'unrelated', "
-    "'unclear'). Use 'conflict' ONLY when the edit directly reverses a confirmed direction; "
-    "solver improvements do not erase a reversal."
+    "All coordinates are 1-based (row, column). Tile legend: # wall, . floor, @ water, p player, "
+    "s box, t target. Trust verifiedChangeSummary as authoritative. Return one entry for EVERY "
+    "supplied directionId exactly once (no missing, extra, or duplicate IDs) with relation in "
+    "('conflict', 'aligned', 'tradeoff', 'unrelated', 'unclear'). Use 'conflict' ONLY when the "
+    "edit directly reverses a confirmed direction; solver improvements do not erase a reversal."
 )
 
 _MANUAL_EDIT_REVIEW_BASE = (
     "You are the Sokoban co-creation evaluator reviewing a newly saved, validated manual edit. "
     "Return ONLY JSON matching the required schema in the requested language.\n"
+    "All coordinates are 1-based (row, column) matching stageSnapshot and reviewContext.diff "
+    "(verifiedDiff); when mentioning changed cells, cite the exact 1-based row and column from "
+    "reviewContext.diff.\n"
     "openingMessage: concise declarative card-free observation of the saved Stage "
     "(no '?' or '？').\n"
     "assessment: populate non-empty solutionSummary, non-empty difficultyOpinion, features, and "
@@ -137,6 +140,42 @@ def build_human_edit_engagement_recovery_messages(
     ]
 
 
+def _is_zero_based_tile_diff(obj: Mapping[str, Any]) -> bool:
+    x = obj.get("x")
+    y = obj.get("y")
+    return (
+        "before" in obj
+        and "after" in obj
+        and isinstance(x, int)
+        and not isinstance(x, bool)
+        and isinstance(y, int)
+        and not isinstance(y, bool)
+    )
+
+
+def _convert_diff_coords_to_one_based(obj: Any) -> Any:
+    """Recursively convert raw 0-based tile-diff dicts to 1-based row/column without mutation."""
+    if isinstance(obj, Mapping):
+        if _is_zero_based_tile_diff(obj):
+            converted: dict[str, Any] = {
+                "row": obj["y"] + 1,
+                "column": obj["x"] + 1,
+                "before": _convert_diff_coords_to_one_based(obj["before"]),
+                "after": _convert_diff_coords_to_one_based(obj["after"]),
+            }
+            for key, value in obj.items():
+                if key in {"x", "y", "row", "column", "before", "after"}:
+                    continue
+                converted[key] = _convert_diff_coords_to_one_based(value)
+            return converted
+        return {key: _convert_diff_coords_to_one_based(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_convert_diff_coords_to_one_based(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(_convert_diff_coords_to_one_based(item) for item in obj)
+    return obj
+
+
 def build_manual_edit_conflict_messages(
     *,
     directions: Sequence[Mapping[str, Any]],
@@ -148,7 +187,7 @@ def build_manual_edit_conflict_messages(
     payload = {
         "responseLanguage": locale,
         "directions": [dict(d) for d in directions],
-        "effectEvidence": [dict(e) for e in effect_evidence],
+        "effectEvidence": [_convert_diff_coords_to_one_based(e) for e in effect_evidence],
     }
     return [
         {"role": "system", "content": _MANUAL_EDIT_CONFLICT_SYSTEM},
@@ -175,7 +214,7 @@ def build_manual_edit_review_messages(
         "responseLanguage": locale,
         "frozenConflictVerdict": conflict_verdict,
         "stageSnapshot": dict(stage_snapshot),
-        "reviewContext": dict(review_context),
+        "reviewContext": _convert_diff_coords_to_one_based(review_context),
     }
     return [
         {"role": "system", "content": system_content},

@@ -91,7 +91,7 @@ def _domain_error_status(exc: DomainError) -> int:
     if isinstance(exc, RateLimitError):
         return 429
     if isinstance(exc, UpstreamLLMError):
-        return 502
+        return 503
     if isinstance(exc, DeadlineExceededError):
         return 504
     if exc.code in {"LLM_NOT_CONFIGURED", "DELETE_PASSWORD_NOT_CONFIGURED"}:
@@ -109,10 +109,10 @@ def _core_llm_error_status(exc: CoreLLMError) -> int:
             return 503
         if exc.provider_status == 504:
             return 504
-        return 502
+        return 503
     if isinstance(exc, CoreLLMValidationError):
-        return 502
-    return 502
+        return 422
+    return 503
 
 
 def _redact_value(value: Any, secrets_tuple: tuple[str, ...]) -> Any:

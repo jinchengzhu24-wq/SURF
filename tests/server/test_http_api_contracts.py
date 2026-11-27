@@ -805,7 +805,7 @@ async def test_container_provider_transports_and_core_llm_error_mapping(
     app_bundle_factory, tmp_path
 ) -> None:
     from server.container import build_container
-    from server.core.llm_client import UpstreamLLMError
+    from server.core.llm_client import LLMValidationError, UpstreamLLMError
     from server.settings import SokobanSettings
 
     settings = SokobanSettings(
@@ -870,7 +870,7 @@ async def test_container_provider_transports_and_core_llm_error_mapping(
             f"/cocreation/api/sessions/{sid}/versions/{vid}/assessments",
             json={"idempotencyKey": "assess-err-1"},
         )
-        assert assess.status_code == 502
+        assert assess.status_code == 503
         assert assess.headers.get("X-LLM-Attempts-Used") == "1"
         err_body = assess.json()
         assert err_body["detail"] == err_body["error"]["message"]
@@ -878,6 +878,36 @@ async def test_container_provider_transports_and_core_llm_error_mapping(
         assert err_body["error"]["retryable"] is False
         assert "sk-secret-token-123456" not in err_body["error"]["message"]
         assert "[redacted]" in err_body["error"]["message"]
+
+        # CoreLLMValidationError maps to HTTP 422 (never 502) so proxies preserve JSON payload
+        bundle.cocreation_transport.queue(
+            LLMValidationError(
+                "BINARY_PREFLIGHT_NOT_FOUND",
+                "no verified candidate after repair",
+                attempts_used=2,
+            ),
+            LLMValidationError(
+                "BINARY_PREFLIGHT_NOT_FOUND",
+                "no verified candidate after repair",
+                attempts_used=2,
+            ),
+        )
+        val_err = await client.post(
+            f"/cocreation/api/sessions/{sid}/messages",
+            json={
+                "content": "Discuss the wall layout",
+                "baseVersionId": vid,
+                "idempotencyKey": "val-err-422-1",
+                "action": "send",
+            },
+        )
+        assert val_err.status_code == 422
+        assert val_err.headers.get("X-LLM-Attempts-Used") == "2"
+        val_body = val_err.json()
+        assert val_body["code"] == "BINARY_PREFLIGHT_NOT_FOUND"
+        assert val_body["error"]["code"] == "BINARY_PREFLIGHT_NOT_FOUND"
+        assert val_body["error"]["retryable"] is True
+        assert val_body["requestId"] == val_err.headers.get("X-Request-ID")
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,8 @@ import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from server.core.llm_client import LLMValidationError
+from server.core.llm_client import LLMValidationError, UpstreamLLMError
+from server.domain.errors import UpstreamLLMError as DomainUpstreamLLMError
 from server.main import create_app
 from server.settings import SokobanSettings
 
@@ -149,17 +150,54 @@ def test_handle_core_llm_error_includes_attempts_used_in_details(tmp_path: Path)
             attempts_used=0,
         )
 
+    @app.get("/_test/core-upstream-llm-error")
+    async def _raise_core_upstream_llm_error() -> None:
+        raise UpstreamLLMError(
+            "UPSTREAM_UNAVAILABLE",
+            "provider returned 502 bad gateway",
+            retryable=True,
+            provider_status=502,
+            attempts_used=2,
+        )
+
+    @app.get("/_test/domain-upstream-llm-error")
+    async def _raise_domain_upstream_llm_error() -> None:
+        raise DomainUpstreamLLMError(
+            "UPSTREAM_UNAVAILABLE",
+            "error.llm_unavailable",
+            message="upstream model failed",
+            details={"attemptsUsed": 1},
+        )
+
     with TestClient(app) as client:
         resp = client.get("/_test/core-llm-error")
-        assert resp.status_code == 502
+        assert resp.status_code == 422
         payload = resp.json()
         assert payload["code"] == "BINARY_PROTECTED_STRATEGY"
+        assert payload["retryable"] is True
+        assert payload["error"]["retryable"] is True
+        assert payload["requestId"] == resp.headers.get("X-Request-ID")
         assert payload["details"]["attemptsUsed"] == 3
         assert payload["error"]["details"]["attemptsUsed"] == 3
         assert resp.headers.get("X-LLM-Attempts-Used") == "3"
 
         resp_zero = client.get("/_test/core-llm-error-zero-attempts")
-        assert resp_zero.status_code == 502
+        assert resp_zero.status_code == 422
         payload_zero = resp_zero.json()
+        assert payload_zero["retryable"] is True
         assert "attemptsUsed" not in payload_zero["details"]
         assert "X-LLM-Attempts-Used" not in resp_zero.headers
+
+        resp_upstream = client.get("/_test/core-upstream-llm-error")
+        assert resp_upstream.status_code == 503
+        payload_upstream = resp_upstream.json()
+        assert payload_upstream["code"] == "UPSTREAM_UNAVAILABLE"
+        assert payload_upstream["details"]["providerStatus"] == 502
+        assert payload_upstream["details"]["attemptsUsed"] == 2
+        assert resp_upstream.headers.get("X-LLM-Attempts-Used") == "2"
+
+        resp_domain_upstream = client.get("/_test/domain-upstream-llm-error")
+        assert resp_domain_upstream.status_code == 503
+        payload_domain = resp_domain_upstream.json()
+        assert payload_domain["code"] == "UPSTREAM_UNAVAILABLE"
+        assert resp_domain_upstream.headers.get("X-LLM-Attempts-Used") == "1"
