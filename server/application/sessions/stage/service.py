@@ -29,6 +29,7 @@ from ..config import (
     CoCreationAppSettings,
     RoomSyncWriter,
     append_audit_event_tx,
+    build_disagreement_audit_summary,
     build_stage_sync_event,
     emit_room_cocreation_event_tx,
     next_version_number_tx,
@@ -102,6 +103,7 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
         if claim.outcome == "in_progress":
             raise ConflictError("SAVE_IN_PROGRESS", "error.version_conflict")
 
+        committed_in_tx = False
         try:
             session = self._require_active_session(session_id, access_token)
             if session.current_version_id != base_version_id:
@@ -212,13 +214,16 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
                         "disagreement_resolved",
                         {
                             "versionId": base_ver.version_id,
-                            "disagreement": {
-                                **prev_dis.model_dump(by_alias=True),
-                                "status": "resolved",
-                                "resolution": "user",
-                                "displayCard": False,
-                                "resultVersionId": new_vid,
-                            },
+                            "subject": "human_edit",
+                            "resultVersionId": new_vid,
+                            "disagreement": build_disagreement_audit_summary(
+                                {
+                                    **prev_dis.model_dump(by_alias=True),
+                                    "status": "resolved",
+                                    "resolution": "user",
+                                },
+                                result_version_id=new_vid,
+                            ),
                         },
                         now_iso,
                     )
@@ -230,7 +235,7 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
                         "evidenceId": f"ie_{uuid.uuid4().hex}",
                         "kind": "manual_edit",
                         "versionId": new_vid,
-                        "observation": clean_summary,
+                        "observation": clean_summary[:500],
                         "details": {
                             "parentVersionId": base_ver.version_id,
                             "diff": diff,
@@ -267,18 +272,25 @@ class StageService(_PlayLifecycleMixin, _DraftRegenLifecycleMixin):
                     event=stage_ev,
                     now_iso=now_iso,
                 )
-            self._operational_repo.complete_key(
-                session_id, "save_version", idempotency_key, response={"versionId": new_vid}
-            )
+                self._operational_repo.complete_key_tx(
+                    conn,
+                    session_id,
+                    "save_version",
+                    idempotency_key,
+                    response={"versionId": new_vid},
+                )
+            committed_in_tx = True
         except asyncio.CancelledError:
-            self._operational_repo.complete_key(
-                session_id, "save_version", idempotency_key, status="failed"
-            )
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "save_version", idempotency_key, status="failed"
+                )
             raise
         except Exception:
-            self._operational_repo.complete_key(
-                session_id, "save_version", idempotency_key, status="failed"
-            )
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "save_version", idempotency_key, status="failed"
+                )
             raise
         return await self._read_model.get_session_payload(session_id)
 

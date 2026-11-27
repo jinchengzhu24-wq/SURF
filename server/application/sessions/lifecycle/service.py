@@ -221,6 +221,9 @@ class SessionLifecycleService:
         draft_rows = list(solved.rows)
         now_iso = self._clock.utc_now()
         expires_iso = utc_plus_seconds_iso(self._clock, self._settings.demo_ttl_seconds)
+        null_expiry_cutoff_iso = utc_plus_seconds_iso(
+            self._clock, -self._settings.demo_ttl_seconds
+        )
 
         session_secret = generate_session_secret()
         access_token = generate_random_token()
@@ -229,7 +232,10 @@ class SessionLifecycleService:
         secret_bytes = self._settings.token_secret_bytes
 
         # Prune ONLY expired demo sessions (TTL-scoped); never wipe other active users' demos.
-        self._sessions_repo.delete_expired_demo_sessions(now_iso)
+        self._sessions_repo.delete_expired_demo_sessions(
+            now_iso,
+            null_expiry_cutoff_iso=null_expiry_cutoff_iso,
+        )
 
         with self._db.write_tx() as conn:
             existing_row = conn.execute(

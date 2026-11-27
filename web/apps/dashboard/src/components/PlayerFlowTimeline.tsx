@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
-import { formatShortDate } from "../format";
+import { dashboardNodeStatus, formatShortDate } from "../format";
 import type { DashboardStore } from "../store";
-import type { TimelineStage } from "../types";
+import type { CoCreationFlowEvent, TimelineStage } from "../types";
 
 export interface PlayerFlowTimelineProps {
   store: DashboardStore;
@@ -56,18 +56,34 @@ export function PlayerFlowTimeline({
                     ) : (
                       playerStages.map((stage, index) => {
                         const isSelected = activeStage?.key === stage.key;
+                        const flowRec =
+                          stage.type === "flow"
+                            ? (stage.record as CoCreationFlowEvent)
+                            : null;
+                        const isChildNode = Boolean(
+                          flowRec?.eventType === "node" && flowRec.nodeParentId,
+                        );
+                        const nodeTitle =
+                          flowRec?.eventType === "node" && flowRec.nodeStatus
+                            ? `${stage.label} · ${dashboardNodeStatus(flowRec.nodeStatus)}`
+                            : stage.label;
                         return (
                           <button
                             key={stage.key}
                             type="button"
-                            class={`timeline-node${isSelected ? " selected" : ""}${stage.warning ? " warning" : ""}`}
+                            class={`timeline-node${isSelected ? " selected" : ""}${stage.warning ? " warning" : ""}${isChildNode ? " timeline-node--child" : ""}`}
+                            data-parent-id={
+                              isChildNode
+                                ? (flowRec?.nodeParentId ?? undefined)
+                                : undefined
+                            }
                             aria-pressed={isSelected ? "true" : "false"}
                             onClick={() => store.selectStage(stage)}
                           >
                             <span class="timeline-dot">
                               {stage.warning ? "!" : String(index + 1)}
                             </span>
-                            <span class="timeline-label" title={stage.label}>
+                            <span class="timeline-label" title={nodeTitle}>
                               {stage.label}
                             </span>
                             <span class="timeline-time">

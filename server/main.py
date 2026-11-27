@@ -71,6 +71,9 @@ _NO_CACHE_PATHS = frozenset(
         "/cocreation",
         "/cocreation/",
         "/cocreation/index.html",
+        "/survey",
+        "/survey/",
+        "/survey/index.html",
         "/game",
         "/game/",
         "/game/index.html",
@@ -398,6 +401,12 @@ def create_app(
             "/cocreation",
             StaticFiles(directory=str(active_settings.cocreation_dist_dir), html=True),
             name="cocreation",
+        )
+    if active_settings.survey_dist_dir.exists():
+        application.mount(
+            "/survey",
+            StaticFiles(directory=str(active_settings.survey_dist_dir), html=True),
+            name="survey",
         )
     if active_settings.webgl_build_dir.exists():
         application.mount(

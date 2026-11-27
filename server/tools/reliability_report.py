@@ -121,15 +121,98 @@ def failure_category(code: Any, details: Any = None) -> str:
     return "unknown"
 
 
+DIALOGUE_MESSAGE_TASKS: frozenset[str] = frozenset(
+    {
+        "",
+        "message",
+        "ordinary_chat",
+        "binary_discovery",
+        "binary_choice",
+        "challenge",
+        "challenge_review",
+        "proposal_clarification",
+        "revision_card_execute",
+        "alternative_revision",
+        "llm_operations",
+        "deterministic_beam_search",
+    }
+)
+
+
 def _task(event: dict[str, Any]) -> str:
     payload = _safe_dict(event.get("payload"))
     task = payload.get("task")
+    task_str = "" if task is None else str(task).strip()
     if (
         event.get("eventType") in {"message_generation_failed", "challenge_reason_review_pending"}
-        or task in {"challenge_review", "proposal_clarification"}
+        or task_str in DIALOGUE_MESSAGE_TASKS
     ):
         return "message"
-    return str(task) if task is not None else "message"
+    return task_str
+
+
+def _timestamps_close(ts_a: Any, ts_b: Any, max_seconds: float = 5.0) -> bool:
+    if ts_a == ts_b:
+        return True
+    if not isinstance(ts_a, str) or not isinstance(ts_b, str):
+        return False
+    try:
+        dt_a = datetime.fromisoformat(ts_a.replace("Z", "+00:00"))
+        dt_b = datetime.fromisoformat(ts_b.replace("Z", "+00:00"))
+        if dt_a.tzinfo is None:
+            dt_a = dt_a.replace(tzinfo=UTC)
+        if dt_b.tzinfo is None:
+            dt_b = dt_b.replace(tzinfo=UTC)
+        return abs((dt_a - dt_b).total_seconds()) <= max_seconds
+    except ValueError:
+        return False
+
+
+def _is_paired_failure_record(
+    prev: dict[str, Any],
+    sample: dict[str, Any],
+    ev_type: str,
+) -> bool:
+    if prev.get("_success"):
+        return False
+    if ev_type in prev.get("_eventTypes", set()):
+        return False
+    prev_code = prev.get("failureCode") or prev.get("code")
+    curr_code = sample.get("failureCode") or sample.get("code")
+    if prev_code and curr_code and str(prev_code) != str(curr_code):
+        return False
+    prev_req = prev.get("requestId")
+    curr_req = sample.get("requestId")
+    msg_key = sample.get("messageKey")
+    if prev_req and curr_req and prev_req == curr_req and prev_req != msg_key:
+        return True
+    return prev_req == curr_req and _timestamps_close(
+        prev.get("createdAt"), sample.get("createdAt")
+    )
+
+
+def _merge_paired_failure(prev: dict[str, Any], sample: dict[str, Any], ev_type: str) -> None:
+    for key, value in sample.items():
+        if key.startswith("_"):
+            continue
+        if key == "details" and isinstance(value, dict) and isinstance(prev.get("details"), dict):
+            prev["details"] = {**prev["details"], **value}
+        elif key == "proposalRequested":
+            prev[key] = bool(prev.get(key) or value)
+        elif prev.get(key) is None and value is not None:
+            prev[key] = value
+    prev["_eventTypes"].add(ev_type)
+
+
+def _record_attempts_used(record: dict[str, Any]) -> int | None:
+    raw = record.get("attemptsUsed")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    details = _safe_dict(record.get("details"))
+    nested = details.get("attemptsUsed")
+    if isinstance(nested, int) and not isinstance(nested, bool) and nested >= 0:
+        return nested
+    return None
 
 
 def _latencies(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -199,12 +282,19 @@ def summarize(events: list[dict[str, Any]], example_limit: int = 3) -> dict[str,
             "task": task,
             "createdAt": event.get("createdAt"),
             "reliableBodyDelivered": delivered if success else False,
+            "_success": success,
+            "_eventTypes": {str(ev_type)},
         }
-        bucket = requests.setdefault(
-            key, {"first": sample, "last": sample, "records": [], "issues": set()}
-        )
-        bucket["last"] = sample
-        bucket["records"].append(sample)
+        bucket = requests.get(key)
+        if bucket is None:
+            bucket = {"first": sample, "last": sample, "records": [sample], "issues": set()}
+            requests[key] = bucket
+        elif not success and _is_paired_failure_record(bucket["records"][-1], sample, str(ev_type)):
+            _merge_paired_failure(bucket["records"][-1], sample, str(ev_type))
+            bucket["last"] = bucket["records"][-1]
+        else:
+            bucket["last"] = sample
+            bucket["records"].append(sample)
         code = payload.get("failureCode") or payload.get("code")
         if not success or code:
             bucket["issues"].add(
@@ -288,9 +378,22 @@ def summarize(events: list[dict[str, Any]], example_limit: int = 3) -> dict[str,
         group["codes"] = dict(sorted(group["codes"].items()))
     tasks = sorted({item["task"] for item in last})
     verified = sum(bool(item["last"].get("verifiedProposal")) for item in proposals)
+    observed_attempts = [
+        attempts
+        for bucket in requests.values()
+        for record in bucket["records"]
+        if (attempts := _record_attempts_used(record)) is not None
+    ]
+    legacy_diag_count = len(pipeline_attempts)
+    recorded_attempts_total = sum(observed_attempts)
     return {
         "logicalRequests": len(requests),
-        "pipelineDiagnostics": {"httpAttempts": len(pipeline_attempts)},
+        "pipelineDiagnostics": {
+            "httpAttempts": max(legacy_diag_count, recorded_attempts_total),
+            "legacyDiagnosticEvents": legacy_diag_count,
+            "recordedModelAttempts": recorded_attempts_total,
+            "recordedAttemptSamples": len(observed_attempts),
+        },
         "stateRecoveries": {
             "tasks": len(recoveries),
             "attemptsUsed": sum(
@@ -372,14 +475,40 @@ def read_events(path: Path, since: str, until: str | None = None) -> list[dict[s
             ).fetchall()
         }
         if "component_recovery_tasks" in tables:
-            rec_sql = (
-                "SELECT session_id, recovery_id, state_json, updated_at "
-                "FROM component_recovery_tasks WHERE julianday(updated_at) >= julianday(?)"
+            rec_cols = {
+                row[1]
+                for row in database.execute(
+                    "PRAGMA table_info(component_recovery_tasks)"
+                ).fetchall()
+            }
+            state_created = (
+                "CASE WHEN json_valid(state_json) "
+                "THEN NULLIF(json_extract(state_json, '$.createdAt'), '') "
+                "ELSE NULL END"
             )
-            rec_params: list[Any] = [since]
+            created_expr = (
+                f"COALESCE(NULLIF(created_at, ''), {state_created}, updated_at)"
+                if "created_at" in rec_cols
+                else f"COALESCE({state_created}, updated_at)"
+            )
             if until:
-                rec_sql += " AND julianday(updated_at) < julianday(?)"
-                rec_params.append(until)
+                rec_sql = (
+                    "SELECT session_id, recovery_id, state_json, updated_at "
+                    "FROM component_recovery_tasks WHERE "
+                    f"(julianday({created_expr}) >= julianday(?) "
+                    f"AND julianday({created_expr}) < julianday(?)) "
+                    "OR (julianday(updated_at) >= julianday(?) "
+                    "AND julianday(updated_at) < julianday(?))"
+                )
+                rec_params: list[Any] = [since, until, since, until]
+            else:
+                rec_sql = (
+                    "SELECT session_id, recovery_id, state_json, updated_at "
+                    "FROM component_recovery_tasks WHERE "
+                    f"julianday({created_expr}) >= julianday(?) "
+                    "OR julianday(updated_at) >= julianday(?)"
+                )
+                rec_params = [since, since]
             for session_id, recovery_id, state_json, updated_at in database.execute(
                 rec_sql, rec_params
             ):

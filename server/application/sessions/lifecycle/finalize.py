@@ -69,6 +69,7 @@ async def finalize_session_impl(
     if claim.outcome == "in_progress":
         raise ConflictError("FINALIZE_IN_PROGRESS", "error.version_conflict")
 
+    committed_in_tx = False
     try:
         deadline_expired = is_deadline_expired(session.deadline_at, now=clock.utc_datetime())
         solved = (
@@ -179,11 +180,9 @@ async def finalize_session_impl(
                         now_iso=now_iso,
                     )
 
-            conn.execute(
-                "UPDATE change_proposals SET status = 'superseded', decided_at = ? "
-                "WHERE session_id = ? AND status = 'pending'",
-                (now_iso, session_id),
-            )
+            from ..stage.stage_ops import supersede_active_stage_artifacts_tx
+
+            supersede_active_stage_artifacts_tx(conn, session_id, now_iso)
             conn.execute(
                 "UPDATE design_sessions "
                 "SET status = 'awaiting_intention', current_version_id = ?, "
@@ -225,17 +224,21 @@ async def finalize_session_impl(
                 {"idempotencyKey": idempotency_key, "finalVersionId": final_ver.version_id},
                 now_iso,
             )
-        operational_repo.complete_key(
-            session_id,
-            "finalize",
-            idempotency_key,
-            response={"finalVersionId": final_ver.version_id},
-        )
+            operational_repo.complete_key_tx(
+                conn,
+                session_id,
+                "finalize",
+                idempotency_key,
+                response={"finalVersionId": final_ver.version_id},
+            )
+        committed_in_tx = True
     except asyncio.CancelledError:
-        operational_repo.complete_key(session_id, "finalize", idempotency_key, status="failed")
+        if not committed_in_tx:
+            operational_repo.complete_key(session_id, "finalize", idempotency_key, status="failed")
         raise
     except Exception:
-        operational_repo.complete_key(session_id, "finalize", idempotency_key, status="failed")
+        if not committed_in_tx:
+            operational_repo.complete_key(session_id, "finalize", idempotency_key, status="failed")
         raise
 
 

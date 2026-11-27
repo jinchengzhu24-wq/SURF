@@ -22,7 +22,7 @@ from server.api.schemas import (
     RestoreRequest,
     VersionRequest,
 )
-from server.settings import DEFAULT_PUBLIC_BASE_URL, DEFAULT_WEBGL_BASE_URL
+from server.settings import DEFAULT_WEBGL_BASE_URL
 
 router = APIRouter()
 
@@ -105,13 +105,6 @@ async def create_play_attempt(
             request,
             configured_base_url=container.settings.webgl_base_url,
             default_base_url=DEFAULT_WEBGL_BASE_URL,
-        )
-    if "returnUrl" in result and isinstance(result["returnUrl"], str):
-        result["returnUrl"] = rewrite_loopback_url(
-            result["returnUrl"],
-            request,
-            configured_base_url=container.settings.public_base_url,
-            default_base_url=DEFAULT_PUBLIC_BASE_URL,
         )
     return result
 

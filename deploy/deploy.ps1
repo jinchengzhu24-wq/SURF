@@ -143,9 +143,9 @@ $sshCommonArgs = @(
 )
 
 if (-not $SkipWebBuild) {
-    if ($PSCmdlet.ShouldProcess($webDir, "Build all web workspaces (@sokoban/dashboard, @sokoban/cocreation, @sokoban/webgl-bridge)")) {
+    if ($PSCmdlet.ShouldProcess($webDir, "Build all web workspaces (@sokoban/dashboard, @sokoban/cocreation, @sokoban/survey, @sokoban/webgl-bridge)")) {
         Invoke-CheckedCommand -FilePath "npm" -ArgumentList @("--prefix", $webDir, "run", "build") `
-            -Description "Building web workspaces (@sokoban/dashboard, @sokoban/cocreation, @sokoban/webgl-bridge) in $webDir"
+            -Description "Building web workspaces (@sokoban/dashboard, @sokoban/cocreation, @sokoban/survey, @sokoban/webgl-bridge) in $webDir"
     }
 }
 

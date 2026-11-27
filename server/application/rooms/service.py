@@ -13,7 +13,6 @@ from typing import Any
 from server.core.clock import SYSTEM_CLOCK, Clock, utc_now_iso
 from server.core.grid import GridValidationError
 from server.core.solver import (
-    DEFAULT_DEADLINE_SECONDS,
     DEFAULT_MAX_STATES,
     SolverError,
     solve_min_steps,
@@ -37,6 +36,8 @@ from ._helpers import (
 )
 from ._sync_tx import record_cocreation_event_on_conn, record_designer_intention_on_conn
 
+DEFAULT_CHALLENGE_SOLVER_DEADLINE_SECONDS = 5.0
+
 
 class OnlineRoomService:
     """Async 2-player matchmaking service with atomic in-process co-creation sync."""
@@ -48,7 +49,7 @@ class OnlineRoomService:
         clock: Clock | None = None,
         room_ttl_seconds: float = 1800.0,
         solver_max_states: int = DEFAULT_MAX_STATES,
-        solver_deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+        solver_deadline_seconds: float = DEFAULT_CHALLENGE_SOLVER_DEADLINE_SECONDS,
     ) -> None:
         self._repo = rooms_repo
         self._clock = clock if clock is not None else SYSTEM_CLOCK

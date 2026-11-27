@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 import uuid
 from collections.abc import Mapping, Sequence
@@ -11,14 +10,13 @@ from typing import Any
 
 from server.application.sessions import (
     CoCreationAppSettings,
-    RoomSyncWriter,
     append_audit_event_tx,
     derive_entity_transitions,
-    emit_room_cocreation_event_tx,
     is_deadline_expired,
     token_matches,
 )
-from server.core.clock import SYSTEM_CLOCK, Clock, utc_now_iso
+from server.application.sessions.config import build_turn_cards as build_turn_cards
+from server.core.clock import SYSTEM_CLOCK, Clock, parse_iso, utc_now_iso
 from server.core.grid import map_fingerprint, parse_grid
 from server.core.llm_client import LLMError
 from server.domain.errors import (
@@ -36,7 +34,6 @@ from server.domain.memory import (
     merge_intent_hypothesis,
     validate_design_context_patch,
 )
-from server.domain.rooms import NodeFlowEvent
 from server.domain.sessions import describe_diff, summarize_stage_changes
 from server.i18n.messages import format_verified_diff_summary, get_message
 from server.persistence.database import dump_json
@@ -200,7 +197,24 @@ def build_play_summary(
     matching = [a for a in attempts if a.version_id == version_id]
     if not matching:
         return None
-    latest = matching[-1]
+
+    def _ts_key(value: str | None) -> tuple[int, float, str]:
+        if not value:
+            return (0, 0.0, "")
+        try:
+            return (1, parse_iso(value).timestamp(), value)
+        except ValueError:
+            return (1, 0.0, value)
+
+    latest = max(
+        matching,
+        key=lambda a: (
+            _ts_key(a.issued_at),
+            _ts_key(a.finished_at),
+            _ts_key(a.first_move_at),
+            _ts_key(a.loaded_at),
+        ),
+    )
     return {
         "attemptCount": len(matching),
         "latestStatus": latest.status,
@@ -466,153 +480,6 @@ def insert_turn_tx(
         ),
     )
     return seq
-
-
-def build_turn_cards(guidance: Mapping[str, Any] | None) -> list[dict[str, str]]:
-    """Build bounded CoCreationCard entries from turn guidance for TurnFlowEvent."""
-    if not isinstance(guidance, Mapping):
-        return []
-    cards: list[dict[str, str]] = []
-    dis = guidance.get("disagreement")
-    if (
-        isinstance(dis, Mapping)
-        and dis.get("status") == "active"
-        and dis.get("displayCard") is not False
-    ):
-        text = str(dis.get("coreDisagreement") or dis.get("nextQuestion") or "").strip()
-        if text:
-            cards.append({"type": "discussion", "text": text[:4000]})
-    elif guidance.get("followUpQuestion"):
-        q = str(guidance["followUpQuestion"]).strip()
-        if q:
-            cards.append({"type": "discussion", "text": q[:4000]})
-    offer = guidance.get("proposalOffer")
-    if isinstance(offer, Mapping) and offer.get("summary"):
-        cards.append({"type": "proposal", "text": str(offer["summary"]).strip()[:4000]})
-    pq = guidance.get("proposalQuestion")
-    if isinstance(pq, Mapping) and pq.get("question"):
-        cards.append({"type": "question", "text": str(pq["question"]).strip()[:4000]})
-    if guidance.get("intentHypothesis"):
-        cards.append({"type": "intent", "text": str(guidance["intentHypothesis"]).strip()[:4000]})
-    for cue in guidance.get("uiCues") or ():
-        if isinstance(cue, Mapping) and cue.get("type") and cue.get("text"):
-            ctype = str(cue["type"]).strip().lower().replace("-", "_")[:40]
-            ctext = str(cue["text"]).strip()[:4000]
-            if ctype and ctext:
-                cards.append({"type": ctype, "text": ctext})
-    return cards[:8]
-
-
-def emit_turn_room_event_tx(
-    conn: sqlite3.Connection,
-    room_sync: RoomSyncWriter | None,
-    *,
-    session: DesignSessionRecord,
-    version: LevelVersionRecord,
-    user_turn_id: str,
-    assistant_turn_id: str,
-    user_text: str,
-    assistant_text: str,
-    cards: Sequence[Mapping[str, Any]] = (),
-    now_iso: str,
-) -> None:
-    """Emit unified `turn` event into online rooms inside the same write_tx."""
-    del user_turn_id
-    clean_user = str(user_text or "").strip()
-    clean_assistant = str(assistant_text or "").strip()
-    if not clean_user or not clean_assistant:
-        return
-    clean_cards = [
-        {"type": str(c.get("type") or "card")[:40], "text": str(c.get("text") or "").strip()[:4000]}
-        for c in cards
-        if str(c.get("text") or "").strip()
-    ][:8]
-    event = {
-        "eventId": f"turn:{assistant_turn_id}",
-        "eventType": "turn",
-        "playerNumber": session.player_slot or 1,
-        "sessionId": session.session_id,
-        "versionId": version.version_id,
-        "userText": clean_user[:2000],
-        "assistantText": clean_assistant[:12000],
-        "language": session.language,
-        "cards": clean_cards,
-    }
-    emit_room_cocreation_event_tx(
-        conn,
-        room_sync,
-        match_id=session.match_id,
-        player_slot=session.player_slot,
-        is_demo=session.is_demo,
-        session_id=session.session_id,
-        event=event,
-        now_iso=now_iso,
-    )
-
-
-def emit_dashboard_node_tx(
-    conn: sqlite3.Connection,
-    room_sync: RoomSyncWriter | None,
-    *,
-    session: DesignSessionRecord,
-    version: LevelVersionRecord,
-    node_id: str,
-    node_type: str,
-    node_status: str,
-    entries: Sequence[Mapping[str, Any]],
-    now_iso: str,
-    node_parent_id: str | None = None,
-) -> None:
-    """Emit a validated NodeFlowEvent snapshot into online rooms inside write_tx."""
-    if session.is_demo or not session.match_id or session.player_slot not in (1, 2):
-        return
-    valid_entries = [
-        {
-            "entryId": str(e["entryId"])[:160],
-            "kind": str(e["kind"]),
-            "text": str(e["text"]).strip()[:12000],
-            "label": str(e.get("label") or "").strip()[:160],
-            "occurredAt": str(e.get("occurredAt") or now_iso),
-            **(
-                {"language": e["language"]}
-                if e.get("language") in {"en", "zh-CN"}
-                else {}
-            ),
-        }
-        for e in entries
-        if str(e.get("text") or "").strip()
-    ][-96:]
-    if not valid_entries:
-        return
-    fp = hashlib.sha256(
-        dump_json(
-            {"nodeId": node_id, "status": node_status, "entries": valid_entries}
-        ).encode("utf-8")
-    ).hexdigest()[:24]
-    payload = {
-        "eventId": f"node:{node_id}:{fp}"[:160],
-        "eventType": "node",
-        "playerNumber": session.player_slot or 1,
-        "sessionId": session.session_id,
-        "nodeId": node_id[:160],
-        "nodeType": node_type,
-        "nodeStatus": node_status[:64],
-        "nodeParentId": node_parent_id[:160] if node_parent_id else None,
-        "nodeEntries": valid_entries,
-        "versionId": version.version_id,
-        "stageNumber": version.version_number,
-    }
-    validated = NodeFlowEvent.model_validate(payload).model_dump(by_alias=True)
-    emit_room_cocreation_event_tx(
-        conn,
-        room_sync,
-        match_id=session.match_id,
-        player_slot=session.player_slot,
-        is_demo=session.is_demo,
-        session_id=session.session_id,
-        event=validated,
-        now_iso=now_iso,
-    )
 
 
 def deterministic_proposal_failure_text(language: str) -> str:

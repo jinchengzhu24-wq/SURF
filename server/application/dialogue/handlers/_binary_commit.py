@@ -8,8 +8,9 @@ from typing import Any
 
 from server.application.sessions import RoomSyncWriter, append_audit_event_tx
 from server.core.clock import Clock
-from server.core.grid import map_fingerprint, parse_grid
+from server.core.grid import GridValidationError, map_fingerprint, parse_grid
 from server.domain.blueprints import GRID_HEIGHT, GRID_WIDTH
+from server.domain.errors import ConflictError, ValidationError
 from server.domain.proposals import (
     ALLOWED_EFFECTS,
     EDITABLE_OPERATORS,
@@ -27,12 +28,11 @@ from server.llm.grounding import build_stage_facts
 from server.llm.pipelines.proposal import ProposalPipeline
 from server.persistence.database import SQLiteDatabase, dump_json, load_json
 from server.persistence.models import SessionReadModel
+from server.persistence.repositories.operational_repo import OperationalRepository
 
 from .._shared import (
+    apply_transitions_to_rows,
     build_proposal_offer_and_binding,
-    build_turn_cards,
-    emit_dashboard_node_tx,
-    emit_turn_room_event_tx,
     generate_safe_failure_analysis,
     insert_turn_tx,
     require_current_version_tx,
@@ -85,44 +85,66 @@ def _public_question_card(card: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in card.items() if k != "_internalChoices"}
 
 
-def _insert_proposal_tx(
+def _collect_excluded_fingerprints(
+    read_model: SessionReadModel,
+    current_ver: Any,
+) -> list[str]:
+    excluded: list[str] = []
+    seen: set[str] = set()
+
+    def _add(fp: str) -> None:
+        if fp and fp not in seen:
+            seen.add(fp)
+            excluded.append(fp)
+
+    for prop in read_model.proposals:
+        if prop.base_version_id == current_ver.version_id and prop.proposal.get("proposedRows"):
+            _add(map_fingerprint(prop.proposal["proposedRows"]))
+
+    for turn in read_model.turns:
+        if turn.version_id != current_ver.version_id or turn.role != "assistant":
+            continue
+        binding = turn.proposal_binding
+        if not isinstance(binding, Mapping):
+            continue
+        brief = binding.get("executionBrief")
+        if not isinstance(brief, Mapping):
+            continue
+        transitions = brief.get("requiredTransitions")
+        if not isinstance(transitions, list) or not transitions:
+            continue
+        try:
+            cand_rows = apply_transitions_to_rows(current_ver.rows, transitions)
+        except (ConflictError, ValidationError, GridValidationError, ValueError):
+            continue
+        _add(map_fingerprint(cand_rows))
+
+    return excluded
+
+
+def _mark_prior_active_offers_stale_tx(
     conn: Any,
     *,
     session_id: str,
-    base_version_id: str,
-    assistant_turn_id: str,
-    proposal_res: Any,
-    user_summary: str,
-    now_iso: str,
-) -> str:
-    proposal_id = uuid.uuid4().hex
-    diff = [
-        {"x": ch.x, "y": ch.y, "before": ch.before, "after": ch.after}
-        for ch in proposal_res.changes
-    ]
-    payload = {
-        "proposedRows": list(proposal_res.candidate_grid.rows),
-        "summary": user_summary,
-        "diff": diff,
-        "validation": proposal_res.solve_result.as_dict(),
-        "requirementRecord": proposal_res.requirement_record,
-        "revisionPlan": proposal_res.revision_plan,
-        "tradeoffNotice": proposal_res.tradeoff_notice,
-        "source": proposal_res.source,
-    }
-    conn.execute(
-        "UPDATE change_proposals SET status = 'superseded', decided_at = ? "
-        "WHERE session_id = ? AND status = 'pending'",
-        (now_iso, session_id),
-    )
-    conn.execute(
-        "INSERT INTO change_proposals("
-        "proposal_id, session_id, base_version_id, assistant_turn_id, status, "
-        "proposal_json, created_at"
-        ") VALUES (?, ?, ?, ?, 'pending', ?, ?)",
-        (proposal_id, session_id, base_version_id, assistant_turn_id, dump_json(payload), now_iso),
-    )
-    return proposal_id
+    version_id: str,
+) -> None:
+    rows = conn.execute(
+        "SELECT turn_id, proposal_binding_json FROM conversation_turns "
+        "WHERE session_id = ? AND version_id = ? AND role = 'assistant' "
+        "AND proposal_binding_json IS NOT NULL",
+        (session_id, version_id),
+    ).fetchall()
+    for row in rows:
+        binding = load_json(row["proposal_binding_json"], None)
+        if not isinstance(binding, dict):
+            continue
+        if str(binding.get("status") or "active") in {"active", "ready"}:
+            binding["status"] = "stale"
+            conn.execute(
+                "UPDATE conversation_turns SET proposal_binding_json = ? "
+                "WHERE session_id = ? AND turn_id = ?",
+                (dump_json(binding), session_id, row["turn_id"]),
+            )
 
 
 def _sanitize_choices_for_state(choices: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -292,6 +314,7 @@ async def commit_binary_step_impl(
     deadline: float | None,
     display_language: str | None = None,
     record_choice_selected: bool = False,
+    complete_idempotency_scope: str | None = None,
 ) -> dict[str, Any]:
     """Generate final proposal if `propose_ready` (OUTSIDE write_tx), then commit step."""
     session = read_model.session
@@ -432,11 +455,7 @@ async def commit_binary_step_impl(
             plan_strategies if plan_strategies else _merge_choice_strategies(clean_choices)
         )
         promises = [c["promise"] for c in clean_choices if c.get("promise")]
-        excluded_fps = [
-            map_fingerprint(p.proposal.get("proposedRows") or ())
-            for p in read_model.proposals
-            if p.base_version_id == current_ver.version_id and p.proposal.get("proposedRows")
-        ]
+        excluded_fps = _collect_excluded_fingerprints(read_model, current_ver)
         assert proposal_pipeline is not None
         try:
             proposal_res = await proposal_pipeline.generate_proposal(
@@ -530,6 +549,8 @@ async def commit_binary_step_impl(
                 verified_actions=answer_labels,
                 binary_compact=bool(answer_labels),
             )
+            binding["requirementRecord"] = proposal_res.requirement_record
+            binding["revisionPlan"] = proposal_res.revision_plan
             assistant_text = notice or summary
             guidance = {
                 "move": "offer_revision",
@@ -606,6 +627,12 @@ async def commit_binary_step_impl(
                     },
                     now_iso,
                 )
+        if proposal_res is not None:
+            _mark_prior_active_offers_stale_tx(
+                conn,
+                session_id=cur_session.session_id,
+                version_id=cur_ver.version_id,
+            )
         insert_turn_tx(
             conn,
             turn_id=assistant_turn_id,
@@ -622,23 +649,16 @@ async def commit_binary_step_impl(
             attempts_used=step_res.attempts_used,
             latency_ms=step_res.latency_ms,
         )
-        proposal_id: str | None = None
-        if proposal_res is not None:
-            proposal_id = _insert_proposal_tx(
-                conn,
-                session_id=cur_session.session_id,
-                base_version_id=cur_ver.version_id,
-                assistant_turn_id=assistant_turn_id,
-                proposal_res=proposal_res,
-                user_summary=str(guidance["proposalOffer"]["summary"]),
-                now_iso=now_iso,
-            )
         conn.execute(
             "INSERT INTO binary_discovery_topics(session_id, topic_id, state_json, updated_at) "
             "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, topic_id) DO UPDATE "
             "SET state_json = excluded.state_json, updated_at = excluded.updated_at",
             (cur_session.session_id, topic_id, dump_json(topic_state), now_iso),
         )
+        total_attempts = int(getattr(step_res, "attempts_used", 0) or 0) + (
+            int(getattr(proposal_res, "attempts_used", 0) or 0) if proposal_res is not None else 0
+        )
+        is_deterministic = action == "protected_refusal" and total_attempts == 0
         append_audit_event_tx(
             conn,
             cur_session.session_id,
@@ -649,11 +669,13 @@ async def commit_binary_step_impl(
                 "task": "binary_discovery",
                 "baseVersionId": cur_ver.version_id,
                 "topicId": topic_id,
-                "modelGenerationSucceeded": not search_exhausted,
+                "modelGenerationSucceeded": not search_exhausted and not is_deterministic,
+                "deterministicReceipt": is_deterministic,
                 "reliableBodyDelivered": True,
                 "fullQualityPassed": proposal_res is not None or action == "ask",
                 "verifiedProposal": proposal_res is not None,
                 "proposalRequested": True,
+                "attemptsUsed": total_attempts,
                 "latencyMs": step_res.latency_ms,
                 **(
                     {"failureCode": "PROPOSAL_SEARCH_EXHAUSTED"}
@@ -663,83 +685,19 @@ async def commit_binary_step_impl(
             },
             now_iso,
         )
-        cards = build_turn_cards(guidance)
-        emit_turn_room_event_tx(
-            conn,
-            room_sync,
-            session=cur_session,
-            version=cur_ver,
-            user_turn_id=user_turn_id if user_visible_action else "",
-            assistant_turn_id=assistant_turn_id,
-            user_text=user_text,
-            assistant_text=assistant_text,
-            cards=cards,
-            now_iso=now_iso,
-        )
-        node_entries = [
-            {
-                "entryId": (
-                    f"player:{user_turn_id}"
-                    if user_visible_action
-                    else f"choice:{assistant_turn_id}"
-                ),
-                "kind": "player_message" if user_visible_action else "player_action",
-                "text": user_text,
-                "label": "Player" if user_visible_action else "Selected direction",
-                "occurredAt": now_iso,
-                "language": cur_session.language,
-            },
-            {
-                "entryId": f"llm:{assistant_turn_id}",
-                "kind": "llm_message",
-                "text": assistant_text,
-                "label": "LLM",
-                "occurredAt": now_iso,
-                "language": cur_session.language,
-            },
-        ]
-        if cards:
-            node_entries.append(
-                {
-                    "entryId": f"card:{assistant_turn_id}:0",
-                    "kind": "card",
-                    "text": cards[0]["text"],
-                    "label": "Card",
-                    "occurredAt": now_iso,
-                    "language": cur_session.language,
-                }
+        result_payload: dict[str, Any] = {
+            "topicId": topic_id,
+            "assistantTurnId": assistant_turn_id,
+            "action": "retry_pending" if search_exhausted else action,
+        }
+        if complete_idempotency_scope:
+            OperationalRepository.complete_key_tx(
+                conn,
+                cur_session.session_id,
+                complete_idempotency_scope,
+                idempotency_key,
+                response=result_payload,
             )
-        if proposal_res is not None and proposal_id is not None:
-            node_entries.append(
-                {
-                    "entryId": f"proposal-verified:{proposal_id}",
-                    "kind": "map_diff",
-                    "text": dump_json(
-                        {
-                            "diff": [
-                                {"x": ch.x, "y": ch.y, "before": ch.before, "after": ch.after}
-                                for ch in proposal_res.changes
-                            ],
-                            "validation": proposal_res.solve_result.as_dict(),
-                        }
-                    ),
-                    "label": "Verified proposal result",
-                    "occurredAt": now_iso,
-                }
-            )
-        emit_dashboard_node_tx(
-            conn,
-            room_sync,
-            session=cur_session,
-            version=cur_ver,
-            node_id=f"proposal:{topic_id}",
-            node_type="proposal",
-            node_status=str(topic_state["status"]),
-            entries=node_entries,
-            now_iso=now_iso,
-        )
-    return {
-        "topicId": topic_id,
-        "assistantTurnId": assistant_turn_id,
-        "action": "retry_pending" if search_exhausted else action,
-    }
+    if complete_idempotency_scope:
+        return {**result_payload, "_idempotencyCompleted": True}
+    return result_payload

@@ -63,7 +63,9 @@
 
 ## 审计与离线验证
 
-- `audit_events` 为严格只追加、按 `(session_id, event_type, id)` 建索引的遥测与研究审计表，不承载实时运维状态，也不写入正文、提示词、原始模型输出、地图或凭据。
+- `audit_events` 为严格只追加、按 `(session_id, event_type, id)` 建索引的审计表，不承载实时运维状态，并严格遵守两类载荷边界：
+  - **进度与分歧证据类审计事件**（如 `intent_evidence_recorded`、`intent_progress_rewrite`、`intent_hypothesis_recorded`、`revision_execution_outcome`、`human_edit_reviewed`、`disagreement_started` / `disagreement_acknowledged` / `disagreement_resolved`）：为进度抽屉与读时投影提供确定性证据轨迹，允许保留必要的短文本证据摘录（如 `<= 500` 字符的 `observation` / `summaryText` / `detailedText`）与结构化决策字段，严禁写入系统提示词、原始模型 JSON 输出、完整 12×10 地图或凭据。
+  - **纯遥测元数据审计事件**（如 `reply_delivery_outcome`、`message_generation_failed`、`reply_generation_failed`、`challenge_reason_review_pending`、`component_recovery`、`room_sync_missing_room` 等）：严格仅记录状态码、计数、耗时、标识与结构化元数据，不写入对话正文、提示词、原始模型输出、地图或凭据。
 - 只读可靠性统计与离线语义评测工具位于 [reliability_report.py](../server/tools/reliability_report.py) 和 [semantic_eval.py](../server/tools/semantic_eval.py)（评测用例集位于 [server/evaluations/](../server/evaluations/)），可直接从仓库根目录执行（零真实模型调用）：
 
 ```powershell
@@ -78,12 +80,12 @@
 此节适用于已按 [AGENTS.md](../AGENTS.md#authorization-and-data-protection) 获得本轮明确授权的发布。统一生产配置全部位于仓库 `deploy/` 目录（环境变量模板见 [.env.example](../.env.example)，本地凭据统一保存在根目录 `.env`）：
 
 1. **发布前备份**：核对批准的变更范围与生产基线。通过 SQLite 在线 backup API（`sqlite3 .backup` 或 Python `Connection.backup`）取得 `server/data/sokoban.sqlite3` 的一致快照，**WAL 模式下严禁直接裸拷贝使用中的数据库主文件**，同时备份将被替换的代码与配置并保护 `.env` 凭据。
-2. **统一构建与发布**：使用 `deploy/deploy.ps1`（或等效手工步骤），通过 SSH 别名 `sokoban` 与 `%USERPROFILE%\.ssh\sokoban`（`IdentitiesOnly=yes`，无硬编码 IP/凭据）发布；支持 `-WhatIf` 干跑。脚本在本地构建 `web/`（输出 `web/dist/dashboard`、`web/dist/cocreation` 及 WebGL 桥接脚本），打包 `server/`（含 `server/core/` 与 `server/evaluations/`）、`web/dist/`、`deploy/` 与 `pyproject.toml` 上传至目标主机。
+2. **统一构建与发布**：使用 `deploy/deploy.ps1`（或等效手工步骤），通过 SSH 别名 `sokoban` 与 `%USERPROFILE%\.ssh\sokoban`（`IdentitiesOnly=yes`，无硬编码 IP/凭据）发布；支持 `-WhatIf` 干跑。脚本在本地构建 `web/`（输出 `web/dist/dashboard`、`web/dist/cocreation`、`web/dist/survey` 及 WebGL 桥接脚本），打包 `server/`（含 `server/core/` 与 `server/evaluations/`）、`web/dist/`、`deploy/` 与 `pyproject.toml` 上传至目标主机。
 3. **服务配置与重启**：
    - systemd 托管：更新并重启单一非 root 服务 `deploy/sokoban.service`（`User=sokoban`、`NoNewPrivileges=true`、`PrivateTmp=true`、`EnvironmentFile=-/opt/sokoban/.env`，通过 `uvicorn server.main:create_app --factory` 监听 `127.0.0.1:8000`）。
    - 容器托管：使用多阶段 `deploy/Dockerfile`（Node 22 + Python 3.12 非 root `appuser`，入口 `uvicorn server.main:create_app --factory`）与 `deploy/compose.yaml`（映射 `8000:8000` 并挂载持久化 SQLite 数据卷）。
-   - Nginx 反向代理：`deploy/nginx-sokoban.conf` 将 `/game/`、`/frontend/`、`/cocreation/` 与 `/` 统一转发至 `127.0.0.1:8000`（`/cocreation/` 与 `/api/` 保留 135 秒超时、入口页面与 `sokoban-bridge.js` `no-cache`，并按可信代理加固 `X-Forwarded-Proto`）。仅修改文档或纯静态资源时按需处理，无需不必要的服务中断。
-4. **发布后核验**：验证源站及公网 `GET /health`、`GET /ready`、`/frontend/`、`/cocreation/` 静态资源及预期的未授权/密码拦截响应（注意不要通过直接打开无会话 `/cocreation/` 污染研究记录，核验只读接口或已授权测试会话）。
+   - Nginx 反向代理：`deploy/nginx-sokoban.conf` 将 `/game/`、`/frontend/`、`/cocreation/`、`/survey/` 与 `/` 统一转发至 `127.0.0.1:8000`（`/cocreation/` 与 `/api/` 保留 135 秒超时，`/survey` 入口保留查询参数并对 `/survey`、`/survey/`、`/survey/index.html` 与其他入口页面及 `sokoban-bridge.js` 配置 `no-cache`，并按可信代理加固 `X-Forwarded-Proto`）。仅修改文档或纯静态资源时按需处理，无需不必要的服务中断。
+4. **发布后核验**：验证源站及公网 `GET /health`、`GET /ready`、`/frontend/`、`/cocreation/`、`/survey/` 静态资源及预期的未授权/密码拦截响应（注意只做只读静态核验，不要通过直接打开无会话 `/cocreation/` 或在 `/survey/` 提交未授权正式问卷污染研究记录，核验只读接口或已授权测试会话）。
 5. **代码回滚**：恢复上一版本的代码与构建产物并重启 `sokoban.service`，执行同范围健康与只读检查。保留发布期间新采集的研究数据；数据库备份仅用于单独获准的数据恢复。
 
 经授权的 WebGL 更新须额外核对本地兼容构建与 `/game/` 下的 loader、data、framework、wasm 及 `TemplateData/sokoban-bridge.js` 响应。环境状态与本地运维细节见 Git 忽略的 `SERVER.md`。

@@ -8,7 +8,7 @@ SURF 是一个 Unity 2D 推箱子研究项目。参与者通过设计问题（DG
 | --- | --- |
 | Unity / WebGL | 赛前/赛后问卷、在线大厅与匹配、DG 交互、首版生成与验证、Stage 试玩、双人挑战；WebGL 模板内置 `sokoban-bridge.js`（协议版本 5）。 |
 | 统一后端（`:8000`） | 单一 Python 3.12 FastAPI 服务（`server/`，含纯核心 `server/core/`），承载在线匹配、DG 指导与蓝图规划、研究记录与 Dashboard API、共创工作台 API（`/api/*` 及 `/cocreation/api/*` 别名）、进程内 ACID 同步与统一 SQLite WAL 存储。 |
-| 前端工作区（`web/`） | Vite + TypeScript + Preact + `@preact/signals` npm workspace，共享 `@sokoban/ui-core`，构建 Matchmaking Dashboard（`/frontend/`）、双语共创工作台（`/cocreation/`，状态工作流位于 `src/store/workflows/`）及 WebGL 桥接脚本。 |
+| 前端工作区（`web/`） | Vite + TypeScript + Preact + `@preact/signals` npm workspace，共享 `@sokoban/ui-core`，构建 Matchmaking Dashboard（`/frontend/`，双标签页工作台：单场匹配与双人问卷对比 + 问卷统计分析与宽表 CSV 导出）、双语共创工作台（`/cocreation/`，状态工作流位于 `src/store/workflows/`）、自托管双语问卷（`/survey/`，`@sokoban/survey`）及 WebGL 桥接脚本。 |
 
 虽然服务已合并为单进程，**DG/蓝图模型与共创模型仍保持严格隔离**：DG 首版理解与关卡蓝图规划仅使用 DeepSeek 配置；共创对话、Policy 2 二选一发现、关卡修改规划与翻译仅使用 Kimi/Moonshot 配置。生成器、地图权限校验（AI 仅可编辑内部墙与水域）和求解由 `server/core/` 中的确定性程序执行。完整分层与数据流见[系统架构](docs/ARCHITECTURE.md)。
 
@@ -31,7 +31,7 @@ Unity 赛前问卷 → 大厅与匹配 → DG 与首版生成
 | [WebGL 模板](Assets/WebGLTemplates/SokobanPixel/) · [BrowserNavigation.jslib](Assets/Plugins/WebGL/BrowserNavigation.jslib) | Unity WebGL 页面、`TemplateData/sokoban-bridge.js`（协议版本 5）、房间码叠加层与游戏页 Dashboard 密码入口。 |
 | [server/core/](server/core/) | 共享纯 Python 3.12 核心库（无 FastAPI/SQL 依赖；Unity [Packages/](Packages/) 仅保留 `manifest.json` 与 `packages-lock.json`）：12×10 网格校验与操作、BFS/推箱求解器、演示/布局生成器、异步结构化 LLM 客户端、时钟与配置脱敏。 |
 | [server/](server/) | 统一 FastAPI 后端（`server/main.py` `create_app` 工厂、`settings.py`、`container.py`）：`api/routers/`、`application/{rooms,study,analytics,sessions,dialogue}/`（含 `sessions/{lifecycle,stage,read_model}/`）、`domain/`（含 `{proposals,memory,blueprints,rooms}/`）、`i18n/`、`llm/`（原生异步结构化 JSON 管线）、`persistence/`（统一 SQLite WAL 仓储与迁移 CLI）、`evaluations/` 与 `tools/{reliability_report,semantic_eval}.py`。 |
-| [web/](web/) | 前端 npm workspace：`packages/ui-core`、`apps/dashboard`（输出 `web/dist/dashboard`，保留 `Sokoban_Tutorial_Bilingual.pdf`）、`apps/cocreation`（输出 `web/dist/cocreation`，工作流拆分于 `src/store/workflows/`）和 `apps/webgl-bridge`。 |
+| [web/](web/) | 前端 npm workspace：`packages/ui-core`、`apps/dashboard`（输出 `web/dist/dashboard`，含 `Matches & Sessions` + `Survey Analytics` 双标签页并保留 `Sokoban_Tutorial_Bilingual.pdf`）、`apps/cocreation`（输出 `web/dist/cocreation`，工作流拆分于 `src/store/workflows/`）、`apps/survey`（`@sokoban/survey`，输出 `web/dist/survey`，挂载于 `/survey/`，含轻量像素 Likert 刻度样式 `survey.css`）和 `apps/webgl-bridge`。 |
 | [deploy/](deploy/) | 统一生产部署与容器配置：`nginx-sokoban.conf`、`sokoban.service`、`Dockerfile`、`compose.yaml`、`deploy.ps1`。 |
 | [tests/](tests/) | 统一 pytest 回归与集成测试套件（`tests/core/`、`tests/server/` 与端到端测试）。 |
 
@@ -56,7 +56,7 @@ uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 & .\.venv\Scripts\python.exe -m uvicorn server.main:create_app --factory --port 8000
 ```
 
-其中 `npm --prefix web run build` 会同时构建 `@sokoban/dashboard`（输出 `web/dist/dashboard`）、`@sokoban/cocreation`（输出 `web/dist/cocreation`），并把 `@sokoban/webgl-bridge` 产出到 `Assets/WebGLTemplates/SokobanPixel/TemplateData/sokoban-bridge.js`。
+其中 `npm --prefix web run build` 会同时构建 `@sokoban/dashboard`（输出 `web/dist/dashboard`）、`@sokoban/cocreation`（输出 `web/dist/cocreation`）、`@sokoban/survey`（输出 `web/dist/survey`），并把 `@sokoban/webgl-bridge` 产出到 `Assets/WebGLTemplates/SokobanPixel/TemplateData/sokoban-bridge.js`。
 
 如需将历史 JSONL 研究日志或旧版共创 SQLite 数据导入统一数据库，运行独立迁移 CLI：
 
@@ -69,7 +69,8 @@ uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 
 本地启动后的统一入口（全部位于 `http://127.0.0.1:8000`）：
 
-- Matchmaking Dashboard：`http://127.0.0.1:8000/frontend/`（含教程 PDF `/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf` 与 JSONL 导出 `/export/study-logs.jsonl`）
+- Matchmaking Dashboard：`http://127.0.0.1:8000/frontend/`（含 `Matches & Sessions` 单场双人问卷对比与 `Survey Analytics` 统计分析视图、Developer tools 快捷入口 `Export Surveys (CSV)`、教程 PDF `/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`、原始日志导出 `/export/study-logs.jsonl`、正式匹配研究导出 `/export/matchmaking-research.jsonl`、问卷统计接口 `/survey-analytics-data` 与宽表导出 `/export/surveys.csv`）
+- 自托管双语问卷：`http://127.0.0.1:8000/survey/`（赛前 `?type=pre`、赛后 `?type=post`，直接访问进入 `standalone` 测试模式）
 - 共创工作台：`http://127.0.0.1:8000/cocreation/`（直接访问自动创建带 TTL 的算法演示会话）
 - WebGL 游戏页（本地存在 `WebGLBuild/` 时自动挂载）：`http://127.0.0.1:8000/game/`
 - 健康检查：`http://127.0.0.1:8000/health`、`http://127.0.0.1:8000/ready`

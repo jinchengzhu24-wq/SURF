@@ -13,12 +13,7 @@ public class QuestionnaireController : MonoBehaviour
     private const string SurveyResponsePath = "/record-survey-response";
     private const string PlayerNamePrefsKey = "SokobanSurveyPlayerName";
     private const int RequiredAnswerCount = 3;
-    private const string OnlinePreMatchSurveyId = "online_pre_match_survey";
     private const string OnlinePostMatchSurveyId = "online_post_match_survey";
-    // WJX stores URL values in hidden text questions via its q{number} parameter.
-    // The two question numbers are intentionally fixed by the live WJX forms.
-    private const int OnlinePreMatchStudySessionQuestionNumber = 5;
-    private const int OnlinePostMatchStudySessionQuestionNumber = 22;
 
     [Header("Survey")]
     public string surveyId = "post_play_survey";
@@ -254,18 +249,25 @@ public class QuestionnaireController : MonoBehaviour
 
     public void OpenExternalSurvey()
     {
-        if (!TryGetHttpUrl(externalSurveyUrl, out string surveyUrl))
+        string surveyUrl = BuildExternalSurveyLaunchUrl(
+            externalSurveyUrl,
+            backendBaseUrl,
+            surveyId,
+            GetOrCreateSessionId(),
+            OnlineMatchContext.PendingSurveyMatchId,
+            OnlineMatchContext.PendingSurveyRoomCode,
+            OnlineMatchContext.PendingSurveyPlayerNumber
+        );
+
+        if (IsBlank(surveyUrl))
         {
-            Debug.LogError("QuestionnaireController: External survey URL must use HTTP or HTTPS.");
+            Debug.LogError(
+                "QuestionnaireController: External survey URL must be an HTTP/HTTPS URL or a root-relative path."
+            );
             return;
         }
 
-        int studySessionQuestionNumber;
-        Application.OpenURL(
-            TryGetStudySessionQuestionNumber(out studySessionQuestionNumber)
-                ? AppendStudySessionIdParameter(surveyUrl, studySessionQuestionNumber)
-                : surveyUrl
-        );
+        Application.OpenURL(surveyUrl);
         externalSurveyOpened = true;
         UpdateSubmitState();
     }
@@ -479,7 +481,7 @@ public class QuestionnaireController : MonoBehaviour
     {
         bool isOnlinePostMatchSurvey = string.Equals(
             surveyId,
-            "online_post_match_survey",
+            OnlinePostMatchSurveyId,
             StringComparison.Ordinal
         );
         return new SurveyResponseRecord
@@ -560,7 +562,7 @@ public class QuestionnaireController : MonoBehaviour
         }
     }
 
-    private bool IsBlank(string value)
+    private static bool IsBlank(string value)
     {
         return string.IsNullOrEmpty(value) || value.Trim().Length == 0;
     }
@@ -570,68 +572,128 @@ public class QuestionnaireController : MonoBehaviour
         get { return !IsBlank(externalSurveyUrl); }
     }
 
-    private static bool TryGetHttpUrl(string value, out string resolvedUrl)
+    internal static string BuildExternalSurveyLaunchUrl(
+        string externalSurveyUrl,
+        string backendBaseUrl,
+        string surveyId,
+        string studySessionId,
+        string matchId = "",
+        string roomCode = "",
+        int playerNumber = 0)
     {
-        if (PublicEndpointResolver.TryGetSafeHttpUri(value, out Uri uri))
+        if (!TryResolveExternalSurveyBaseUri(externalSurveyUrl, backendBaseUrl, out Uri uri))
         {
-            resolvedUrl = uri.AbsoluteUri;
-            return true;
-        }
-
-        resolvedUrl = string.Empty;
-        return false;
-    }
-
-    private bool TryGetStudySessionQuestionNumber(out int questionNumber)
-    {
-        if (string.Equals(surveyId, OnlinePreMatchSurveyId, StringComparison.Ordinal))
-        {
-            questionNumber = OnlinePreMatchStudySessionQuestionNumber;
-            return true;
-        }
-
-        if (string.Equals(surveyId, OnlinePostMatchSurveyId, StringComparison.Ordinal))
-        {
-            questionNumber = OnlinePostMatchStudySessionQuestionNumber;
-            return true;
-        }
-
-        questionNumber = 0;
-        return false;
-    }
-
-    private string AppendStudySessionIdParameter(
-        string surveyUrl,
-        int studySessionQuestionNumber)
-    {
-        string studySessionId = GetOrCreateSessionId();
-
-        if (IsBlank(studySessionId))
-        {
-            return surveyUrl;
-        }
-
-        Uri uri;
-
-        if (!Uri.TryCreate(surveyUrl, UriKind.Absolute, out uri))
-        {
-            return surveyUrl;
+            return string.Empty;
         }
 
         UriBuilder builder = new UriBuilder(uri);
-        string query = builder.Query.TrimStart('?');
 
-        if (!string.IsNullOrWhiteSpace(query))
+        if (!string.IsNullOrEmpty(builder.Fragment)
+            && IsBlank(builder.Fragment.TrimStart('#')))
         {
-            query += "&";
+            builder.Fragment = string.Empty;
         }
 
-        string encodedStudySessionId = Uri.EscapeDataString(studySessionId);
-        builder.Query = query
-            + "studySessionId=" + encodedStudySessionId
-            + "&q" + studySessionQuestionNumber
-            + "=" + encodedStudySessionId;
+        StringBuilder queryBuilder = new StringBuilder();
+        string existingQuery = builder.Query.TrimStart('?');
+
+        if (!IsBlank(existingQuery))
+        {
+            queryBuilder.Append(existingQuery.TrimEnd('&'));
+        }
+
+        AppendQueryParameter(queryBuilder, "source", "unity");
+        AppendQueryParameter(queryBuilder, "studySessionId", studySessionId);
+
+        if (string.Equals(surveyId, OnlinePostMatchSurveyId, StringComparison.Ordinal))
+        {
+            AppendQueryParameter(queryBuilder, "matchId", matchId);
+            AppendQueryParameter(queryBuilder, "roomCode", roomCode);
+
+            if (playerNumber == 1 || playerNumber == 2)
+            {
+                AppendQueryParameter(
+                    queryBuilder,
+                    "playerNumber",
+                    playerNumber == 1 ? "1" : "2"
+                );
+            }
+        }
+
+        builder.Query = queryBuilder.ToString();
         return builder.Uri.AbsoluteUri;
+    }
+
+    private static bool TryResolveExternalSurveyBaseUri(
+        string externalSurveyUrl,
+        string backendBaseUrl,
+        out Uri uri)
+    {
+        uri = null;
+        string candidate = externalSurveyUrl == null ? "" : externalSurveyUrl.Trim();
+
+        if (IsBlank(candidate))
+        {
+            return false;
+        }
+
+        if (candidate.StartsWith("/", StringComparison.Ordinal))
+        {
+            if (candidate.StartsWith("//", StringComparison.Ordinal)
+                || candidate.StartsWith("/\\", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            string resolvedBaseUrl = PublicEndpointResolver.ResolveBackendBaseUrl(
+                backendBaseUrl
+            );
+
+            if (!PublicEndpointResolver.TryGetSafeHttpUri(resolvedBaseUrl, out Uri baseUri))
+            {
+                return false;
+            }
+
+            string combined = resolvedBaseUrl.TrimEnd('/') + candidate;
+
+            if (!PublicEndpointResolver.TryGetSafeHttpUri(combined, out Uri combinedUri))
+            {
+                return false;
+            }
+
+            if (!string.Equals(
+                    combinedUri.GetLeftPart(UriPartial.Authority),
+                    baseUri.GetLeftPart(UriPartial.Authority),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            uri = combinedUri;
+            return true;
+        }
+
+        return PublicEndpointResolver.TryGetSafeHttpUri(candidate, out uri);
+    }
+
+    private static void AppendQueryParameter(
+        StringBuilder queryBuilder,
+        string key,
+        string value)
+    {
+        if (string.IsNullOrEmpty(key) || IsBlank(value))
+        {
+            return;
+        }
+
+        if (queryBuilder.Length > 0)
+        {
+            queryBuilder.Append('&');
+        }
+
+        queryBuilder.Append(Uri.EscapeDataString(key));
+        queryBuilder.Append('=');
+        queryBuilder.Append(Uri.EscapeDataString(value.Trim()));
     }
 }
 

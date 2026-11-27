@@ -246,13 +246,21 @@ async def resolve_challenge_proposal_id(
     assistant_turn_id: str | None,
     base_version_id: str,
 ) -> str | None:
-    """Infer pending proposal ID when challenge_revision omits proposalId."""
+    """Infer matching pending proposal ID when challenge_revision omits proposalId."""
     if proposal_id:
         return proposal_id
     payload = await container.session_read_model_service.get_session_payload(session_id)
-    for item in reversed(payload.get("proposals") or []):
-        if assistant_turn_id and item.get("assistantTurnId") == assistant_turn_id:
-            return str(item.get("proposalId") or "") or None
+    proposals = payload.get("proposals") or []
+    if assistant_turn_id:
+        for item in reversed(proposals):
+            if (
+                item.get("assistantTurnId") == assistant_turn_id
+                and item.get("status") == "pending"
+                and item.get("baseVersionId") == base_version_id
+            ):
+                return str(item.get("proposalId") or "") or None
+        return None
+    for item in reversed(proposals):
         if item.get("status") == "pending" and item.get("baseVersionId") == base_version_id:
             return str(item.get("proposalId") or "") or None
     return None

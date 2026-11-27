@@ -3,9 +3,13 @@ import type {
   Challenge,
   CoCreationFlowEvent,
   InspectorRecordRow,
+  MapDiffCell,
   MatchEvent,
   MatchRecord,
+  ParsedSurveyAnswer,
+  SolverMetrics,
   StageRecord,
+  SurveyScope,
   TimelineStage,
 } from "./types";
 
@@ -52,10 +56,107 @@ export function formatClockDuration(input: unknown): string {
   if (typeof input !== "number" || !Number.isFinite(input) || input < 0) {
     return "-";
   }
-  const totalSeconds = Math.min(1200, Math.round(input));
+  const totalSeconds = Math.round(input);
+  if (totalSeconds >= 3600) {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(
+      2,
+      "0",
+    );
+    const seconds = String(totalSeconds % 60).padStart(2, "0");
+    return `${hours}:${minutes}:${seconds}`;
+  }
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
   const seconds = String(totalSeconds % 60).padStart(2, "0");
   return `${minutes}:${seconds}`;
+}
+
+export function formatMapDiffCell(cell: MapDiffCell): string {
+  return `(${cell.x}, ${cell.y}): ${cell.before} -> ${cell.after}`;
+}
+
+export function formatSolverSummary(
+  solver: SolverMetrics | null | undefined,
+): string {
+  if (!solver) return "-";
+  if (!solver.solvable) return "Unsolvable";
+  const parts = ["Solvable"];
+  if (solver.minSteps !== null && solver.minSteps !== undefined) {
+    parts.push(`${solver.minSteps} min steps`);
+  }
+  if (solver.minPushes !== null && solver.minPushes !== undefined) {
+    parts.push(`${solver.minPushes} min pushes`);
+  }
+  return parts.join(" · ");
+}
+
+function isMapDiffCellLike(item: unknown): item is MapDiffCell {
+  if (!item || typeof item !== "object") return false;
+  const candidate = item as Record<string, unknown>;
+  return (
+    typeof candidate.x === "number" &&
+    typeof candidate.y === "number" &&
+    typeof candidate.before === "string" &&
+    typeof candidate.after === "string"
+  );
+}
+
+export function formatMapDiffEntryText(
+  rawText: string | null | undefined,
+): string {
+  const raw = clean(rawText);
+  if (!raw) return "-";
+  if (!raw.startsWith("[") && !raw.startsWith("{")) {
+    return raw;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every(isMapDiffCellLike)) {
+      if (parsed.length === 0) return "No cell changes";
+      return parsed.map(formatMapDiffCell).join("\n");
+    }
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      const lines: string[] = [];
+      if (Array.isArray(record.diff) && record.diff.every(isMapDiffCellLike)) {
+        lines.push(
+          record.diff.length > 0
+            ? record.diff.map(formatMapDiffCell).join(", ")
+            : "No cell changes",
+        );
+      }
+      if (record.validation && typeof record.validation === "object") {
+        const validation = record.validation as Record<string, unknown>;
+        if (typeof validation.solvable === "boolean") {
+          const steps =
+            typeof validation.solutionSteps === "number"
+              ? validation.solutionSteps
+              : typeof validation.minSteps === "number"
+                ? validation.minSteps
+                : null;
+          const pushes =
+            typeof validation.solutionPushes === "number"
+              ? validation.solutionPushes
+              : typeof validation.minPushes === "number"
+                ? validation.minPushes
+                : null;
+          lines.push(
+            formatSolverSummary({
+              solvable: validation.solvable,
+              minSteps: steps,
+              minPushes: pushes,
+            }),
+          );
+        }
+      }
+      if (lines.length > 0) {
+        return lines.join("\n");
+      }
+    }
+  } catch {
+    // Fall back to raw text when not JSON.
+  }
+  return raw;
 }
 
 export function formatTimestamp(input: unknown): string {
@@ -160,6 +261,10 @@ export function dashboardNodeStatus(status: string | null | undefined): string {
     accepted: "Accepted",
     rejected: "Rejected",
     replaced: "Replaced",
+    superseded: "Superseded",
+    retry_pending: "Retry pending",
+    revision_needed: "Revision needed",
+    exited: "Exited",
     resolved: "Resolved",
     confirmed: "Confirmed",
     cancelled: "Cancelled",
@@ -300,13 +405,15 @@ export function openingIsConsumed(
   match: MatchRecord,
   opening: CoCreationFlowEvent | null | undefined,
 ): boolean {
-  if (!opening || !opening.assistantTurnId) return false;
+  if (!opening) return false;
+  if (opening.consumed === true) return true;
+  if (!opening.assistantTurnId) return false;
   const player = (match.players ?? []).find(
     (item) => item.playerNumber === opening.playerNumber,
   );
   return (player?.coCreationFlow ?? []).some(
     (event) =>
-      event.eventType === "turn" &&
+      (event.eventType === "node" || event.eventType === "turn") &&
       event.openingAssistantTurnId === opening.assistantTurnId,
   );
 }
@@ -482,4 +589,161 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
   }
   textarea.remove();
   return copied;
+}
+
+export function formatSurveyLabel(
+  surveyId: string | null | undefined,
+  surveyTitle?: string | null,
+): string {
+  const id = clean(surveyId);
+  if (id === "online_pre_match_survey") {
+    return "Pre-Match · Online1";
+  }
+  if (id === "online_post_match_survey") {
+    return "Post-Match · Online2";
+  }
+  if (!id || id === "legacy") {
+    return "Legacy Survey";
+  }
+  return clean(surveyTitle) || titleCase(id);
+}
+
+export function formatSurveySectionLabel(
+  sectionId: string | null | undefined,
+): string {
+  const raw = clean(sectionId);
+  if (!raw) {
+    return "General";
+  }
+  const partMatch = /^part_([a-z0-9]+)$/i.exec(raw);
+  if (partMatch) {
+    return `Part ${partMatch[1].toUpperCase()}`;
+  }
+  if (raw === "pre_match_background") {
+    return "Pre-Match Background";
+  }
+  return titleCase(raw);
+}
+
+export function formatSurveyScopeLabel(scope: SurveyScope): string {
+  const labels: Record<SurveyScope, string> = {
+    active_matches: "Active Formal Matches",
+    formal: "All Formal",
+    standalone: "Standalone Tests",
+    all: "All Records",
+  };
+  return labels[scope];
+}
+
+export function formatStatNumber(
+  input: number | null | undefined,
+  digits = 2,
+): string {
+  if (typeof input !== "number" || !Number.isFinite(input)) {
+    return "—";
+  }
+  return Number.isInteger(input) && digits === 0
+    ? String(input)
+    : input.toFixed(digits);
+}
+
+export function formatBilingualText(
+  zh: string | null | undefined,
+  en: string | null | undefined,
+  fallback = "-",
+): string {
+  const cleanZh = clean(zh);
+  const cleanEn = clean(en);
+  if (cleanZh && cleanEn) {
+    return cleanZh === cleanEn ? cleanZh : `${cleanZh} / ${cleanEn}`;
+  }
+  return cleanZh || cleanEn || fallback;
+}
+
+function asNullableString(input: unknown): string | null {
+  if (input === null || input === undefined) {
+    return null;
+  }
+  const text = String(input).trim();
+  return text ? text : null;
+}
+
+function asNullableNumber(input: unknown): number | null {
+  if (typeof input === "number" && Number.isFinite(input)) {
+    return input;
+  }
+  if (typeof input === "string" && input.trim()) {
+    const parsed = Number(input);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+export function parseSurveyAnswersList(
+  rawAnswers: unknown,
+): ParsedSurveyAnswer[] {
+  if (!Array.isArray(rawAnswers)) {
+    return [];
+  }
+  const parsed: ParsedSurveyAnswer[] = [];
+  rawAnswers.forEach((entry, idx) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const item = entry as Record<string, unknown>;
+    const questionIndex = asNullableNumber(item.questionIndex);
+    const questionId =
+      asNullableString(item.questionId) ||
+      (questionIndex !== null ? `q_${questionIndex}` : `q_${idx + 1}`);
+    const score = asNullableNumber(item.score);
+    const textValue = asNullableString(item.textValue);
+    const rawType = asNullableString(item.questionType);
+    const questionType: ParsedSurveyAnswer["questionType"] =
+      rawType === "likert_5" || rawType === "textarea" || rawType === "single_choice"
+        ? rawType
+        : score !== null
+          ? "likert_5"
+          : textValue !== null
+            ? "textarea"
+            : "single_choice";
+
+    parsed.push({
+      sectionId: asNullableString(item.sectionId) || "default",
+      questionIndex,
+      questionId,
+      questionType,
+      questionTextZh: asNullableString(item.questionTextZh),
+      questionTextEn: asNullableString(item.questionTextEn),
+      optionId: asNullableString(item.optionId),
+      optionIndex: asNullableNumber(item.optionIndex),
+      optionTextZh: asNullableString(item.optionTextZh),
+      optionTextEn: asNullableString(item.optionTextEn),
+      score,
+      textValue,
+    });
+  });
+  return parsed;
+}
+
+export function formatLegacyPayloadEntries(
+  payload: Record<string, unknown> | null | undefined,
+): Array<[string, string]> {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  return Object.entries(payload)
+    .filter(([key]) => key !== "answers")
+    .map(([key, val]) => {
+      if (val === null || val === undefined || val === "") {
+        return [key, "-"];
+      }
+      if (typeof val === "object") {
+        try {
+          return [key, JSON.stringify(val)];
+        } catch {
+          return [key, String(val)];
+        }
+      }
+      return [key, String(val)];
+    });
 }

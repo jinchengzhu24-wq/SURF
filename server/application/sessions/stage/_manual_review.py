@@ -1,4 +1,4 @@
-"""Helpers for manual-edit conflict classification, review, and Dashboard node events."""
+"""Helpers for manual-edit conflict classification, review, and structured audit commits."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ from server.llm.pipelines.understanding import (
 from server.persistence.database import dump_json
 from server.persistence.models import DesignSessionRecord, LevelVersionRecord
 
-from ..config import RoomSyncWriter, append_audit_event_tx, emit_room_cocreation_event_tx
+from ..config import (
+    RoomSyncWriter,
+    append_audit_event_tx,
+    build_disagreement_audit_summary,
+)
 
 
 def extract_confirmed_directions(version: LevelVersionRecord) -> list[dict[str, Any]]:
@@ -200,6 +204,14 @@ def commit_manual_edit_review_tx(
             (dump_json(review_res.assessment), session_id, version_id),
         )
 
+    structured_comparisons = [
+        {
+            "confirmedDirectionId": comp.get("confirmedDirectionId"),
+            "relation": comp.get("relation"),
+            "evidenceIds": list(comp.get("evidenceIds") or ()),
+        }
+        for comp in conflict_decision.comparisons
+    ]
     append_audit_event_tx(
         conn,
         session_id,
@@ -212,13 +224,18 @@ def commit_manual_edit_review_tx(
             "diff": list(ver.diff),
             "changeSummary": change_summary,
             "hasWarning": False,
+            "hasDisagreement": disagreement_payload is not None,
+            **(
+                {"disagreementId": disagreement_payload.get("disagreementId")}
+                if disagreement_payload is not None
+                else {}
+            ),
             "reviewOutcome": conflict_decision.verdict,
             "decisionSource": conflict_decision.decision_source,
             "confirmedDirectionIds": list(conflict_decision.confirmed_direction_ids),
             "effectEvidenceIds": list(conflict_decision.effect_evidence_ids),
             "solverDelta": solver_delta,
-            "comparisons": list(conflict_decision.comparisons),
-            "disagreement": disagreement_payload,
+            "comparisons": structured_comparisons,
         },
         now_iso,
     )
@@ -231,10 +248,11 @@ def commit_manual_edit_review_tx(
                 "versionId": version_id,
                 "turnId": review_turn_id,
                 "subject": "human_edit",
-                "disagreement": disagreement_payload,
+                "disagreement": build_disagreement_audit_summary(disagreement_payload),
             },
             now_iso,
         )
+    review_text = str(review_res.review_message or review_res.opening_message or "")
     append_audit_event_tx(
         conn,
         session_id,
@@ -244,89 +262,14 @@ def commit_manual_edit_review_tx(
             "artifactId": version_id,
             "versionId": version_id,
             "language": session.language,
-            "summaryText": str(ver.summary or "Designer saved a validated manual edit.")[:1200],
-            "detailedText": str(review_res.review_message or review_res.opening_message)[:1200],
+            "summaryText": str(ver.summary or "Designer saved a validated manual edit.")[:500],
+            "detailedText": review_text[:500],
+            "reviewCharCount": len(review_text),
+            "hasDisagreement": disagreement_payload is not None,
         },
         now_iso,
     )
-
-    node_entries: list[dict[str, Any]] = [
-        {
-            "entryId": f"manual-save:{version_id}",
-            "kind": "player_action",
-            "text": str(ver.summary or "Designer saved an edited stage")[:12000],
-            "label": "Player action",
-            "occurredAt": ver.created_at,
-            "language": session.language,
-        }
-    ]
-    if ver.diff:
-        node_entries.append(
-            {
-                "entryId": f"verified-diff:{version_id}",
-                "kind": "map_diff",
-                "text": dump_json(ver.diff),
-                "label": "Verified map change",
-                "occurredAt": ver.created_at,
-            }
-        )
-    node_entries.extend(
-        [
-            {
-                "entryId": f"llm:{opening_turn_id}",
-                "kind": "llm_message",
-                "text": review_res.opening_message,
-                "label": "LLM",
-                "occurredAt": now_iso,
-                "language": session.language,
-            },
-            {
-                "entryId": f"llm:{review_turn_id}",
-                "kind": "llm_message",
-                "text": review_res.review_message,
-                "label": "LLM",
-                "occurredAt": now_iso,
-                "language": session.language,
-            },
-        ]
-    )
-    if disagreement_payload is not None:
-        card_text = "\n".join(
-            str(disagreement_payload.get(f) or "")
-            for f in ("userPosition", "coreDisagreement", "nextQuestion")
-        ).strip()
-        node_entries.append(
-            {
-                "entryId": f"card:{review_turn_id}:0",
-                "kind": "card",
-                "text": card_text or review_res.review_message,
-                "label": "LET'S DISCUSS",
-                "occurredAt": now_iso,
-                "language": session.language,
-            }
-        )
-    manual_node_ev = {
-        "eventId": f"node:manual-review:{version_id}",
-        "eventType": "node",
-        "playerNumber": session.player_slot or 1,
-        "sessionId": session_id,
-        "nodeId": f"manual-review:{version_id}",
-        "nodeType": "manual_edit_review",
-        "nodeStatus": "reviewed",
-        "versionId": version_id,
-        "stageNumber": ver.version_number,
-        "nodeEntries": node_entries[-96:],
-    }
-    emit_room_cocreation_event_tx(
-        conn,
-        room_sync,
-        match_id=session.match_id,
-        player_slot=session.player_slot,
-        is_demo=session.is_demo,
-        session_id=session_id,
-        event=manual_node_ev,
-        now_iso=now_iso,
-    )
+    _ = room_sync
 
 
 def build_disagreement_payload(review_res: ManualEditReviewResult) -> dict[str, Any] | None:

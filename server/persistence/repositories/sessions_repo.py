@@ -145,8 +145,16 @@ class SessionsRepository(_AttemptDraftMixin):
             ).fetchone()
             return row_to_session(row) if row is not None else None
 
-    def delete_expired_demo_sessions(self, before_iso: str) -> int:
+    def delete_expired_demo_sessions(
+        self,
+        before_iso: str,
+        *,
+        null_expiry_cutoff_iso: str | None = None,
+    ) -> int:
         """Delete only expired demo sessions (TTL-scoped); never wipe active demos."""
+        null_cutoff = (
+            null_expiry_cutoff_iso if null_expiry_cutoff_iso is not None else before_iso
+        )
         with self._db.write_tx() as conn:
             rows = conn.execute(
                 "SELECT session_id FROM design_sessions "
@@ -154,7 +162,7 @@ class SessionsRepository(_AttemptDraftMixin):
                 "(expires_at IS NOT NULL AND expires_at <= ?) "
                 "OR (expires_at IS NULL AND created_at <= ?)"
                 ")",
-                (before_iso, before_iso),
+                (before_iso, null_cutoff),
             ).fetchall()
             session_ids = [row["session_id"] for row in rows]
             if not session_ids:

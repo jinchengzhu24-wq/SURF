@@ -27,6 +27,7 @@ from ..config import (
     RoomSyncWriter,
     append_audit_event_tx,
     build_stage_sync_event,
+    build_turn_cards,
     emit_room_cocreation_event_tx,
     next_version_number_tx,
     solve_stage_async,
@@ -173,6 +174,7 @@ def _emit_opening_sync_tx(
     stage_number: int,
     opening_turn_id: str,
     opening_text: str,
+    cards: list[dict[str, str]] | None = None,
     now_iso: str,
 ) -> None:
     opening_ev = {
@@ -185,7 +187,7 @@ def _emit_opening_sync_tx(
         "assistantTurnId": opening_turn_id,
         "assistantText": opening_text,
         "language": session.language,
-        "cards": [],
+        "cards": list(cards or []),
     }
     emit_room_cocreation_event_tx(
         conn,
@@ -229,6 +231,7 @@ async def restore_version_impl(
     if claim.outcome == "in_progress":
         raise ConflictError("RESTORE_IN_PROGRESS", "error.version_conflict")
 
+    committed_in_tx = False
     try:
         _require_active_for_write(session, clock=clock)
         if session.current_version_id != base_version_id:
@@ -342,18 +345,25 @@ async def restore_version_impl(
                 event=stage_ev,
                 now_iso=now_iso,
             )
-        operational_repo.complete_key(
-            session_id, "restore_version", idempotency_key, response={"versionId": new_vid}
-        )
+            operational_repo.complete_key_tx(
+                conn,
+                session_id,
+                "restore_version",
+                idempotency_key,
+                response={"versionId": new_vid},
+            )
+        committed_in_tx = True
     except asyncio.CancelledError:
-        operational_repo.complete_key(
-            session_id, "restore_version", idempotency_key, status="failed"
-        )
+        if not committed_in_tx:
+            operational_repo.complete_key(
+                session_id, "restore_version", idempotency_key, status="failed"
+            )
         raise
     except Exception:
-        operational_repo.complete_key(
-            session_id, "restore_version", idempotency_key, status="failed"
-        )
+        if not committed_in_tx:
+            operational_repo.complete_key(
+                session_id, "restore_version", idempotency_key, status="failed"
+            )
         raise
 
 
@@ -400,6 +410,7 @@ async def assess_version_impl(
             raise ConflictError("ASSESSMENT_IN_PROGRESS", "error.version_conflict")
 
     req_id = request_id or idempotency_key
+    committed_in_tx = False
     try:
         version = sessions_repo.get_version(session_id, version_id)
         if version is None:
@@ -597,20 +608,26 @@ async def assess_version_impl(
                         stage_number=ver.version_number,
                         opening_turn_id=opening_turn_id,
                         opening_text=opening_res.assistant_message,
+                        cards=build_turn_cards(opening_res.guidance),
                         now_iso=now_iso,
                     )
-        if operational_repo is not None:
-            operational_repo.complete_key(
-                session_id, "assess_version", idempotency_key, response={"versionId": version_id}
-            )
+            if operational_repo is not None:
+                operational_repo.complete_key_tx(
+                    conn,
+                    session_id,
+                    "assess_version",
+                    idempotency_key,
+                    response={"versionId": version_id},
+                )
+        committed_in_tx = True
     except asyncio.CancelledError:
-        if operational_repo is not None:
+        if operational_repo is not None and not committed_in_tx:
             operational_repo.complete_key(
                 session_id, "assess_version", idempotency_key, status="failed"
             )
         raise
     except Exception:
-        if operational_repo is not None:
+        if operational_repo is not None and not committed_in_tx:
             operational_repo.complete_key(
                 session_id, "assess_version", idempotency_key, status="failed"
             )

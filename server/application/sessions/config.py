@@ -136,6 +136,30 @@ def append_audit_event_tx(
     )
 
 
+def build_disagreement_audit_summary(
+    disagreement: Mapping[str, Any] | None,
+    *,
+    result_version_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return structured metadata for disagreement audits without duplicating long prose."""
+    if not isinstance(disagreement, Mapping):
+        return None
+    summary: dict[str, Any] = {
+        "disagreementId": disagreement.get("disagreementId") or disagreement.get("challengeId"),
+        "challengeId": disagreement.get("challengeId"),
+        "subject": disagreement.get("subject"),
+        "status": disagreement.get("status"),
+        "phase": disagreement.get("phase"),
+        "resolution": disagreement.get("resolution"),
+        "resultVersionId": result_version_id or disagreement.get("resultVersionId"),
+    }
+    return {
+        k: (v[:500] if isinstance(v, str) else v)
+        for k, v in summary.items()
+        if v is not None
+    }
+
+
 def next_version_number_tx(conn: sqlite3.Connection, session_id: str) -> int:
     """Return the next sequential Stage version number for a session."""
     row = conn.execute(
@@ -314,6 +338,41 @@ def emit_room_designer_intention_tx(
     )
 
 
+def build_turn_cards(guidance: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Build bounded CoCreationCard entries from turn guidance."""
+    if not isinstance(guidance, Mapping):
+        return []
+    cards: list[dict[str, str]] = []
+    dis = guidance.get("disagreement")
+    if (
+        isinstance(dis, Mapping)
+        and dis.get("status") == "active"
+        and dis.get("displayCard") is not False
+    ):
+        text = str(dis.get("coreDisagreement") or dis.get("nextQuestion") or "").strip()
+        if text:
+            cards.append({"type": "discussion", "text": text[:4000]})
+    elif guidance.get("followUpQuestion"):
+        q = str(guidance["followUpQuestion"]).strip()
+        if q:
+            cards.append({"type": "discussion", "text": q[:4000]})
+    offer = guidance.get("proposalOffer")
+    if isinstance(offer, Mapping) and offer.get("summary"):
+        cards.append({"type": "proposal", "text": str(offer["summary"]).strip()[:4000]})
+    pq = guidance.get("proposalQuestion")
+    if isinstance(pq, Mapping) and pq.get("question"):
+        cards.append({"type": "question", "text": str(pq["question"]).strip()[:4000]})
+    if guidance.get("intentHypothesis"):
+        cards.append({"type": "intent", "text": str(guidance["intentHypothesis"]).strip()[:4000]})
+    for cue in guidance.get("uiCues") or ():
+        if isinstance(cue, Mapping) and cue.get("type") and cue.get("text"):
+            ctype = str(cue["type"]).strip().lower().replace("-", "_")[:40]
+            ctext = str(cue["text"]).strip()[:4000]
+            if ctype and ctext:
+                cards.append({"type": ctype, "text": ctext})
+    return cards[:8]
+
+
 __all__ = [
     "COCREATION_DEADLINE_SECONDS",
     "CoCreationAppSettings",
@@ -323,7 +382,9 @@ __all__ = [
     "DEMO_TTL_SECONDS",
     "RoomSyncWriter",
     "append_audit_event_tx",
+    "build_disagreement_audit_summary",
     "build_stage_sync_event",
+    "build_turn_cards",
     "emit_room_cocreation_event_tx",
     "emit_room_designer_intention_tx",
     "map_fingerprint",

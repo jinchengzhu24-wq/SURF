@@ -324,23 +324,65 @@ class _RoomEventsMixin:
                 conn.execute("DELETE FROM online_rooms WHERE id = ?", (row["id"],))
             return len(expired_rows)
 
+    _SESSION_CASCADE_TABLES: tuple[str, ...] = (
+        "conversation_turns",
+        "change_proposals",
+        "revision_challenges",
+        "play_attempts",
+        "draft_regenerations",
+        "binary_discovery_topics",
+        "component_recovery_tasks",
+        "audit_events",
+        "idempotency_keys",
+        "level_versions",
+        "design_sessions",
+    )
+
+    @classmethod
+    def _delete_sessions_tx(cls, conn: sqlite3.Connection, session_ids: list[str]) -> int:
+        if not session_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in session_ids)
+        for table in cls._SESSION_CASCADE_TABLES:
+            conn.execute(
+                f"DELETE FROM {table} WHERE session_id IN ({placeholders})",
+                session_ids,
+            )
+        return len(session_ids)
+
     def delete_match(self, match_id: str) -> dict[str, Any]:
         with self._db.write_tx() as conn:
+            sess_rows = conn.execute(
+                "SELECT session_id FROM design_sessions WHERE match_id = ? AND is_demo = 0",
+                (match_id,),
+            ).fetchall()
+            session_ids = [str(r["session_id"]) for r in sess_rows]
             room_cur = conn.execute("DELETE FROM online_rooms WHERE id = ?", (match_id,))
             event_cur = conn.execute(
                 "DELETE FROM online_room_events WHERE match_id = ?", (match_id,)
             )
-            if room_cur.rowcount == 0 and event_cur.rowcount == 0:
+            deleted_sessions = self._delete_sessions_tx(conn, session_ids)
+            if room_cur.rowcount == 0 and event_cur.rowcount == 0 and deleted_sessions == 0:
                 raise NotFoundError("MATCH_NOT_FOUND", "Online match not found")
             return {
                 "status": "ok",
                 "matchId": match_id,
                 "deletedRoomCount": room_cur.rowcount,
                 "deletedEventCount": event_cur.rowcount,
+                "deletedSessionCount": deleted_sessions,
             }
 
     def clear_matches(self) -> dict[str, Any]:
         with self._db.write_tx() as conn:
+            sess_rows = conn.execute(
+                "SELECT session_id FROM design_sessions WHERE match_id IS NOT NULL AND is_demo = 0"
+            ).fetchall()
+            session_ids = [str(r["session_id"]) for r in sess_rows]
             conn.execute("DELETE FROM online_rooms")
             conn.execute("DELETE FROM online_room_events")
-        return {"status": "ok", "cleared": True}
+            deleted_sessions = self._delete_sessions_tx(conn, session_ids)
+        return {
+            "status": "ok",
+            "cleared": True,
+            "deletedSessionCount": deleted_sessions,
+        }

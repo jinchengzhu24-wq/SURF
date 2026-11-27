@@ -15,7 +15,6 @@ from server.persistence.database import SQLiteDatabase, dump_json
 from server.persistence.models import SessionReadModel
 from server.persistence.repositories.operational_repo import OperationalRepository
 
-from .._shared import emit_dashboard_node_tx
 from ._binary_commit import commit_binary_step_impl
 
 
@@ -47,6 +46,7 @@ class BinaryDiscoveryHandler:
         idempotency_key: str,
         request_id: str,
         deadline: float | None = None,
+        complete_idempotency_scope: str | None = None,
     ) -> dict[str, Any]:
         """Run Policy-2 binary discovery OUTSIDE write_tx and commit question or proposal."""
         if self._binary_pipeline is None or self._proposal_pipeline is None:
@@ -95,6 +95,7 @@ class BinaryDiscoveryHandler:
             idempotency_key=idempotency_key,
             request_id=request_id,
             deadline=deadline,
+            complete_idempotency_scope=complete_idempotency_scope,
         )
 
     async def choose_choice(
@@ -109,6 +110,7 @@ class BinaryDiscoveryHandler:
         base_version_id: str | None = None,
         display_language: str | None = None,
         deadline: float | None = None,
+        complete_idempotency_scope: str | None = None,
     ) -> dict[str, Any]:
         """Apply designer's binary A/B selection and advance discovery or generate proposal."""
         if self._binary_pipeline is None or self._proposal_pipeline is None:
@@ -217,6 +219,7 @@ class BinaryDiscoveryHandler:
             deadline=deadline,
             display_language=locale_display,
             record_choice_selected=record_choice_selected,
+            complete_idempotency_scope=complete_idempotency_scope,
         )
 
     async def cancel_topic(
@@ -246,9 +249,6 @@ class BinaryDiscoveryHandler:
         state["status"] = "cancelled"
         state["retryAction"] = None
         state["updatedAt"] = now_iso
-        current_ver = next(
-            (v for v in read_model.versions if v.version_id == state.get("versionId")), None
-        )
         with self._db.write_tx() as conn:
             conn.execute(
                 "INSERT INTO binary_discovery_topics(session_id, topic_id, state_json, updated_at) "
@@ -263,27 +263,6 @@ class BinaryDiscoveryHandler:
                 {"topicId": topic_id, "idempotencyKey": idempotency_key},
                 now_iso,
             )
-            if current_ver is not None:
-                emit_dashboard_node_tx(
-                    conn,
-                    self._room_sync,
-                    session=session,
-                    version=current_ver,
-                    node_id=f"proposal:{topic_id}",
-                    node_type="proposal",
-                    node_status="cancelled",
-                    entries=[
-                        {
-                            "entryId": f"proposal-cancel:{topic_id}",
-                            "kind": "player_action",
-                            "text": "Cancelled proposal discovery topic",
-                            "label": "Player action",
-                            "occurredAt": now_iso,
-                            "language": session.language,
-                        }
-                    ],
-                    now_iso=now_iso,
-                )
         return {"topicId": topic_id, "status": "cancelled"}
 
     async def _commit_step(
@@ -304,6 +283,7 @@ class BinaryDiscoveryHandler:
         deadline: float | None,
         display_language: str | None = None,
         record_choice_selected: bool = False,
+        complete_idempotency_scope: str | None = None,
     ) -> dict[str, Any]:
         return await commit_binary_step_impl(
             db=self._db,
@@ -326,4 +306,5 @@ class BinaryDiscoveryHandler:
             deadline=deadline,
             display_language=display_language,
             record_choice_selected=record_choice_selected,
+            complete_idempotency_scope=complete_idempotency_scope,
         )

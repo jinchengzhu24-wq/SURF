@@ -263,7 +263,7 @@ class DialogueRepository:
             ids = [row["proposal_id"] for row in rows]
             if not ids:
                 return []
-            decision_json = dump_json({"decisionType": "superseded", "reason": reason})
+            decision_json = dump_json({"decision": "superseded", "reason": reason})
             conn.execute(
                 "UPDATE change_proposals SET status = 'superseded', "
                 "decision_json = COALESCE(decision_json, ?), decided_at = ? "

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -21,7 +22,6 @@ from server.persistence.repositories.sessions_repo import SessionsRepository
 
 from ._shared import (
     check_completed_idempotency,
-    emit_dashboard_node_tx,
     require_active_session,
     require_browser_session,
     require_current_version_tx,
@@ -97,6 +97,7 @@ class IntentService:
         if claim.outcome == "in_progress":
             raise ConflictError("QUESTION_FEEDBACK_IN_PROGRESS", "error.version_conflict")
 
+        committed_in_tx = False
         try:
             now_iso = self._clock.utc_now()
             with self._db.write_tx() as conn:
@@ -129,16 +130,25 @@ class IntentService:
                     },
                     now_iso,
                 )
-            self._operational_repo.complete_key(
-                session_id,
-                "question_feedback",
-                idempotency_key,
-                response={"questionId": question_id, "action": action},
-            )
+                self._operational_repo.complete_key_tx(
+                    conn,
+                    session_id,
+                    "question_feedback",
+                    idempotency_key,
+                    response={"questionId": question_id, "action": action},
+                )
+            committed_in_tx = True
+        except asyncio.CancelledError:
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "question_feedback", idempotency_key, status="failed"
+                )
+            raise
         except Exception:
-            self._operational_repo.complete_key(
-                session_id, "question_feedback", idempotency_key, status="failed"
-            )
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "question_feedback", idempotency_key, status="failed"
+                )
             raise
         return await self._read_model.get_session_payload(session_id)
 
@@ -197,6 +207,7 @@ class IntentService:
         if claim.outcome == "in_progress":
             raise ConflictError("INTENT_FEEDBACK_IN_PROGRESS", "error.version_conflict")
 
+        committed_in_tx = False
         try:
             now_iso = self._clock.utc_now()
             with self._db.write_tx() as conn:
@@ -245,45 +256,30 @@ class IntentService:
                             "artifactId": resolved_id,
                             "versionId": cur_ver.version_id,
                             "action": action,
-                            "summaryText": resolved_statement,
+                            "summaryText": resolved_statement[:500],
                             "sourceTurnId": source_turn_id,
                         },
                         now_iso,
                     )
-                emit_dashboard_node_tx(
+                self._operational_repo.complete_key_tx(
                     conn,
-                    self._room_sync,
-                    session=cur_session,
-                    version=cur_ver,
-                    node_id=f"intent:{resolved_id}",
-                    node_type="intent",
-                    node_status="confirmed" if action in {"confirm", "revise"} else "rejected",
-                    entries=[
-                        {
-                            "entryId": f"intent-feedback:{resolved_id}:{action}",
-                            "kind": "player_action",
-                            "text": (
-                                f"{action.capitalize()}ed intent: {resolved_statement}"
-                                if resolved_statement
-                                else f"Intent {action}"
-                            ),
-                            "label": "Player action",
-                            "occurredAt": now_iso,
-                            "language": cur_session.language,
-                        }
-                    ],
-                    now_iso=now_iso,
+                    session_id,
+                    "intent_feedback",
+                    idempotency_key,
+                    response={"hypothesisId": resolved_id, "action": action},
                 )
-            self._operational_repo.complete_key(
-                session_id,
-                "intent_feedback",
-                idempotency_key,
-                response={"hypothesisId": resolved_id, "action": action},
-            )
+            committed_in_tx = True
+        except asyncio.CancelledError:
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "intent_feedback", idempotency_key, status="failed"
+                )
+            raise
         except Exception:
-            self._operational_repo.complete_key(
-                session_id, "intent_feedback", idempotency_key, status="failed"
-            )
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "intent_feedback", idempotency_key, status="failed"
+                )
             raise
         return await self._read_model.get_session_payload(session_id)
 

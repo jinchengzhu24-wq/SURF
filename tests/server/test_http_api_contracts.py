@@ -646,7 +646,25 @@ async def test_cocreation_api_parity_demo_ttl_and_full_dialogue_stage_contracts(
             },
         )
         assert chosen.status_code == 200
-        prop_id = chosen.json()["proposals"][0]["proposalId"]
+        chosen_json = chosen.json()
+        assert chosen_json["proposals"] == []
+        offer_turn = chosen_json["turns"][-1]
+        assert isinstance(offer_turn["guidance"].get("proposalOffer"), dict)
+
+        executed = await client.post(
+            f"/api/sessions/{sid}/messages",
+            json={
+                "content": "Draft this suggestion",
+                "baseVersionId": v3,
+                "idempotencyKey": "bin-exec-1",
+                "action": "execute_revision",
+                "sourceTurnId": offer_turn["turnId"],
+            },
+        )
+        assert executed.status_code == 200
+        executed_json = executed.json()
+        assert not executed_json["turns"][-1]["guidance"].get("proposalOffer")
+        prop_id = executed_json["proposals"][0]["proposalId"]
         accepted = await client.post(
             f"/api/sessions/{sid}/proposals/{prop_id}/decision",
             json={"decision": "accept", "baseVersionId": v3, "idempotencyKey": "prop-dec-1"},

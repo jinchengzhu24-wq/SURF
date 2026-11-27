@@ -12,7 +12,9 @@ export function TopBar({ store }: TopBarProps): JSX.Element {
   const toggleButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuId = useId();
 
-  const isLoading = store.loading.value;
+  const isLoading =
+    store.loading.value ||
+    (store.activeTab.value === "surveys" && store.surveyLoading.value);
   const hasPayload = store.payload.value !== null;
 
   useEffect(() => {
@@ -65,10 +67,10 @@ export function TopBar({ store }: TopBarProps): JSX.Element {
       <div class="actions">
         <a
           class="pixel-btn pixel-btn--secondary topbar-export-link"
-          href={store.api.exportStudyLogsUrl}
-          download="study-logs.jsonl"
+          href={store.api.exportResearchUrl}
+          download="matchmaking-research.jsonl"
         >
-          Export JSONL
+          Export Research (JSONL)
         </a>
 
         <button
@@ -109,11 +111,36 @@ export function TopBar({ store }: TopBarProps): JSX.Element {
             <div class="tools-popover" id={menuId} role="menu">
               <a
                 role="menuitem"
+                href={store.api.exportResearchUrl}
+                download="matchmaking-research.jsonl"
+                onClick={() => setMenuOpen(false)}
+              >
+                Export Research (JSONL)
+              </a>
+              <a
+                role="menuitem"
+                href={store.api.exportSurveysCsvUrl()}
+                download="surveys.csv"
+                onClick={() => setMenuOpen(false)}
+              >
+                Export Surveys (CSV)
+              </a>
+              <a
+                role="menuitem"
+                href={store.api.rawRoomEventsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setMenuOpen(false)}
+              >
+                Raw Room Events
+              </a>
+              <a
+                role="menuitem"
                 href={store.api.exportStudyLogsUrl}
                 download="study-logs.jsonl"
                 onClick={() => setMenuOpen(false)}
               >
-                Export Study Logs (JSONL)
+                Study Telemetry (JSONL)
               </a>
               <a
                 role="menuitem"

@@ -12,12 +12,15 @@ import {
   numeric,
 } from "./format";
 import type {
+  DashboardTab,
   DeleteActionConfig,
   MatchPlayer,
   MatchRecord,
   MatchmakingRecordsResponse,
   NoticeState,
   SummaryStats,
+  SurveyAnalyticsResponse,
+  SurveyScope,
   TimelineStage,
 } from "./types";
 
@@ -28,6 +31,7 @@ export interface DashboardStoreOptions {
 
 export interface DashboardStore {
   readonly api: DashboardApi;
+  readonly activeTab: ReadonlySignal<DashboardTab>;
   readonly payload: ReadonlySignal<MatchmakingRecordsResponse | null>;
   readonly loading: ReadonlySignal<boolean>;
   readonly loadError: ReadonlySignal<string | null>;
@@ -39,6 +43,13 @@ export interface DashboardStore {
   readonly deleteBusy: ReadonlySignal<boolean>;
   readonly deleteError: ReadonlySignal<string>;
 
+  readonly surveyScope: ReadonlySignal<SurveyScope>;
+  readonly surveyIdFilter: ReadonlySignal<string>;
+  readonly surveyVersionFilter: ReadonlySignal<string>;
+  readonly surveyAnalytics: ReadonlySignal<SurveyAnalyticsResponse | null>;
+  readonly surveyLoading: ReadonlySignal<boolean>;
+  readonly surveyError: ReadonlySignal<string | null>;
+
   readonly allMatches: ReadonlySignal<MatchRecord[]>;
   readonly firstStageMatches: ReadonlySignal<MatchRecord[]>;
   readonly summaryStats: ReadonlySignal<SummaryStats>;
@@ -48,6 +59,14 @@ export interface DashboardStore {
   readonly activeStage: ReadonlySignal<TimelineStage | null>;
   readonly challengePlayers: ReadonlySignal<MatchPlayer[]>;
   readonly activeChallengePlayer: ReadonlySignal<MatchPlayer | null>;
+
+  setActiveTab(tab: DashboardTab): void;
+  setSurveyScope(scope: SurveyScope): void;
+  setSurveyIdFilter(surveyId: string): void;
+  setSurveyVersionFilter(surveyVersion: string): void;
+  resetSurveyFilters(): void;
+  loadSurveyAnalytics(manual?: boolean): Promise<void>;
+  jumpToMatch(matchId: string): void;
 
   loadData(manual?: boolean): Promise<void>;
   setSearchInput(value: string): void;
@@ -74,6 +93,7 @@ export function createDashboardStore(
     options.windowObj ??
     (typeof window !== "undefined" ? window : undefined);
 
+  const activeTab = signal<DashboardTab>("matches");
   const payload: Signal<MatchmakingRecordsResponse | null> = signal(null);
   const loading = signal(false);
   const loadError = signal<string | null>(null);
@@ -88,8 +108,17 @@ export function createDashboardStore(
   const deleteBusy = signal(false);
   const deleteError = signal("");
 
+  const surveyScope = signal<SurveyScope>("active_matches");
+  const surveyIdFilter = signal("");
+  const surveyVersionFilter = signal("");
+  const surveyAnalytics: Signal<SurveyAnalyticsResponse | null> = signal(null);
+  const surveyLoading = signal(false);
+  const surveyError = signal<string | null>(null);
+
   let noticeCounter = 0;
   let loadSequence = 0;
+  let surveySequence = 0;
+  let surveyStale = false;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   const allMatches = computed<MatchRecord[]>(
@@ -332,14 +361,143 @@ export function createDashboardStore(
     notice.value = null;
   }
 
+  async function loadSurveyAnalytics(manual = false): Promise<void> {
+    const seq = ++surveySequence;
+    batch(() => {
+      surveyLoading.value = true;
+      surveyError.value = null;
+      if (activeTab.value === "surveys") {
+        statusLine.value = manual
+          ? "Refreshing Survey Analytics..."
+          : "Loading Survey Analytics...";
+      }
+    });
+
+    try {
+      const data = await api.fetchSurveyAnalytics({
+        scope: surveyScope.value,
+        surveyId: surveyIdFilter.value,
+        surveyVersion: surveyVersionFilter.value,
+      });
+      if (seq !== surveySequence) {
+        return;
+      }
+      surveyStale = false;
+      batch(() => {
+        surveyAnalytics.value = data;
+        surveyError.value = null;
+        surveyLoading.value = false;
+        if (activeTab.value === "surveys") {
+          statusLine.value = `Survey analytics loaded ${formatTimestamp(data.generatedAt)}`;
+        }
+      });
+    } catch (error) {
+      if (seq !== surveySequence || isAbortError(error)) {
+        return;
+      }
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Unknown error";
+      batch(() => {
+        surveyError.value = message;
+        surveyLoading.value = false;
+        if (activeTab.value === "surveys") {
+          statusLine.value = `Could not load Survey Analytics: ${message}`;
+        }
+      });
+    }
+  }
+
+  function setActiveTab(tab: DashboardTab): void {
+    activeTab.value = tab;
+    if (tab === "surveys" && (surveyAnalytics.value === null || surveyStale)) {
+      void loadSurveyAnalytics(false);
+    }
+  }
+
+  function setSurveyScope(scope: SurveyScope): void {
+    if (surveyScope.value === scope) {
+      return;
+    }
+    surveyScope.value = scope;
+    void loadSurveyAnalytics(false);
+  }
+
+  function setSurveyIdFilter(surveyId: string): void {
+    if (surveyIdFilter.value === surveyId) {
+      return;
+    }
+    surveyIdFilter.value = surveyId;
+    void loadSurveyAnalytics(false);
+  }
+
+  function setSurveyVersionFilter(surveyVersion: string): void {
+    if (surveyVersionFilter.value === surveyVersion) {
+      return;
+    }
+    surveyVersionFilter.value = surveyVersion;
+    void loadSurveyAnalytics(false);
+  }
+
+  function resetSurveyFilters(): void {
+    if (surveyIdFilter.value === "" && surveyVersionFilter.value === "") {
+      return;
+    }
+    batch(() => {
+      surveyIdFilter.value = "";
+      surveyVersionFilter.value = "";
+    });
+    void loadSurveyAnalytics(false);
+  }
+
+  function jumpToMatch(matchId: string): void {
+    const targetId = clean(matchId);
+    if (!targetId) {
+      return;
+    }
+    const visibleMatch = firstStageMatches.value.find(
+      (match) => match.matchId === targetId,
+    );
+    if (!visibleMatch) {
+      activeTab.value = "matches";
+      const existsWithoutFirstStage = allMatches.value.some(
+        (match) => match.matchId === targetId,
+      );
+      showNotice(
+        existsWithoutFirstStage
+          ? `Match ${compactId(targetId)} has not reached First Stage and is hidden from the match explorer.`
+          : `Match ${compactId(targetId)} is no longer available in the loaded matches.`,
+        "warning",
+      );
+      return;
+    }
+
+    const currentlyVisible = filteredMatches.value.some(
+      (match) => match.matchId === targetId,
+    );
+    if (!currentlyVisible) {
+      clearSearch();
+    }
+    activeTab.value = "matches";
+    selectMatch(targetId);
+  }
+
   async function loadData(manual = false): Promise<void> {
     const seq = ++loadSequence;
+    const shouldRefreshSurveys =
+      activeTab.value === "surveys" || surveyAnalytics.value !== null;
+
     batch(() => {
       loading.value = true;
       statusLine.value = manual
         ? "Refreshing MatchMaking records..."
         : "Loading MatchMaking records...";
     });
+
+    const surveyPromise = shouldRefreshSurveys
+      ? loadSurveyAnalytics(manual)
+      : Promise.resolve();
 
     try {
       const data = await api.fetchMatchmakingRecords();
@@ -351,10 +509,13 @@ export function createDashboardStore(
         loadError.value = null;
         loading.value = false;
         restoreSelectionFromUrl(data.matches);
-        statusLine.value = `Last loaded ${formatTimestamp(data.generatedAt)}`;
+        if (activeTab.value === "matches") {
+          statusLine.value = `Last loaded ${formatTimestamp(data.generatedAt)}`;
+        }
       });
     } catch (error) {
       if (seq !== loadSequence || isAbortError(error)) {
+        await surveyPromise;
         return;
       }
       const message =
@@ -364,9 +525,13 @@ export function createDashboardStore(
       batch(() => {
         loadError.value = message;
         loading.value = false;
-        statusLine.value = `Could not load MatchMaking records: ${message}`;
+        if (activeTab.value === "matches") {
+          statusLine.value = `Could not load MatchMaking records: ${message}`;
+        }
       });
     }
+
+    await surveyPromise;
   }
 
   function openDeleteMatch(match: MatchRecord): void {
@@ -434,6 +599,9 @@ export function createDashboardStore(
         deleteDialog.value = null;
         deleteError.value = "";
       });
+      if (surveyAnalytics.value !== null) {
+        surveyStale = true;
+      }
       syncUrlMatch("");
       showNotice(
         config.kind === "match"
@@ -461,6 +629,7 @@ export function createDashboardStore(
 
   return {
     api,
+    activeTab,
     payload,
     loading,
     loadError,
@@ -471,6 +640,12 @@ export function createDashboardStore(
     deleteDialog,
     deleteBusy,
     deleteError,
+    surveyScope,
+    surveyIdFilter,
+    surveyVersionFilter,
+    surveyAnalytics,
+    surveyLoading,
+    surveyError,
     allMatches,
     firstStageMatches,
     summaryStats,
@@ -480,6 +655,13 @@ export function createDashboardStore(
     activeStage,
     challengePlayers,
     activeChallengePlayer,
+    setActiveTab,
+    setSurveyScope,
+    setSurveyIdFilter,
+    setSurveyVersionFilter,
+    resetSurveyFilters,
+    loadSurveyAnalytics,
+    jumpToMatch,
     loadData,
     setSearchInput,
     flushSearch,

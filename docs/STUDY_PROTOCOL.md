@@ -13,7 +13,8 @@ Menu → Questionnaire(Online1) → Online_Lobby → Match_Briefing
   → Questionnaire(Online2) → Menu
 ```
 
-- `Questionnaire(Online1)` 在大厅之前打开赛前问卷，`Questionnaire(Online2)` 在结果之后打开赛后问卷。两者均为每轮流程的必需环节。保持原有问卷导航和提交行为，禁止加入持久跳过标志。
+- `Questionnaire(Online1)` 在大厅之前打开自托管双语赛前问卷（`/survey/?type=pre`，6 道必填题：单行文本 `participant_code`、性别（4 选项）、年龄区间、推箱子经验、生成式 AI 使用频率与组间陌生人确认），`Questionnaire(Online2)` 在结果之后打开自托管双语赛后问卷（`/survey/?type=post`，`v2.0-surf-study`，共定义 26 题分属 Part A/B/C/D：Part A 含 `participant_code`、`round_number`、`opponent_relationship` 及非陌生人条件触发的 6 道日常关系 Likert 题——`stranger` 时自动跳过并仅显示 20 题；Part B 合并为 6 道情绪体验 Likert 题；Part C 为 7 道 AI 理解、适应与帮助 Likert 题；Part D 含 2 道结果满意度必填 Likert 题与 `final_self_reported_intent` / `ai_collaboration_reflection` 2 道选填反思题）。问卷题目与条件渲染规则由声明式配置 `web/apps/survey/src/surveyDefinitions.ts` 驱动；`participant_code` 使用 `questionType="textarea"` 配合前端单行展示字段 `singleLine: true`，提交时若 URL 未携带 `participantId` 则自动以 `.trim()` 后的 `participant_code` 回填顶层 `participantId`（URL 参数优先）；Unity 通过同源路径打开新标签页并附带隐藏追踪参数（`source=unity`、`studySessionId`，赛后额外携带 `matchId`、`roomCode`、`playerNumber`，不作为表单输入展示给参与者）。两份问卷均为每轮流程的必需环节，保持原有问卷导航和提交行为，禁止加入持久跳过标志。
+- 自托管问卷支持双入口模式：由 Unity 携带参数进入时记录 `entrySource="unity_matchmaking"`，直接访问 `/survey/` 或 `/survey/?type=pre|post` 测试填写时记录 `entrySource="standalone"`；`web/apps/survey/src/styles/survey.css` 采用轻量像素 Likert 刻度按钮与紧凑竖向间距以兼顾五点量表可读性。提交经 `POST /record-survey-response` 写入 `study_records`，并在单个 `BEGIN IMMEDIATE` 事务内按 `responseId` 原子幂等去重（正式模式前端另配合 `localStorage` 防重复提交）。`GET /matchmaking-records-data` 与正式匹配研究导出 `GET /export/matchmaking-research.jsonl` 共享同一套正式问卷关联逻辑，自动将非 `standalone` 的问卷按 `matchId`（赛后主关联，不跨场次串连）和 `studySessionId`（赛前主关联与无 `matchId` 回退）挂接到每场匹配的 `surveys` 数组（NDJSON 导出保留在每行顶层 `surveys`，不在 `line_obj.match` 内重复嵌套），同时严格排除 `entrySource="standalone"` 测试记录。
 - `Draft` 场景已退役，在线房间的原始 `draft` 事件仍是独立且不可改写的研究记录。旧版 `Train` 研究页面与后端路线（及 `PC`、`PC_Design`、`PC_Level`）不在现行在线导航和统一后端接口范围内。`Algorithm_Level` 保留为独立启用的算法体验。启用场景以 [EditorBuildSettings.asset](../ProjectSettings/EditorBuildSettings.asset) 为准。
 - 菜单的 Tutorial 按钮通过浏览器打开 `/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`（源文件位于 [Sokoban_Tutorial_Bilingual.pdf](../web/apps/dashboard/public/tutorial/Sokoban_Tutorial_Bilingual.pdf)），保留 Unity 菜单流程。正式挑战只有在玩家获得控制后才运行 30 秒计时。超时锁定输入、提交 `timed_out`、显示静态失败面板。两栏结果页独立显示双方的完成或超时、记录移动数，以及原关卡设计者提交的设计意图。双方已提交结果的计数包含超时，旧记录缺少 outcome 时按 `completed` 解释。继续按钮进入本轮赛后问卷。
 
@@ -51,19 +52,19 @@ Unity 侧入口见[共创控制器](../Assets/Scripts/Online/CoCreationEntryCont
 | 数据域 | 持久化表与交接规则 |
 | --- | --- |
 | 在线房间与挑战 | `online_rooms`、`online_room_events`：保留玩家、房间码、状态、双方挑战地图与结果、原始 `draft` 事件及进程内同步的共创节点。`coCreationDurationSeconds` 按进入共创至定稿的服务端计时（默认 0–1200 秒）；`result_submitted.durationSeconds` 为对手挑战用时。 |
-| 通用研究记录 | `study_records`：持久化 `POST /record-{survey-response,level-start,level-end,journey-event}` 的四类研究记录；通过 `GET /export/study-logs.jsonl` 兼容导出标准 JSONL 供离线研究分析。 |
+| 通用研究记录 | `study_records`：持久化 `POST /record-{survey-response,level-start,level-end,journey-event}` 的四类研究记录（其中 `survey` 在单个 `BEGIN IMMEDIATE` 事务内按 `responseId` 原子幂等去重）；`GET /export/study-logs.jsonl` 保持原始 JSONL 兼容导出（含 `standalone` 测试问卷），`GET /export/matchmaking-research.jsonl` 按场次导出匹配事件、正式共创会话及自动关联的正式问卷 `surveys`（严格排除 `standalone` 与 Demo）。`GET /survey-analytics-data`（纯数据驱动模块 `server/application/analytics/_survey_analytics.py`）支持 `active_matches`（默认）/ `formal` / `standalone` / `all` 四个统计范围，`n < 2` 时样本标准差 `sd` 返回 `null`，分节均值汇总 `likertSummary` 显式标注 `"Raw scores (unreversed)"`（不做硬编码反向计分）。`GET /export/surveys.csv` 导出带 UTF-8 BOM 与 CRLF 的动态宽表 CSV，自动为关联到的赛前问卷回填缺失的 `match_id`、`room_code`、`player_slot` 元数据，纯数值列直接输出不加前导引号，仅对非数值字符串单元格执行公式注入前缀转义。 |
 | 共创会话与关卡 | `design_sessions`、`level_versions`、`play_attempts`、`draft_regenerations`：保留会话身份哈希、匹配关联、期限、当前/定稿版本、不可变地图快照、求解指标、实体绑定、父链与各自的 `design_context_json`。 |
 | 对话、提案与运维状态 | `conversation_turns`、`change_proposals`、`revision_challenges`；独立索引运维表 `idempotency_keys`、`binary_discovery_topics`、`component_recovery_tasks`；以及严格只追加的 `audit_events` 审计表。公开 Session 投影经权限与字段白名单过滤，内部上下文、凭据和原始模型字段留在边界内。 |
 | 历史数据迁移 | 通过独立 CLI [migrations.py](../server/persistence/migrations.py)（`python -m server.persistence.migrations`）导入历史 JSONL 日志或旧版 8010 SQLite 库；服务启动时不做冷启动全表扫描或隐式回填。 |
 
-Matchmaking Dashboard（`/frontend/`，数据源 `GET /matchmaking-records-data`）保持对 `Manual Edit Review`、`LLM Challenge`、`Player Challenge`、意图修订及双方完整/短 Study Session ID 关联与搜索的支持。按 **Decision 5B** 安全策略：本地与研究便利读取（`/frontend/`、`/matchmaking-records-data`、`/export/study-logs.jsonl`）保持开放；破坏性删除（`POST /delete-online-match`、`POST /clear-matchmaking-records`）强制校验 `X-Delete-Password`（常量时间比对）。
+Matchmaking Dashboard（`/frontend/`）提供双标签工作台：`Matches & Sessions`（数据源 `GET /matchmaking-records-data`，保持对 `Manual Edit Review`、`LLM Challenge`、`Player Challenge`、意图修订、双方完整/短 Study Session ID 关联搜索及每场底部 P1/P2 并排问卷对比面板 `MatchSurveysPanel` 的支持）与 `Survey Analytics`（数据源 `GET /survey-analytics-data`，提供问卷星式分节柱状/Likert 统计、文本流房间跳转、最新填答明细表及按筛选条件联动的 CSV 导出），并在顶部 Developer tools 菜单保留 `Export Surveys (CSV)` 快捷入口。按 **Decision 5B** 安全策略：本地与研究便利读取（`/frontend/`、`/matchmaking-records-data`、`/survey-analytics-data`、`/export/study-logs.jsonl`、`/export/matchmaking-research.jsonl`、`/export/surveys.csv`）保持开放；破坏性删除（`POST /delete-online-match`、`POST /clear-matchmaking-records`）强制校验 `X-Delete-Password`（常量时间比对），采用 **Option A** 保留策略——仅删除在线房间、房间事件及关联的正式 `design_sessions`，保留 `study_records` 原始记录不级联删除。
 
 研究记录改动默认面向新记录与正常幂等重试。保留已有兼容和原记录，历史批量修正或回填按 [AGENTS.md](../AGENTS.md#authorization-and-data-protection) 的授权约束处理。
 
 ## 演示与公网入口
 
 - 直接进入 `/cocreation/` 创建独立 `algorithm_demo` 会话。`server/core/generator.py` 沿用两箱、两目标、水域、结构模板和反向拉箱思路，生成可解的 10×12 Draft。重生成只替换候选，显式进入才固化 Stage 1。Demo 无正式期限、无在线房间同步或匹配记录，采用 **TTL 过期清理**（`delete_expired_demo_sessions`），不误删其他并发用户的活跃 Demo，也绝不触碰正式研究数据。
-- [deploy/nginx-sokoban.conf](../deploy/nginx-sokoban.conf) 以 `https://sokobanaidemo.top` 的 `/game/`、`/frontend/`、`/cocreation/` 为公开路径，统一反向代理至单个上游 `127.0.0.1:8000`（`/cocreation/` 与 `/api/` 保留 135 秒 LLM 超时），并对 `X-Forwarded-Proto` 按可信代理白名单加固。
+- [deploy/nginx-sokoban.conf](../deploy/nginx-sokoban.conf) 以 `https://sokobanaidemo.top` 的 `/game/`、`/frontend/`、`/cocreation/`、`/survey/` 为公开路径，统一反向代理至单个上游 `127.0.0.1:8000`（`/cocreation/` 与 `/api/` 保留 135 秒 LLM 超时，`/survey` 入口保留原始查询参数与 `no-cache` 头），并对 `X-Forwarded-Proto` 按可信代理白名单加固。直接访问 `/survey/` 可进入独立双语预览/测试模式（`entrySource="standalone"`），不污染正式匹配研究导出。
 - 游戏页 `DATA DASHBOARD` 按钮通过原生 `<dialog>` 验证密码（`POST /verify-dashboard-password`）后新标签页打开 `/frontend/`。大厅静态房间码输入由 `web/apps/webgl-bridge`（`ResizeObserver`）与 `BrowserNavigation.jslib` 同步，生成码只读可选中，加入码可粘贴并归一化为六位字母数字。共创网页保留中英文两套界面。
 
 ## 研究链路验收

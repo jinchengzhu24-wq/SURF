@@ -71,7 +71,7 @@ class FinalFlowEvent(_FlowEventBase):
     def _valid_duration(cls, value: float | None) -> float | None:
         if value is None:
             return None
-        if not math.isfinite(value) or value < 0 or value > 1200:
+        if not math.isfinite(value) or value < 0 or value > 86400:
             raise ValueError("Invalid coCreationDurationSeconds")
         return round(float(value), 2)
 

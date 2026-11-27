@@ -236,8 +236,11 @@ def build_container(
     )
     dashboard_service = DashboardService(
         rooms_repo,
+        db=resolved_db,
+        study_repo=study_repo,
         delete_password=resolved_settings.dashboard_delete_password.get_secret_value(),
         clock=resolved_clock,
+        cocreation_deadline_seconds=resolved_settings.cocreation_deadline_seconds,
     )
 
     session_read_model_service = SessionReadModelService(
@@ -323,6 +326,8 @@ def build_container(
         resolved_db,
         sessions_repo,
         session_read_model_service,
+        operational_repo=operational_repo,
+        room_sync=online_room_service,
         clock=resolved_clock,
         settings=cocreation_settings,
     )

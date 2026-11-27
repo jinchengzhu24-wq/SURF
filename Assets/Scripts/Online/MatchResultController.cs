@@ -117,20 +117,51 @@ public class MatchResultController : MonoBehaviour
         while (!leaving && OnlineMatchContext.HasMatch)
         {
             bool receivedState = false;
+            bool terminalError = false;
 
             yield return client.GetRoom(
                 state =>
                 {
+                    if (leaving)
+                    {
+                        return;
+                    }
+
                     receivedState = true;
                     OnlineMatchContext.ApplyState(state);
                     RenderState(state);
                 },
-                error => SetText(
-                    statusText,
-                    "CONNECTION LOST. RETRYING...\n"
-                    + error.ToUpperInvariant()
-                )
+                error =>
+                {
+                    if (leaving)
+                    {
+                        return;
+                    }
+
+                    if (OnlineMatchClient.IsTerminalClientError(client.LastHttpStatusCode))
+                    {
+                        terminalError = true;
+                        SetText(statusText, "THIS MATCH WAS CLOSED OR EXPIRED.");
+                        if (!HasOpponentSubmittedResult(OnlineMatchContext.RoomState))
+                        {
+                            SetText(opponentRunStatusText, "RESULT UNAVAILABLE");
+                        }
+                        SetText(footerText, "Continue to the post-match questionnaire.");
+                        return;
+                    }
+
+                    SetText(
+                        statusText,
+                        "CONNECTION LOST. RETRYING...\n"
+                        + error.ToUpperInvariant()
+                    );
+                }
             );
+
+            if (terminalError || leaving)
+            {
+                yield break;
+            }
 
             if (receivedState
                 && OnlineMatchContext.RoomState != null

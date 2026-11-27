@@ -6,7 +6,11 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from server.application.sessions import RoomSyncWriter, append_audit_event_tx
+from server.application.sessions import (
+    RoomSyncWriter,
+    append_audit_event_tx,
+    build_disagreement_audit_summary,
+)
 from server.core.clock import Clock
 from server.domain.errors import ConflictError
 from server.domain.memory import ensure_design_context, set_active_disagreement
@@ -15,13 +19,11 @@ from server.llm.pipelines.chat import ChatPipeline
 from server.llm.pipelines.understanding import TurnRoutingResult
 from server.persistence.database import SQLiteDatabase, dump_json
 from server.persistence.models import SessionReadModel
+from server.persistence.repositories.operational_repo import OperationalRepository
 
 from .._shared import (
     apply_turn_context_patch,
     build_play_summary,
-    build_turn_cards,
-    emit_dashboard_node_tx,
-    emit_turn_room_event_tx,
     insert_turn_tx,
     require_current_version_tx,
     serialize_turns_for_llm,
@@ -194,7 +196,10 @@ class OrdinaryChatHandler:
                     {
                         "versionId": cur_ver.version_id,
                         "turnId": assistant_turn_id,
-                        "disagreement": dis_acknowledged_payload,
+                        "subject": "human_edit",
+                        "disagreement": build_disagreement_audit_summary(
+                            dis_acknowledged_payload
+                        ),
                     },
                     now_iso,
                 )
@@ -234,8 +239,10 @@ class OrdinaryChatHandler:
                     "task": "ordinary_chat",
                     "baseVersionId": cur_ver.version_id,
                     "modelGenerationSucceeded": model != "deterministic",
+                    "deterministicReceipt": model == "deterministic",
                     "reliableBodyDelivered": True,
                     "fullQualityPassed": not human_edit_recovery_needed,
+                    "attemptsUsed": attempts_used,
                     "latencyMs": latency_ms,
                     **(
                         {"component": "human_edit_engagement"}
@@ -245,60 +252,11 @@ class OrdinaryChatHandler:
                 },
                 now_iso,
             )
-            cards = build_turn_cards(guidance)
-            emit_turn_room_event_tx(
-                conn,
-                self._room_sync,
-                session=cur_session,
-                version=cur_ver,
-                user_turn_id=user_turn_id,
-                assistant_turn_id=assistant_turn_id,
-                user_text=user_text,
-                assistant_text=reply_text,
-                cards=cards,
-                now_iso=now_iso,
-            )
-            if intent_audit is not None:
-                emit_dashboard_node_tx(
-                    conn,
-                    self._room_sync,
-                    session=cur_session,
-                    version=cur_ver,
-                    node_id=f"intent:{intent_audit['hypothesisId']}",
-                    node_type="intent",
-                    node_status="tentative",
-                    entries=[
-                        {
-                            "entryId": f"player:{user_turn_id}",
-                            "kind": "player_message",
-                            "text": user_text,
-                            "label": "Player",
-                            "occurredAt": now_iso,
-                            "language": cur_session.language,
-                        },
-                        {
-                            "entryId": f"llm:{assistant_turn_id}",
-                            "kind": "llm_message",
-                            "text": reply_text,
-                            "label": "LLM",
-                            "occurredAt": now_iso,
-                            "language": cur_session.language,
-                        },
-                        {
-                            "entryId": f"card:{assistant_turn_id}:intent",
-                            "kind": "card",
-                            "text": intent_audit["statement"],
-                            "label": "Card",
-                            "occurredAt": now_iso,
-                            "language": cur_session.language,
-                        },
-                    ],
-                    now_iso=now_iso,
-                )
             if recovery_task is not None:
                 rec_id = str(recovery_task["recoveryId"])
                 rec_state = {
                     **dict(recovery_task["state"]),
+                    "createdAt": str(recovery_task["state"].get("createdAt") or now_iso),
                     "sourceUserTurnId": user_turn_id,
                     "deliveredAssistantTurnId": assistant_turn_id,
                 }
@@ -329,15 +287,12 @@ class OrdinaryChatHandler:
             if rec_id is not None:
                 result_payload["recoveryId"] = rec_id
             if complete_idempotency_scope:
-                conn.execute(
-                    "UPDATE idempotency_keys SET status = 'completed', response_json = ? "
-                    "WHERE session_id = ? AND scope = ? AND idempotency_key = ?",
-                    (
-                        dump_json(result_payload),
-                        cur_session.session_id,
-                        complete_idempotency_scope,
-                        idempotency_key,
-                    ),
+                OperationalRepository.complete_key_tx(
+                    conn,
+                    cur_session.session_id,
+                    complete_idempotency_scope,
+                    idempotency_key,
+                    response=result_payload,
                 )
         if complete_idempotency_scope:
             return {**result_payload, "_idempotencyCompleted": True}

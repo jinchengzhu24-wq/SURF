@@ -5,15 +5,31 @@ import {
   buildInspectorRecordRows,
   clean,
   dashboardNodeLabel,
+  dashboardNodeStatus,
   findOpeningForStage,
+  formatClockDuration,
+  formatMapDiffCell,
+  formatMapDiffEntryText,
   formatMode,
   formatNodeMetrics,
+  formatSeconds,
+  formatSolverSummary,
   formatTimestamp,
   openingIsConsumed,
+  titleCase,
   value,
 } from "../format";
 import type { DashboardStore } from "../store";
-import type { CoCreationFlowEvent, FlowCard, MatchRecord } from "../types";
+import type {
+  CoCreationFlowEvent,
+  DraftRegeneration,
+  FlowCard,
+  MapDiffCell,
+  MatchRecord,
+  PlayAttempt,
+  SolverMetrics,
+  TimelineStage,
+} from "../types";
 import { CopyIdControl } from "./CopyIdControl";
 
 export interface StageInspectorProps {
@@ -49,7 +65,160 @@ function renderCards(
   );
 }
 
-function DraftDetails({ record }: { record: CoCreationFlowEvent }): JSX.Element {
+function renderSolverMetrics(
+  solver: SolverMetrics | null | undefined,
+): JSX.Element | null {
+  if (!solver) return null;
+  const rows: Array<[string, string]> = [
+    ["Solvable", solver.solvable ? "Yes" : "No"],
+    ["Min steps", value(solver.minSteps)],
+    ["Min pushes", value(solver.minPushes)],
+  ];
+  return (
+    <div class="inspector-subsection">
+      <h4>Solver metrics</h4>
+      <div class="record-grid">
+        {rows.map(([label, rowValue]) => (
+          <div class="record-row" key={label}>
+            <span>{label}</span>
+            <strong>{rowValue}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function renderMapDiff(
+  diff: readonly MapDiffCell[] | null | undefined,
+  eventType: string,
+): JSX.Element | null {
+  if (!Array.isArray(diff)) return null;
+  if (diff.length === 0 && eventType === "first_stage") return null;
+
+  return (
+    <div class="inspector-subsection">
+      <h4>
+        Map diff ({diff.length} {diff.length === 1 ? "cell" : "cells"})
+      </h4>
+      {diff.length === 0 ? (
+        <p class="stage-meta-note">No cell changes from previous stage.</p>
+      ) : (
+        <ul class="diff-list">
+          {diff.map((cell, index) => (
+            <li class="diff-chip" key={`${cell.x}-${cell.y}-${index}`}>
+              {formatMapDiffCell(cell)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function renderPlayAttempts(
+  attempts: readonly PlayAttempt[] | null | undefined,
+): JSX.Element | null {
+  const list = attempts ?? [];
+  if (list.length === 0) return null;
+
+  return (
+    <div class="inspector-subsection">
+      <h4>Play attempts ({list.length})</h4>
+      {list.map((attempt, index) => {
+        const rows: Array<[string, string]> = [
+          ["Status", titleCase(attempt.status)],
+          ["Duration", formatSeconds(attempt.durationSeconds)],
+          ["Moves", value(attempt.moveCount)],
+          ["Pushes", value(attempt.pushCount)],
+          ["Restarts", value(attempt.restartCount)],
+        ];
+        if (
+          attempt.minimumMoves !== null &&
+          attempt.minimumMoves !== undefined
+        ) {
+          rows.push([
+            "Minimum",
+            `${value(attempt.minimumMoves)} moves / ${value(attempt.minimumPushes)} pushes`,
+          ]);
+        }
+
+        return (
+          <article class="node-entry" key={attempt.attemptId || index}>
+            <h4>
+              Attempt {index + 1} · {titleCase(attempt.status)}
+            </h4>
+            <div class="record-grid">
+              {rows.map(([label, rowValue]) => (
+                <div class="record-row" key={label}>
+                  <span>{label}</span>
+                  <strong>{rowValue}</strong>
+                </div>
+              ))}
+            </div>
+            <small>{formatTimestamp(attempt.finishedAt || attempt.issuedAt)}</small>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function renderDraftRegenerations(
+  regenerations: readonly DraftRegeneration[] | null | undefined,
+): JSX.Element | null {
+  const list = regenerations ?? [];
+  if (list.length === 0) return null;
+
+  return (
+    <div class="inspector-subsection">
+      <h4>Draft regenerations ({list.length})</h4>
+      {list.map((regen, index) => {
+        const rows: Array<[string, string]> = [
+          ["Request ID", value(regen.requestId)],
+          ["Status", titleCase(regen.status)],
+        ];
+        if (regen.failureCode) {
+          rows.push(["Failure code", regen.failureCode]);
+        }
+        if (regen.solver) {
+          rows.push(["Solver", formatSolverSummary(regen.solver)]);
+        }
+
+        return (
+          <article class="node-entry" key={regen.requestId || index}>
+            <h4>
+              Generation {value(regen.generation)} · {titleCase(regen.status)}
+            </h4>
+            <div class="record-grid">
+              {rows.map(([label, rowValue]) => (
+                <div class="record-row" key={label}>
+                  <span>{label}</span>
+                  <strong>{rowValue}</strong>
+                </div>
+              ))}
+            </div>
+            <small>{formatTimestamp(regen.updatedAt || regen.requestedAt)}</small>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function DraftDetails({
+  match,
+  record,
+}: {
+  match: MatchRecord;
+  record: CoCreationFlowEvent;
+}): JSX.Element {
+  const player = (match.players ?? []).find(
+    (item) => item.playerNumber === record.playerNumber,
+  );
+  const regenerations =
+    record.draftRegenerations ?? player?.draftRegenerations ?? [];
+
   const rows: Array<[string, string]> = [
     ["Metadata complete", record.draftMetadataComplete ? "Yes" : "No"],
     ["Q1 answer", value(record.q1Answer)],
@@ -82,6 +251,7 @@ function DraftDetails({ record }: { record: CoCreationFlowEvent }): JSX.Element 
         <h4>AI layout rationale</h4>
         <p>{value(record.aiLayoutRationale)}</p>
       </div>
+      {renderDraftRegenerations(regenerations)}
     </section>
   );
 }
@@ -106,7 +276,8 @@ function FlowStageDetails({
         : "Manual";
   const rows = record.rows ?? [];
   const opening = findOpeningForStage(match, record);
-  const visibleOpening = opening && !openingIsConsumed(match, opening) ? opening : null;
+  const visibleOpening =
+    opening && !openingIsConsumed(match, opening) ? opening : null;
 
   return (
     <section class="record-section">
@@ -123,6 +294,12 @@ function FlowStageDetails({
           Initial draft: {formatMode(record.initialDraftMethod)}
         </p>
       ) : null}
+      {record.eventType === "final" ? (
+        <p class="stage-meta-note">
+          Co-creation time: {formatClockDuration(record.coCreationDurationSeconds)}
+          {" · "}Opponent restarts: {value(record.opponentRestartCount)}
+        </p>
+      ) : null}
 
       <div class="sokoban-map-frame mini-map-frame">
         {rows.length > 0 ? (
@@ -137,6 +314,10 @@ function FlowStageDetails({
         )}
       </div>
 
+      {renderSolverMetrics(record.solver)}
+      {renderMapDiff(record.diff, record.eventType)}
+      {renderPlayAttempts(record.playAttempts)}
+
       {visibleOpening ? (
         <div class="inspector-subsection">
           <h4>AI opening evaluation</h4>
@@ -149,8 +330,10 @@ function FlowStageDetails({
 }
 
 function DashboardNodeDetails({
+  store,
   record,
 }: {
+  store: DashboardStore;
   record: CoCreationFlowEvent;
 }): JSX.Element {
   const metrics = formatNodeMetrics(record);
@@ -159,6 +342,27 @@ function DashboardNodeDetails({
     .sort((left, right) =>
       clean(left.occurredAt).localeCompare(clean(right.occurredAt)),
     );
+
+  const playerNodeStages: TimelineStage[] = store.timelineStages.value.filter(
+    (item) =>
+      item.type === "flow" &&
+      item.playerNumber === record.playerNumber &&
+      item.record.eventType === "node",
+  );
+
+  const parentStage = record.nodeParentId
+    ? playerNodeStages.find(
+        (item) =>
+          (item.record as CoCreationFlowEvent).nodeId === record.nodeParentId,
+      ) ?? null
+    : null;
+
+  const childStages = record.nodeId
+    ? playerNodeStages.filter(
+        (item) =>
+          (item.record as CoCreationFlowEvent).nodeParentId === record.nodeId,
+      )
+    : [];
 
   return (
     <section class="record-section">
@@ -172,22 +376,75 @@ function DashboardNodeDetails({
         ))}
       </div>
 
+      {parentStage ? (
+        <div class="inspector-subsection">
+          <h4>Parent node</h4>
+          <div class="node-relation-list">
+            <button
+              type="button"
+              class="node-relation-btn"
+              onClick={() => store.selectStage(parentStage)}
+            >
+              <strong>{parentStage.label}</strong>
+              <span>
+                {dashboardNodeStatus(
+                  (parentStage.record as CoCreationFlowEvent).nodeStatus,
+                )}
+              </span>
+              <code>{(parentStage.record as CoCreationFlowEvent).nodeId}</code>
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {childStages.length > 0 ? (
+        <div class="inspector-subsection">
+          <h4>Follow-up / Child nodes ({childStages.length})</h4>
+          <div class="node-relation-list">
+            {childStages.map((childStage) => {
+              const childNode = childStage.record as CoCreationFlowEvent;
+              return (
+                <button
+                  key={childStage.key}
+                  type="button"
+                  class="node-relation-btn"
+                  onClick={() => store.selectStage(childStage)}
+                >
+                  <strong>{childStage.label}</strong>
+                  <span>{dashboardNodeStatus(childNode.nodeStatus)}</span>
+                  <code>{childNode.nodeId}</code>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
       {entries.length === 0 ? (
         <div class="empty-state compact-empty">
           No public node entries recorded.
         </div>
       ) : (
-        entries.map((entry, index) => (
-          <article class="node-entry" key={`${entry.occurredAt ?? ""}-${index}`}>
-            <h4>
-              {entry.label ||
-                (entry.kind && NODE_ENTRY_LABELS[entry.kind]) ||
-                "Entry"}
-            </h4>
-            <p>{entry.text || "-"}</p>
-            <small>{formatTimestamp(entry.occurredAt)}</small>
-          </article>
-        ))
+        entries.map((entry, index) => {
+          const entryText =
+            entry.kind === "map_diff"
+              ? formatMapDiffEntryText(entry.text)
+              : entry.text || "-";
+          return (
+            <article
+              class="node-entry"
+              key={`${entry.entryId ?? entry.occurredAt ?? ""}-${index}`}
+            >
+              <h4>
+                {entry.label ||
+                  (entry.kind && NODE_ENTRY_LABELS[entry.kind]) ||
+                  "Entry"}
+              </h4>
+              <p>{entryText}</p>
+              <small>{formatTimestamp(entry.occurredAt)}</small>
+            </article>
+          );
+        })
       )}
     </section>
   );
@@ -266,7 +523,7 @@ export function StageInspector({ store }: StageInspectorProps): JSX.Element {
     const record = stage.record as CoCreationFlowEvent;
 
     if (record.eventType === "draft") {
-      return <DraftDetails record={record} />;
+      return <DraftDetails match={match} record={record} />;
     }
     if (
       record.eventType === "first_stage" ||
@@ -276,7 +533,7 @@ export function StageInspector({ store }: StageInspectorProps): JSX.Element {
       return <FlowStageDetails match={match} record={record} />;
     }
     if (record.eventType === "node") {
-      return <DashboardNodeDetails record={record} />;
+      return <DashboardNodeDetails store={store} record={record} />;
     }
     if (record.eventType === "message") {
       return <MessageDetails record={record} />;

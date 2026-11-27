@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
-from server.api.deps import ContainerDep
+from server.api.deps import ContainerDep, rewrite_loopback_url
 from server.api.schemas import PlayBootstrapRequest, PlayMetricsRequest
+from server.settings import DEFAULT_PUBLIC_BASE_URL
 
 router = APIRouter()
 
@@ -25,9 +26,20 @@ def _metrics_kwargs(payload: PlayMetricsRequest) -> dict[str, Any]:
 
 @router.post("/play-attempts/{attempt_id}/bootstrap")
 async def bootstrap_play_attempt(
-    attempt_id: str, payload: PlayBootstrapRequest, container: ContainerDep
+    attempt_id: str,
+    payload: PlayBootstrapRequest,
+    request: Request,
+    container: ContainerDep,
 ) -> dict[str, Any]:
-    return await container.stage_service.bootstrap_play_attempt(attempt_id, payload.ticket)
+    result = await container.stage_service.bootstrap_play_attempt(attempt_id, payload.ticket)
+    if "returnUrl" in result and isinstance(result["returnUrl"], str):
+        result["returnUrl"] = rewrite_loopback_url(
+            result["returnUrl"],
+            request,
+            configured_base_url=container.settings.public_base_url,
+            default_base_url=DEFAULT_PUBLIC_BASE_URL,
+        )
+    return result
 
 
 @router.post("/play-attempts/{attempt_id}/start")

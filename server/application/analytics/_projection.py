@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 from server.persistence.models import OnlineRoomEventRecord
+
+from ._cocreation_projection import (
+    SessionProjectionBundle,
+    build_authoritative_player_projection,
+)
 
 _MATCH_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
     {
@@ -95,6 +101,10 @@ _ALLOWED_FLOW_EVENT_FIELDS: frozenset[str] = frozenset(
         "restoredFromStageNumber",
         "replacedVersionId",
         "replacedStageNumber",
+        "solver",
+        "playAttempts",
+        "draftRegenerations",
+        "consumed",
     }
 )
 
@@ -124,6 +134,8 @@ def _create_player_projection(player_number: int) -> dict[str, Any]:
         "studySessionId": "",
         "menuStartedFlow": False,
         "coCreationFlow": [],
+        "playAttempts": [],
+        "draftRegenerations": [],
     }
 
 
@@ -231,8 +243,12 @@ def build_matchmaking_projection(
     *,
     generated_at: str,
     source_label: str,
+    session_bundles: Mapping[tuple[str, int], SessionProjectionBundle] | None = None,
+    default_deadline_seconds: int = 1200,
 ) -> dict[str, Any]:
-    """Build exact Matchmaking Dashboard payload from persisted room/flow events."""
+    """Build exact Matchmaking Dashboard payload from persisted room/flow events
+    and authoritative local co-creation SQLite tables when present.
+    """
     lifecycle: list[OnlineRoomEventRecord] = []
     flow_by_slot: dict[tuple[str, int], list[OnlineRoomEventRecord]] = {}
 
@@ -276,32 +292,98 @@ def build_matchmaking_projection(
     completed_count = 0
     cancelled_count = 0
     expired_count = 0
+    bundles = session_bundles or {}
 
     for match_record in matches.values():
         match_id = match_record["matchId"]
+        room_code = match_record["roomCode"]
         players = match_record["players"]
 
         for slot in (1, 2):
             slot_records = flow_by_slot.get((match_id, slot), [])
-            has_first = any(
-                clean_id(r.payload.get("eventType") or r.event_type) == "first_stage"
-                for r in slot_records
-            )
-            indexed_flow: list[tuple[int, dict[str, Any]]] = []
-            if players[slot]["menuStartedFlow"] and has_first:
-                for idx, rec in enumerate(slot_records):
-                    safe_flow = {
-                        k: v for k, v in rec.payload.items() if k in _ALLOWED_FLOW_EVENT_FIELDS
-                    }
-                    if not safe_flow.get("serverReceivedAt") and rec.created_at:
-                        safe_flow["serverReceivedAt"] = rec.created_at
-                    indexed_flow.append((idx, safe_flow))
+            bundle = bundles.get((match_id, slot))
+            if players[slot]["menuStartedFlow"] and bundle is not None and bundle.versions:
+                # Extract room-level draft event and optional fallback duration from room events
+                draft_event: dict[str, Any] | None = None
+                fallback_duration: float | None = None
+                for rec in slot_records:
+                    ev_type = clean_id(rec.payload.get("eventType") or rec.event_type)
+                    if ev_type == "draft" and draft_event is None:
+                        safe_draft = {
+                            k: v
+                            for k, v in rec.payload.items()
+                            if k in _ALLOWED_FLOW_EVENT_FIELDS
+                        }
+                        if not safe_draft.get("serverReceivedAt") and rec.created_at:
+                            safe_draft["serverReceivedAt"] = rec.created_at
+                        draft_event = safe_draft
+                    elif ev_type == "final" and _is_finite_number(
+                        rec.payload.get("coCreationDurationSeconds")
+                    ):
+                        fallback_duration = float(rec.payload["coCreationDurationSeconds"])
 
-            indexed_flow.sort(
-                key=lambda item: (str(item[1].get("serverReceivedAt") or ""), item[0])
-            )
-            aggregated = _aggregate_node_events([item[1] for item in indexed_flow])
-            players[slot]["coCreationFlow"] = aggregated
+                aggregated, play_attempts, draft_regens = build_authoritative_player_projection(
+                    bundle,
+                    match_id=match_id,
+                    room_code=room_code,
+                    player_number=slot,
+                    study_session_id=players[slot]["studySessionId"],
+                    draft_event=draft_event,
+                    fallback_duration=fallback_duration,
+                    default_deadline_seconds=default_deadline_seconds,
+                )
+                players[slot]["coCreationFlow"] = aggregated
+                players[slot]["playAttempts"] = play_attempts
+                players[slot]["draftRegenerations"] = draft_regens
+                if not players[slot]["designerIntention"] and isinstance(
+                    bundle.session.final_intention, Mapping
+                ):
+                    players[slot]["designerIntention"] = str(
+                        bundle.session.final_intention.get("content") or ""
+                    ).strip()
+            else:
+                has_first = any(
+                    clean_id(r.payload.get("eventType") or r.event_type) == "first_stage"
+                    for r in slot_records
+                )
+                indexed_flow: list[tuple[int, dict[str, Any]]] = []
+                if players[slot]["menuStartedFlow"] and has_first:
+                    for idx, rec in enumerate(slot_records):
+                        ev_type = clean_id(rec.payload.get("eventType") or rec.event_type)
+                        # Strip raw `turn` transcripts from public projection (#16)
+                        if ev_type == "turn":
+                            continue
+                        safe_flow = {
+                            k: v
+                            for k, v in rec.payload.items()
+                            if k in _ALLOWED_FLOW_EVENT_FIELDS
+                        }
+                        # Backfill missing identifiers/type from SQLite columns (#24)
+                        if not clean_id(safe_flow.get("eventType")) and ev_type:
+                            safe_flow["eventType"] = ev_type
+                        raw_pnum = safe_flow.get("playerNumber")
+                        if not (
+                            isinstance(raw_pnum, int)
+                            and not isinstance(raw_pnum, bool)
+                            and raw_pnum in (1, 2)
+                        ):
+                            safe_flow["playerNumber"] = slot
+                        if not clean_id(safe_flow.get("matchId")):
+                            safe_flow["matchId"] = match_id
+                        if not clean_id(safe_flow.get("roomCode")) and room_code:
+                            safe_flow["roomCode"] = room_code
+                        if not safe_flow.get("serverReceivedAt") and rec.created_at:
+                            safe_flow["serverReceivedAt"] = rec.created_at
+                        indexed_flow.append((idx, safe_flow))
+
+                indexed_flow.sort(
+                    key=lambda item: (str(item[1].get("serverReceivedAt") or ""), item[0])
+                )
+                aggregated = _aggregate_node_events([item[1] for item in indexed_flow])
+                players[slot]["coCreationFlow"] = aggregated
+                players[slot]["playAttempts"] = []
+                players[slot]["draftRegenerations"] = []
+
             if aggregated:
                 latest_ts = max(
                     (

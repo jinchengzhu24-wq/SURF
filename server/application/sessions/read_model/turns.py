@@ -209,35 +209,80 @@ def annotate_proposal_questions(
     turns: list[ConversationTurnRecord],
     public_guidance_by_turn: Mapping[str, dict[str, Any]],
     translations_by_turn: Mapping[str, dict[str, Any]],
-    topic_state: Mapping[str, Any] | None,
+    topic_state: Mapping[str, Any] | None = None,
+    *,
+    topics_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+    current_version_id: str | None = None,
 ) -> None:
     """Attach selectedChoiceId/status onto Policy-2 binary discovery proposalQuestion cards."""
-    choices = list((topic_state or {}).get("choices") or [])
-    pending_qid = ((topic_state or {}).get("pendingQuestion") or {}).get("questionId")
-    topic_id = (topic_state or {}).get("topicId")
-    topic_status = (topic_state or {}).get("status")
+    topic_map: dict[str, Mapping[str, Any]] = {}
+    if topics_by_id:
+        for tid, state in topics_by_id.items():
+            if isinstance(state, Mapping):
+                topic_map[str(tid)] = state
+    latest_topic_id: str | None = None
+    if isinstance(topic_state, Mapping) and topic_state.get("topicId"):
+        latest_topic_id = str(topic_state["topicId"])
+        topic_map.setdefault(latest_topic_id, topic_state)
+
     for turn in turns:
-        question = public_guidance_by_turn.get(turn.turn_id, {}).get("proposalQuestion")
+        turn_guidance = public_guidance_by_turn.get(turn.turn_id)
+        if not isinstance(turn_guidance, dict):
+            continue
+        question = turn_guidance.get("proposalQuestion")
         if not isinstance(question, dict):
             continue
         qid = question.get("questionId")
-        selected = next((c.get("choiceId") for c in choices if c.get("questionId") == qid), None)
+        q_topic_id = str(question.get("topicId") or "").strip()
+        matched_topic = topic_map.get(q_topic_id) if q_topic_id else None
+        if matched_topic is None and not q_topic_id and isinstance(topic_state, Mapping):
+            matched_topic = topic_state
+
+        topic_choices = list((matched_topic or {}).get("choices") or ())
+        selected = next(
+            (c.get("choiceId") for c in topic_choices if c.get("questionId") == qid),
+            None,
+        )
+        if not selected:
+            persisted_selected = question.get("selectedChoiceId")
+            if isinstance(persisted_selected, str) and persisted_selected.strip():
+                selected = persisted_selected.strip()
+
+        pending_qid = ((matched_topic or {}).get("pendingQuestion") or {}).get("questionId")
+        matched_status = (matched_topic or {}).get("status")
+        matched_version_id = (matched_topic or {}).get("versionId")
+        is_latest = latest_topic_id is None or q_topic_id == latest_topic_id
+        version_matches = (
+            current_version_id is None
+            or matched_version_id is None
+            or matched_version_id == current_version_id
+        )
         active = bool(
-            topic_id
-            and topic_id == question.get("topicId")
-            and topic_status == "clarifying"
+            matched_topic is not None
+            and q_topic_id
+            and is_latest
+            and version_matches
+            and matched_status == "clarifying"
             and pending_qid == qid
         )
-        question.update(
-            selectedChoiceId=selected,
-            status="selected" if selected else "pending" if active else "expired",
-            sourceLanguage=turn.language,
-        )
+        status = "selected" if selected else "pending" if active else "expired"
+        turn_guidance["proposalQuestion"] = {
+            **question,
+            "selectedChoiceId": selected,
+            "status": status,
+            "sourceLanguage": turn.language,
+        }
         for locale, tr in translations_by_turn.get(turn.turn_id, {}).items():
-            tr_q = (tr.get("guidance") or {}).get("proposalQuestion")
+            tr_guidance = tr.get("guidance")
+            tr_q = (
+                tr_guidance.get("proposalQuestion")
+                if isinstance(tr_guidance, dict)
+                else None
+            )
             if isinstance(tr_q, dict):
-                tr_q.update(
-                    selectedChoiceId=selected,
-                    status=question["status"],
-                    sourceLanguage=locale,
-                )
+                tr_guidance["proposalQuestion"] = {
+                    **tr_q,
+                    "selectedChoiceId": selected,
+                    "status": status,
+                    "sourceLanguage": locale,
+                }

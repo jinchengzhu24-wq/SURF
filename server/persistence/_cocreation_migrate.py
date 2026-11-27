@@ -9,6 +9,7 @@ from typing import Any
 from ._cocreation_migrate_ops import (
     insert_idempotency,
     migrate_audit_and_ops,
+    normalize_finalize_request,
     preload_legacy_maps,
     row_dict,
 )
@@ -18,6 +19,14 @@ _LEGACY_CHALLENGE_STATUS_MAP: dict[str, str] = {
     "review_pending": "awaiting_reason",
     "reason_review": "awaiting_reason",
     "choice_pending": "awaiting_choice",
+}
+
+_LEGACY_DECISION_SCOPE_MAP: dict[str, str] = {
+    "restore": "restore_version",
+    "finalize": "finalize",
+    "save": "save_version",
+    "accept": "decide_proposal",
+    "reject": "decide_proposal",
 }
 
 
@@ -175,7 +184,7 @@ def _migrate_proposals_challenges_attempts(
             decision_payload = (
                 {
                     "id": dec["id"],
-                    "decisionType": dec["decision_type"],
+                    "decision": dec["decision_type"],
                     "reason": dec["reason"],
                     "versionId": dec["version_id"],
                     "idempotencyKey": dec["idempotency_key"],
@@ -205,14 +214,88 @@ def _migrate_proposals_challenges_attempts(
                 ),
             )
             stats["proposals"] += cur.rowcount
+            if dec is not None and dec.get("idempotency_key"):
+                clean_reason = str(dec.get("reason") or "").strip()[:2000]
+                dp_req = {
+                    "proposalId": r["id"],
+                    "decision": dec["decision_type"],
+                    "base": r["base_version_id"],
+                    "reason": clean_reason,
+                }
+                dp_resp = {
+                    "proposalId": r["id"],
+                    "decision": dec["decision_type"],
+                    "versionId": dec["version_id"],
+                    **({"reason": clean_reason} if clean_reason else {}),
+                }
+                stats["idempotency_keys"] += insert_idempotency(
+                    dst,
+                    dec["session_id"],
+                    "decide_proposal",
+                    dec["idempotency_key"],
+                    dp_req,
+                    "completed",
+                    dp_resp,
+                    dec["created_at"],
+                )
+
+    stage_restored_by_vid = maps.get("stage_restored_by_vid") or {}
+    finalize_audit_by_key = maps.get("finalize_audit_by_key") or {}
+    version_meta = maps.get("version_meta") or {}
 
     for dec in maps["other_decisions"]:
         if dec["session_id"] not in valid_sessions:
             continue
-        req_payload = {"decisionType": dec["decision_type"], "versionId": dec["version_id"]}
-        resp_payload = {"versionId": dec["version_id"], "decisionId": dec["id"]}
+        dec_type = str(dec["decision_type"] or "").strip()
+        scope = _LEGACY_DECISION_SCOPE_MAP.get(dec_type, dec_type)
+        clean_reason = str(dec.get("reason") or "").strip()
+        if scope == "restore_version":
+            rest_audit = stage_restored_by_vid.get(dec["version_id"]) or {}
+            ver_info = version_meta.get(dec["version_id"]) or {}
+            source_vid = (
+                rest_audit.get("restoredFromVersionId")
+                or ver_info.get("parent_version_id")
+                or dec["version_id"]
+            )
+            base_vid = (
+                rest_audit.get("baseVersionId")
+                or rest_audit.get("replacedVersionId")
+                or ver_info.get("parent_version_id")
+                or dec["version_id"]
+            )
+            req_payload: Any = {"versionId": source_vid, "baseVersionId": base_vid}
+            resp_payload: Any = {
+                "versionId": dec["version_id"],
+                "decisionId": dec["id"],
+                **({"reason": clean_reason} if clean_reason else {}),
+            }
+        elif scope == "finalize":
+            fin_audit = finalize_audit_by_key.get(
+                (dec["session_id"], dec.get("idempotency_key") or "")
+            ) or {}
+            req_payload = normalize_finalize_request(
+                base_version_id=dec["version_id"],
+                raw_request=fin_audit.get("request"),
+                deadline_stage_version_id=fin_audit.get("deadlineStageVersionId"),
+                version_meta=version_meta,
+            )
+            resp_payload = {
+                "finalVersionId": fin_audit.get("finalVersionId") or dec["version_id"],
+                **(
+                    {"deadlineStageVersionId": fin_audit["deadlineStageVersionId"]}
+                    if fin_audit.get("deadlineStageVersionId")
+                    else {}
+                ),
+            }
+        else:
+            req_payload = {"decision": dec_type, "versionId": dec["version_id"]}
+            resp_payload = {
+                "versionId": dec["version_id"],
+                "decisionId": dec["id"],
+                **({"reason": clean_reason} if clean_reason else {}),
+            }
         stats["idempotency_keys"] += insert_idempotency(
-            dst, dec["session_id"], dec["decision_type"], dec["idempotency_key"],
+            dst, dec["session_id"], scope, dec["idempotency_key"],
             req_payload, "completed", resp_payload, dec["created_at"],
         )
 
@@ -278,8 +361,8 @@ def migrate_cocreation_db(
     src.row_factory = sqlite3.Row
     stats: dict[str, int] = {
         "sessions": 0, "versions": 0, "turns": 0, "proposals": 0, "challenges": 0,
-        "play_attempts": 0, "draft_regenerations": 0, "audit_events": 0,
-        "binary_topics": 0, "recovery_tasks": 0, "idempotency_keys": 0,
+        "challenge_review_requests": 0, "play_attempts": 0, "draft_regenerations": 0,
+        "audit_events": 0, "binary_topics": 0, "recovery_tasks": 0, "idempotency_keys": 0,
     }
     try:
         tables = _src_tables(src)
@@ -287,7 +370,7 @@ def migrate_cocreation_db(
         with target_db.write_tx() as dst:
             _migrate_core_tables(src, dst, tables, maps, stats)
             _migrate_proposals_challenges_attempts(src, dst, tables, maps, stats)
-            migrate_audit_and_ops(src, dst, tables, stats)
+            migrate_audit_and_ops(src, dst, tables, stats, maps=maps)
     finally:
         src.close()
     return stats

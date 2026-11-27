@@ -1497,8 +1497,12 @@ async def test_commit_binary_step_plan_with_automatic_bindings_succeeds(tmp_path
     assert committed["action"] == "plan"
     updated = sessions_repo.load_session_read_model(sid)
     assert updated is not None
-    assert len(updated.proposals) == 1
-    saved_req = updated.proposals[0].proposal["requirementRecord"]
+    assert updated.proposals == []
+    offer_turn = next(
+        t for t in reversed(updated.turns) if t.turn_id == committed["assistantTurnId"]
+    )
+    assert isinstance(offer_turn.proposal_binding, dict)
+    saved_req = offer_turn.proposal_binding["requirementRecord"]
     assert saved_req["automaticBindings"] == [
         {
             "entity": "B1",
@@ -1507,6 +1511,7 @@ async def test_commit_binary_step_plan_with_automatic_bindings_succeeds(tmp_path
         }
     ]
     assert len(saved_req["exactTransitions"]) == 1
+    assert isinstance(offer_turn.proposal_binding.get("revisionPlan"), dict)
 
 
 # ---------------------------------------------------------------------------

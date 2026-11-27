@@ -7,8 +7,11 @@ import { clean } from "./format";
 import {
   MatchmakingRecordsResponseSchema,
   MutationResponseSchema,
+  SurveyAnalyticsResponseSchema,
   type MatchmakingRecordsResponse,
   type MutationResponse,
+  type SurveyAnalyticsResponse,
+  type SurveyQueryParams,
 } from "./types";
 
 export const DEFAULT_API_BASE = "https://sokobanaidemo.top";
@@ -99,11 +102,18 @@ export interface DashboardApiOptions {
 
 export interface DashboardApi {
   readonly apiBase: string;
+  readonly exportResearchUrl: string;
+  readonly rawRoomEventsUrl: string;
   readonly exportStudyLogsUrl: string;
   readonly matchmakingDataUrl: string;
   readonly docsUrl: string;
   apiUrl(path: string): string;
+  exportSurveysCsvUrl(params?: SurveyQueryParams): string;
   fetchMatchmakingRecords(signal?: AbortSignal): Promise<MatchmakingRecordsResponse>;
+  fetchSurveyAnalytics(
+    params?: SurveyQueryParams,
+    signal?: AbortSignal,
+  ): Promise<SurveyAnalyticsResponse>;
   deleteOnlineMatch(matchId: string, password: string): Promise<MutationResponse>;
   clearMatchmakingRecords(password: string): Promise<MutationResponse>;
   abortPendingLoad(): void;
@@ -117,23 +127,58 @@ export function createDashboardApi(
     : resolveApiBase(options.locationObj);
 
   let activeLoadController: AbortController | null = null;
+  let activeSurveyController: AbortController | null = null;
 
   function apiUrl(path: string): string {
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
     return `${apiBase}${normalizedPath}`;
   }
 
-  function abortPendingLoad(): void {
+  function buildSurveyQuery(params?: SurveyQueryParams): string {
+    const search = new URLSearchParams();
+    const scope = clean(params?.scope);
+    const surveyId = clean(params?.surveyId);
+    const surveyVersion = clean(params?.surveyVersion);
+    if (scope) {
+      search.set("scope", scope);
+    }
+    if (surveyId) {
+      search.set("survey_id", surveyId);
+    }
+    if (surveyVersion) {
+      search.set("survey_version", surveyVersion);
+    }
+    const qs = search.toString();
+    return qs ? `?${qs}` : "";
+  }
+
+  function exportSurveysCsvUrl(params?: SurveyQueryParams): string {
+    return apiUrl(`/export/surveys.csv${buildSurveyQuery(params)}`);
+  }
+
+  function abortPendingMatchLoad(): void {
     if (activeLoadController) {
       activeLoadController.abort();
       activeLoadController = null;
     }
   }
 
+  function abortPendingSurveyLoad(): void {
+    if (activeSurveyController) {
+      activeSurveyController.abort();
+      activeSurveyController = null;
+    }
+  }
+
+  function abortPendingLoad(): void {
+    abortPendingMatchLoad();
+    abortPendingSurveyLoad();
+  }
+
   async function fetchMatchmakingRecords(
     externalSignal?: AbortSignal,
   ): Promise<MatchmakingRecordsResponse> {
-    abortPendingLoad();
+    abortPendingMatchLoad();
     const controller = new AbortController();
     activeLoadController = controller;
 
@@ -161,6 +206,48 @@ export function createDashboardApi(
       }
       if (activeLoadController === controller) {
         activeLoadController = null;
+      }
+    }
+  }
+
+  async function fetchSurveyAnalytics(
+    params?: SurveyQueryParams,
+    externalSignal?: AbortSignal,
+  ): Promise<SurveyAnalyticsResponse> {
+    abortPendingSurveyLoad();
+    const controller = new AbortController();
+    activeSurveyController = controller;
+
+    const onExternalAbort = () => controller.abort(externalSignal?.reason);
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort(externalSignal.reason);
+      } else {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+      }
+    }
+
+    const query = buildSurveyQuery({
+      scope: clean(params?.scope) || "active_matches",
+      surveyId: params?.surveyId,
+      surveyVersion: params?.surveyVersion,
+    });
+
+    try {
+      return await fetchJson(apiUrl(`/survey-analytics-data${query}`), {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal,
+        timeoutMs: options.timeoutMs,
+        fetchImpl: options.fetchImpl,
+        schema: SurveyAnalyticsResponseSchema,
+      });
+    } finally {
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      }
+      if (activeSurveyController === controller) {
+        activeSurveyController = null;
       }
     }
   }
@@ -198,11 +285,15 @@ export function createDashboardApi(
 
   return {
     apiBase,
+    exportResearchUrl: apiUrl("/export/matchmaking-research.jsonl"),
+    rawRoomEventsUrl: apiUrl("/matchmaking-records"),
     exportStudyLogsUrl: apiUrl("/export/study-logs.jsonl"),
     matchmakingDataUrl: apiUrl("/matchmaking-records-data"),
     docsUrl: apiUrl("/docs"),
     apiUrl,
+    exportSurveysCsvUrl,
     fetchMatchmakingRecords,
+    fetchSurveyAnalytics,
     deleteOnlineMatch,
     clearMatchmakingRecords,
     abortPendingLoad,

@@ -735,18 +735,30 @@ async def test_dialogue_idempotency_binary_proposal_intent_translation_recovery(
         choice_id=pq["choices"][0]["choiceId"],
         idempotency_key="bin-ch-1",
     )
-    prop_id = planned["proposals"][0]["proposalId"]
+    assert planned["proposals"] == []
+    offer_turn = next(
+        t
+        for t in reversed(planned["turns"])
+        if isinstance(t["guidance"].get("proposalOffer"), dict)
+    )
+    executed = await env["orchestrator"].send_message(
+        sid,
+        access,
+        base_version_id=v1,
+        idempotency_key="bin-exec-1",
+        action="execute_revision",
+        assistant_turn_id=offer_turn["turnId"],
+    )
+    prop_id = executed["proposals"][0]["proposalId"]
     accepted = await env["proposal"].decide_proposal(
         sid, prop_id, access, decision="accept", base_version_id=v1, idempotency_key="dec-1"
     )
     assert accepted["currentVersionId"] != v1
     assert len(accepted["versions"]) == 2
-    assert any(
-        ev.event_type == "turn" for ev in env["rooms_repo"].list_room_events(room["matchId"])
-    )
-    assert any(
-        ev.event_type == "stage" for ev in env["rooms_repo"].list_room_events(room["matchId"])
-    )
+    room_events = env["rooms_repo"].list_room_events(room["matchId"])
+    assert not any(ev.event_type == "turn" for ev in room_events)
+    assert not any(ev.event_type == "node" for ev in room_events)
+    assert any(ev.event_type == "stage" for ev in room_events)
 
     # Prepare valid per-turn translation responses (including malformed-JSON retry on turn 0)
     pending_turns = [t for t in accepted["turns"] if t["language"] != "zh-CN"]
@@ -1234,8 +1246,10 @@ async def test_shared_context_patch_resilience_evidence_trail_and_binary_guards(
         display_language="zh-CN",
         idempotency_key="ch-retry",
     )
-    assert len(retried["proposals"]) == 1
-    assert retried["proposals"][0]["status"] == "pending"
+    assert retried["proposals"] == []
+    retried_offer = retried["turns"][-1]
+    assert isinstance(retried_offer["guidance"].get("proposalOffer"), dict)
+    assert retried_offer["proposalState"]["status"] == "active"
 
 
 async def test_challenge_flow_revise_exit_and_revision_execution_outcome(
@@ -1413,7 +1427,7 @@ async def test_challenge_flow_revise_exit_and_revision_execution_outcome(
         for ev_type, ev_payload in pre_outcomes
     )
 
-    prop_id = next(p["proposalId"] for p in with_offer["proposals"] if p["status"] == "pending")
+    assert with_offer["proposals"] == []
 
     # 2. Start challenge -> revision_challenges columns + schema v2 guidance + DISAGREEMENT_ACTIVE
     started = await env["orchestrator"].send_message(
@@ -1422,7 +1436,7 @@ async def test_challenge_flow_revise_exit_and_revision_execution_outcome(
         base_version_id=v1,
         idempotency_key="chg-start",
         action="challenge_revision",
-        proposal_id=prop_id,
+        assistant_turn_id=offer_turn["turnId"],
         content="I want to keep the wall",
     )
     chg_turn = started["turns"][-1]
@@ -1439,8 +1453,8 @@ async def test_challenge_flow_revise_exit_and_revision_execution_outcome(
         ).fetchone()
     assert chg_row is not None and chg_row["status"] == "awaiting_reason"
     chg_id = chg_row["challenge_id"]
-    assert any(
-        ev.event_type == "node" and ev.payload.get("nodeType") == "player_challenge"
+    assert not any(
+        ev.event_type == "node"
         for ev in env["rooms_repo"].list_room_events(room["matchId"])
     )
 
@@ -1499,7 +1513,18 @@ async def test_challenge_flow_revise_exit_and_revision_execution_outcome(
     offer = rev_turn["guidance"]["proposalOffer"]
     assert offer["proposalPresentation"]["schemaVersion"] == 2
     assert offer["availableActions"] == ["execute_revision"]
-    new_prop_id = next(p["proposalId"] for p in revised["proposals"] if p["status"] == "pending")
+    assert revised["proposals"] == []
+    executed_rev = await env["orchestrator"].send_message(
+        sid,
+        access,
+        base_version_id=v1,
+        idempotency_key="chg-rev-exec",
+        action="execute_revision",
+        assistant_turn_id=rev_turn["turnId"],
+    )
+    new_prop_id = next(
+        p["proposalId"] for p in executed_rev["proposals"] if p["status"] == "pending"
+    )
     accepted = await env["proposal"].decide_proposal(
         sid,
         new_prop_id,
@@ -2011,16 +2036,16 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
     offer_turn = next(
         t for t in with_offer["turns"] if isinstance(t["guidance"].get("proposalOffer"), dict)
     )
-    prop_id = next(p["proposalId"] for p in with_offer["proposals"] if p["status"] == "pending")
+    assert with_offer["proposals"] == []
 
-    # 3. Start challenge -> binding becomes challenged; accept & early keep_proposal blocked
+    # 3. Start challenge directly from offer turn -> binding challenged; execute/early keep blocked
     started = await env["orchestrator"].send_message(
         sid,
         access,
         base_version_id=v1,
         idempotency_key="chg-1",
         action="challenge_revision",
-        proposal_id=prop_id,
+        assistant_turn_id=offer_turn["turnId"],
         content="Wait on wall",
     )
     with env["db"].read_conn() as conn:
@@ -2032,11 +2057,16 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
         )
     assert b1["status"] == "challenged"
 
-    with pytest.raises(ConflictError) as dis_acc:
-        await env["proposal"].decide_proposal(
-            sid, prop_id, access, decision="accept", base_version_id=v1, idempotency_key="acc-blk"
+    with pytest.raises(ConflictError) as dis_exec:
+        await env["orchestrator"].send_message(
+            sid,
+            access,
+            base_version_id=v1,
+            idempotency_key="exec-blk",
+            action="execute_revision",
+            assistant_turn_id=offer_turn["turnId"],
         )
-    assert dis_acc.value.code == "DISAGREEMENT_ACTIVE"
+    assert dis_exec.value.code == "DISAGREEMENT_ACTIVE"
 
     chg_id = started["turns"][-1]["guidance"]["challengeState"]["challengeId"]
     with pytest.raises(ConflictError) as early_keep:
@@ -2051,7 +2081,8 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
         )
     assert early_keep.value.code == "CHALLENGE_NOT_READY"
 
-    # 4. Review reason -> awaiting_choice -> keep_proposal replays outside tx & restores active
+    # 4. Review reason -> awaiting_choice -> keep_proposal replays outside tx, marks offer stale,
+    #    and creates pending proposal on the keep_proposal turn without a duplicate purple card
     await env["orchestrator"].send_message(
         sid, access, base_version_id=v1, idempotency_key="chg-reason", content="Wall is useful"
     )
@@ -2063,7 +2094,7 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
         return await orig_solve_chg(rows, clock=clock)
 
     monkeypatch.setattr(challenge_mod, "solve_stage_async", _tracked_solve)
-    await env["orchestrator"].send_message(
+    kept = await env["orchestrator"].send_message(
         sid,
         access,
         base_version_id=v1,
@@ -2080,19 +2111,15 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
                 (offer_turn["turnId"],),
             ).fetchone()[0]
         )
-    assert b2["status"] == "active"
+    assert b2["status"] == "stale"
 
-    # 5. Execute revision on latest offer turn -> older offer turn becomes PROPOSAL_STALE
-    executed = await env["orchestrator"].send_message(
-        sid,
-        access,
-        base_version_id=v1,
-        idempotency_key="exec-ok",
-        action="execute_revision",
-        assistant_turn_id=offer_turn["turnId"],
-    )
-    new_offer_turn = executed["turns"][-1]
-    assert "Verified solvable candidate" in new_offer_turn["content"]
+    keep_turn = kept["turns"][-1]
+    assert keep_turn["guidance"].get("proposalOffer") is None
+    new_prop = next(p for p in kept["proposals"] if p["status"] == "pending")
+    assert new_prop["assistantTurnId"] == keep_turn["turnId"]
+    new_prop_id = new_prop["proposalId"]
+
+    # 5. Re-executing the already-consumed offer turn raises PROPOSAL_STALE
     with pytest.raises(ConflictError) as stale_exec:
         await env["orchestrator"].send_message(
             sid,
@@ -2104,8 +2131,7 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
         )
     assert stale_exec.value.code == "PROPOSAL_STALE"
 
-    # 6. Challenge new proposal & cancel_challenge -> proposal superseded & binding stale
-    new_prop_id = next(p["proposalId"] for p in executed["proposals"] if p["status"] == "pending")
+    # 6. Challenge pending proposal & cancel_challenge -> proposal superseded & binding stale
     await env["orchestrator"].send_message(
         sid,
         access,
@@ -2125,7 +2151,7 @@ async def test_purple_card_guards_challenge_lifecycle_and_ordinary_strip(
         b3 = json.loads(
             conn.execute(
                 "SELECT proposal_binding_json FROM conversation_turns WHERE turn_id = ?",
-                (new_offer_turn["turnId"],),
+                (keep_turn["turnId"],),
             ).fetchone()[0]
         )
     assert p_status == "superseded"
@@ -2274,19 +2300,18 @@ async def test_binary_no_pre_tx_strategy_merge_and_source_language(tmp_path: Pat
         choice_id=pq2["choices"][0]["choiceId"],
         idempotency_key="b-c2",
     )
-    assert len(planned["proposals"]) == 1
+    assert planned["proposals"] == []
+    offer_turn = planned["turns"][-1]
+    assert isinstance(offer_turn["guidance"].get("proposalOffer"), dict)
+    assert offer_turn["proposalState"]["status"] == "active"
+    map_ops_prompt = json.loads(env["transport"].calls[-1]["messages"][-1]["content"])
     with env["db"].read_conn() as conn:
-        prop_json = json.loads(
-            conn.execute(
-                "SELECT proposal_json FROM change_proposals WHERE session_id = ?", (sid,)
-            ).fetchone()[0]
-        )
         choice_audits = conn.execute(
             "SELECT COUNT(*) FROM audit_events "
             "WHERE session_id = ? AND event_type = 'binary_choice_selected'",
             (sid,),
         ).fetchone()[0]
-    merged_strat = prop_json["revisionPlan"]["strategies"][0]
+    merged_strat = map_ops_prompt["revisionPlan"]["strategies"][0]
     assert set(merged_strat["operators"]) == {"remove_wall", "remove_water"}
     assert merged_strat["editBudget"] <= 12
     assert choice_audits == 2
@@ -2491,3 +2516,606 @@ async def test_recovery_validation_redaction_single_tx_cancellation_and_replay(
             sid, access, base_version_id=v1, idempotency_key="msg-after-exp", content="Fresh"
         )
     assert fresh_exp.value.code == "SESSION_DEADLINE_EXPIRED"
+
+
+async def test_build_play_summary_selects_latest_attempt_across_orders_and_edges(
+    tmp_path: Path,
+) -> None:
+    """#14: build_play_summary must select newest attempt, not oldest matching[-1]."""
+    from server.application.dialogue._shared import build_play_summary
+    from server.persistence.models import PlayAttemptRecord
+
+    assert build_play_summary([], "v1") is None
+
+    env = _build_env(tmp_path)
+    clock: FakeClock = env["clock"]
+    created = await env["lifecycle"].create_demo_session(language="en", idempotency_key="d-play")
+    sid = created["sessionId"]
+    access = (
+        await env["lifecycle"].authorize_browser_access(
+            sid, _extract_hash_param(created["launchUrl"], "bootstrap")
+        )
+    )["accessToken"]
+    p1 = await env["lifecycle"].update_language(sid, access, language="en")
+    v1 = p1["currentVersionId"]
+    p2 = await env["stage"].save_version(
+        sid, access, base_version_id=v1, rows=ALT_ROWS, idempotency_key="save-play-v2"
+    )
+    v2 = p2["currentVersionId"]
+
+    # Older attempt on v1 (should be ignored for v2 summary)
+    pa_v1 = await env["stage"].create_play_attempt(sid, v1, access, idempotency_key="pa-v1")
+    boot_v1 = await env["stage"].bootstrap_play_attempt(
+        pa_v1["attemptId"], _extract_query_param(pa_v1["playUrl"], "cocreationPlay")
+    )
+    await env["stage"].complete_play_attempt(
+        pa_v1["attemptId"],
+        boot_v1["attemptToken"],
+        duration_seconds=99.0,
+        move_count=30,
+        push_count=9,
+    )
+
+    # Attempt 1 on v2 (older, completed)
+    clock.advance(10.0)
+    pa1 = await env["stage"].create_play_attempt(sid, v2, access, idempotency_key="pa-v2-1")
+    boot1 = await env["stage"].bootstrap_play_attempt(
+        pa1["attemptId"], _extract_query_param(pa1["playUrl"], "cocreationPlay")
+    )
+    await env["stage"].complete_play_attempt(
+        pa1["attemptId"], boot1["attemptToken"], duration_seconds=6.5, move_count=8, push_count=2
+    )
+
+    # Single-attempt case on v2
+    rm_single = env["sessions_repo"].load_session_read_model(sid)
+    assert rm_single is not None
+    single_summary = build_play_summary(rm_single.play_attempts, v2)
+    assert single_summary is not None
+    assert single_summary["attemptCount"] == 1
+    assert single_summary["latestStatus"] == "completed"
+    assert single_summary["solvedByDesigner"] is True
+    assert single_summary["latestDurationSeconds"] == 6.5
+    assert single_summary["latestMoves"] == 8
+    assert single_summary["latestPushes"] == 2
+
+    # Attempt 2 on v2 (newer, abandoned with different metrics)
+    clock.advance(15.0)
+    pa2 = await env["stage"].create_play_attempt(sid, v2, access, idempotency_key="pa-v2-2")
+    boot2 = await env["stage"].bootstrap_play_attempt(
+        pa2["attemptId"], _extract_query_param(pa2["playUrl"], "cocreationPlay")
+    )
+    await env["stage"].abandon_play_attempt(
+        pa2["attemptId"], boot2["attemptToken"], duration_seconds=3.25, move_count=4, push_count=1
+    )
+
+    # load_session_read_model returns play_attempts ordered issued_at DESC (newest first)
+    rm_multi = env["sessions_repo"].load_session_read_model(sid)
+    assert rm_multi is not None
+    summary_desc = build_play_summary(rm_multi.play_attempts, v2)
+    assert summary_desc is not None
+    assert summary_desc["attemptCount"] == 2
+    assert summary_desc["latestStatus"] == "abandoned"
+    assert summary_desc["solvedByDesigner"] is True
+    assert summary_desc["latestDurationSeconds"] == 3.25
+    assert summary_desc["latestMoves"] == 4
+    assert summary_desc["latestPushes"] == 1
+
+    # Also selects newest when input is ascending or uses fractional vs whole-second ISO timestamps
+    summary_asc = build_play_summary(list(reversed(rm_multi.play_attempts)), v2)
+    assert summary_asc == summary_desc
+
+    rec_whole = PlayAttemptRecord(
+        attempt_id="att-whole",
+        session_id=sid,
+        version_id=v2,
+        mode="demo",
+        language="en",
+        status="completed",
+        ticket_hash="h1",
+        ticket_expires_at="2026-01-01T01:00:00Z",
+        issued_at="2026-01-01T00:00:00Z",
+        duration_seconds=12.0,
+        move_count=10,
+        push_count=3,
+        idempotency_key="k1",
+    )
+    rec_frac = PlayAttemptRecord(
+        attempt_id="att-frac",
+        session_id=sid,
+        version_id=v2,
+        mode="demo",
+        language="en",
+        status="started",
+        ticket_hash="h2",
+        ticket_expires_at="2026-01-01T01:00:00Z",
+        issued_at="2026-01-01T00:00:00.500000Z",
+        duration_seconds=2.0,
+        move_count=2,
+        push_count=0,
+        idempotency_key="k2",
+    )
+    frac_summary = build_play_summary([rec_whole, rec_frac], v2)
+    assert frac_summary is not None
+    assert frac_summary["latestStatus"] == "started"
+    assert frac_summary["latestMoves"] == 2
+    assert frac_summary["solvedByDesigner"] is True
+
+
+async def test_multi_topic_annotate_proposal_questions_preserves_earlier_answered_cards(
+    tmp_path: Path,
+) -> None:
+    """#15: Starting later binary topics must never overwrite earlier answered cards."""
+    from server.application.sessions.read_model.turns import annotate_proposal_questions
+    from server.persistence.models import ConversationTurnRecord
+
+    def _ask_wall(kwargs: dict[str, Any]) -> str:
+        turn_id = _extract_turn_id(kwargs)
+        return json.dumps(
+            {
+                "action": "ask",
+                "question": "Pick first obstacle focus?",
+                "note": "Topic 1",
+                "branches": [
+                    {
+                        "label": "Remove internal wall",
+                        "strategy": {
+                            "effect": "adjust_internal_walls",
+                            "focus": {"row": 4, "column": 6, "radius": 1},
+                            "operators": ["remove_wall"],
+                            "preserve": ["boxes", "targets", "player"],
+                            "editBudget": 1,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "internal_walls",
+                            "focus": {"row": 4, "column": 6, "radius": 1},
+                        },
+                    },
+                    {
+                        "label": "Remove water tile",
+                        "strategy": {
+                            "effect": "reshape_water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "operators": ["remove_water"],
+                            "preserve": ["boxes", "targets", "player"],
+                            "editBudget": 1,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                        },
+                    },
+                ],
+                "planStrategies": [],
+                "protectedEntities": [],
+                "initialRequirements": {
+                    "requirements": [
+                        {
+                            "component": "wall",
+                            "property": "count",
+                            "relation": "decrease",
+                            "strength": "goal",
+                            "entities": [],
+                            "value": None,
+                            "unit": "none",
+                            "priorityEvidenceSpan": "",
+                            "focused": False,
+                            "sourceTurnId": turn_id,
+                            "evidenceSpan": "Make center simpler",
+                            "statement": "Remove an obstacle in the center",
+                            "scope": "all",
+                        }
+                    ],
+                    "automaticBindings": [],
+                    "exactTransitions": [],
+                },
+            }
+        )
+
+    def _ask_water_round2(kwargs: dict[str, Any]) -> str:
+        _extract_turn_id(kwargs)
+        return json.dumps(
+            {
+                "action": "ask",
+                "question": "Which water tweak next?",
+                "note": "Topic 2 round 2",
+                "branches": [
+                    {
+                        "label": "Remove water tile",
+                        "strategy": {
+                            "effect": "reshape_water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "operators": ["remove_water"],
+                            "preserve": ["boxes", "targets", "player"],
+                            "editBudget": 1,
+                        },
+                        "promise": {
+                            "kind": "reduce_obstacles",
+                            "component": "water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                        },
+                    },
+                    {
+                        "label": "Reshape water nearby",
+                        "strategy": {
+                            "effect": "reshape_water",
+                            "focus": {"row": 5, "column": 6, "radius": 1},
+                            "operators": ["remove_water", "add_water"],
+                            "preserve": ["boxes", "targets", "player"],
+                            "editBudget": 2,
+                        },
+                        "promise": {
+                            "kind": "reshape_water",
+                            "component": "water",
+                            "focus": {"row": 5, "column": 6, "radius": 2},
+                        },
+                    },
+                ],
+                "planStrategies": [],
+                "protectedEntities": [],
+            }
+        )
+
+    plan_wall = json.dumps(
+        {
+            "action": "plan",
+            "question": "",
+            "note": "",
+            "branches": [],
+            "planStrategies": [
+                {
+                    "effect": "adjust_internal_walls",
+                    "focus": {"row": 4, "column": 6, "radius": 1},
+                    "operators": ["remove_wall"],
+                    "preserve": ["water"],
+                    "editBudget": 1,
+                }
+            ],
+            "protectedEntities": [],
+        }
+    )
+    map_ops = json.dumps(
+        {
+            "candidates": [
+                {
+                    "strategyIndex": 1,
+                    "rationale": "Remove center wall",
+                    "operations": [
+                        {"row": 4, "column": 6, "op": "remove_wall", "from": "#", "to": "."}
+                    ],
+                }
+            ]
+        }
+    )
+
+    env = _build_env(
+        tmp_path,
+        responses=[
+            # Topic 1: ask q1 -> choose -> plan -> proposal_ready
+            _ask_wall,
+            plan_wall,
+            map_ops,
+            # Topic 2: ask q2 -> choose -> ask q3 -> cancel
+            _ask_wall,
+            _ask_water_round2,
+            # Topic 3: ask q4 (active clarifying)
+            _ask_wall,
+        ],
+    )
+    clock: FakeClock = env["clock"]
+    created = await env["lifecycle"].create_demo_session(language="en", idempotency_key="d-mt")
+    sid = created["sessionId"]
+    access = (
+        await env["lifecycle"].authorize_browser_access(
+            sid, _extract_hash_param(created["launchUrl"], "bootstrap")
+        )
+    )["accessToken"]
+    p1 = await env["lifecycle"].update_language(sid, access, language="en")
+    v1 = p1["currentVersionId"]
+
+    # Topic 1: ask q1, answer with ch1 -> proposal_ready
+    t1_asked = await env["orchestrator"].send_message(
+        sid,
+        access,
+        base_version_id=v1,
+        idempotency_key="mt-t1-start",
+        content="Make center simpler",
+        request_proposal=True,
+    )
+    q1_turn = next(
+        t for t in reversed(t1_asked["turns"]) if t["guidance"].get("proposalQuestion")
+    )
+    q1 = q1_turn["guidance"]["proposalQuestion"]
+    ch1 = q1["choices"][0]["choiceId"]
+
+    # Attach a stored translation for q1's turn to verify translations stay in sync too
+    with env["db"].write_tx() as conn:
+        conn.execute(
+            "UPDATE conversation_turns SET translations_json = ? WHERE turn_id = ?",
+            (
+                dump_json(
+                    {
+                        "zh-CN": {
+                            "body": "选择第一个方向？",
+                            "guidance": {
+                                "proposalQuestion": {
+                                    "questionId": q1["questionId"],
+                                    "topicId": q1["topicId"],
+                                    "question": "选择第一个方向？",
+                                    "choices": q1["choices"],
+                                }
+                            },
+                        }
+                    }
+                ),
+                q1_turn["turnId"],
+            ),
+        )
+
+    clock.advance(5.0)
+    await env["proposal"].choose_binary_choice(
+        sid,
+        access,
+        topic_id=q1["topicId"],
+        question_id=q1["questionId"],
+        choice_id=ch1,
+        idempotency_key="mt-t1-c1",
+    )
+
+    # Topic 2: ask q2, answer with ch2 -> asks q3 (unanswered), then cancel Topic 2
+    clock.advance(5.0)
+    t2_asked = await env["orchestrator"].send_message(
+        sid,
+        access,
+        base_version_id=v1,
+        idempotency_key="mt-t2-start",
+        content="Make center simpler",
+        request_proposal=True,
+    )
+    q2 = t2_asked["proposalFlowState"]["pendingQuestion"]
+    ch2 = q2["choices"][0]["choiceId"]
+    clock.advance(5.0)
+    t2_r2 = await env["proposal"].choose_binary_choice(
+        sid,
+        access,
+        topic_id=q2["topicId"],
+        question_id=q2["questionId"],
+        choice_id=ch2,
+        idempotency_key="mt-t2-c1",
+    )
+    q3 = t2_r2["proposalFlowState"]["pendingQuestion"]
+    clock.advance(5.0)
+    await env["proposal"].cancel_binary_topic(
+        sid,
+        access,
+        topic_id=q2["topicId"],
+        idempotency_key="mt-t2-cancel",
+        base_version_id=v1,
+    )
+
+    # Topic 3: ask q4 (remains active clarifying)
+    clock.advance(5.0)
+    t3_asked = await env["orchestrator"].send_message(
+        sid,
+        access,
+        base_version_id=v1,
+        idempotency_key="mt-t3-start",
+        content="Make center simpler",
+        request_proposal=True,
+    )
+    q4 = t3_asked["proposalFlowState"]["pendingQuestion"]
+    assert t3_asked["proposalFlowState"]["active"] is True
+    assert t3_asked["proposalFlowState"]["topicId"] == q4["topicId"]
+
+    q_by_id = {
+        t["guidance"]["proposalQuestion"]["questionId"]: t
+        for t in t3_asked["turns"]
+        if t["guidance"].get("proposalQuestion")
+    }
+    # Topic 1's answered card MUST stay selected (both base turn and translation)
+    assert q_by_id[q1["questionId"]]["guidance"]["proposalQuestion"]["selectedChoiceId"] == ch1
+    assert q_by_id[q1["questionId"]]["guidance"]["proposalQuestion"]["status"] == "selected"
+    q1_tr_pq = q_by_id[q1["questionId"]]["translations"]["zh-CN"]["guidance"]["proposalQuestion"]
+    assert q1_tr_pq["selectedChoiceId"] == ch1
+    assert q1_tr_pq["status"] == "selected"
+    # Topic 2's answered q2 MUST stay selected; unanswered q3 (cancelled topic) MUST be expired
+    assert q_by_id[q2["questionId"]]["guidance"]["proposalQuestion"]["selectedChoiceId"] == ch2
+    assert q_by_id[q2["questionId"]]["guidance"]["proposalQuestion"]["status"] == "selected"
+    assert q_by_id[q3["questionId"]]["guidance"]["proposalQuestion"]["selectedChoiceId"] is None
+    assert q_by_id[q3["questionId"]]["guidance"]["proposalQuestion"]["status"] == "expired"
+    # Topic 3's active q4 MUST be pending
+    assert q_by_id[q4["questionId"]]["guidance"]["proposalQuestion"]["selectedChoiceId"] is None
+    assert q_by_id[q4["questionId"]]["guidance"]["proposalQuestion"]["status"] == "pending"
+
+    # Unit edge cases: persisted selection fallback when topic row missing, and superseded topic
+    turn_closed = ConversationTurnRecord(
+        turn_id="t-closed",
+        session_id=sid,
+        sequence_number=1,
+        role="assistant",
+        content="Closed Q",
+        language="en",
+        version_id=v1,
+        created_at=clock.utc_now(),
+    )
+    turn_superseded = ConversationTurnRecord(
+        turn_id="t-sup",
+        session_id=sid,
+        sequence_number=2,
+        role="assistant",
+        content="Superseded Q",
+        language="en",
+        version_id=v1,
+        created_at=clock.utc_now(),
+    )
+    pub_g = {
+        "t-closed": {
+            "proposalQuestion": {
+                "questionId": "q-closed",
+                "topicId": "top-missing",
+                "selectedChoiceId": "ch-persisted",
+                "status": "selected",
+            }
+        },
+        "t-sup": {
+            "proposalQuestion": {
+                "questionId": "q-sup",
+                "topicId": "top-old-clarifying",
+                "selectedChoiceId": None,
+                "status": "pending",
+            }
+        },
+    }
+    annotate_proposal_questions(
+        [turn_closed, turn_superseded],
+        pub_g,
+        {},
+        {"topicId": "top-new", "versionId": "v2", "status": "clarifying", "choices": []},
+        topics_by_id={
+            "top-old-clarifying": {
+                "topicId": "top-old-clarifying",
+                "versionId": v1,
+                "status": "clarifying",
+                "choices": [],
+                "pendingQuestion": {"questionId": "q-sup"},
+            },
+            "top-new": {
+                "topicId": "top-new",
+                "versionId": "v2",
+                "status": "clarifying",
+                "choices": [],
+            },
+        },
+        current_version_id="v2",
+    )
+    assert pub_g["t-closed"]["proposalQuestion"]["selectedChoiceId"] == "ch-persisted"
+    assert pub_g["t-closed"]["proposalQuestion"]["status"] == "selected"
+    assert pub_g["t-sup"]["proposalQuestion"]["selectedChoiceId"] is None
+    assert pub_g["t-sup"]["proposalQuestion"]["status"] == "expired"
+
+
+async def test_play_attempt_bootstrap_rewrites_loopback_return_url(
+    app_bundle_factory, tmp_path: Path
+) -> None:
+    """#23: POST /play-attempts/{id}/bootstrap rewrites default returnUrl on loopback requests."""
+    import httpx
+    from server.container import build_container
+    from server.main import create_app
+    from server.settings import SokobanSettings
+
+    bundle = app_bundle_factory()
+    transport = httpx.ASGITransport(app=bundle.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+        demo = (
+            await client.post(
+                "/api/demo-sessions", json={"language": "en", "idempotencyKey": "loop-demo"}
+            )
+        ).json()
+        sid = demo["sessionId"]
+        boot_tok = _extract_hash_param(demo["launchUrl"], "bootstrap")
+        assert (
+            await client.post(
+                f"/api/sessions/{sid}/browser-access", json={"bootstrapToken": boot_tok}
+            )
+        ).status_code == 200
+        lang_resp = await client.patch(f"/api/sessions/{sid}/language", json={"language": "en"})
+        v1 = lang_resp.json()["currentVersionId"]
+
+        # Create play attempt: playUrl rewritten to 127.0.0.1:8000, returnUrl not present here
+        pa_resp = await client.post(
+            f"/api/sessions/{sid}/versions/{v1}/play-attempts",
+            json={"idempotencyKey": "pa-loop-1"},
+        )
+        assert pa_resp.status_code == 200
+        pa_body = pa_resp.json()
+        assert pa_body["playUrl"].startswith("http://127.0.0.1:8000/game/")
+        assert "returnUrl" not in pa_body
+
+        # Bootstrap on 127.0.0.1:8000 must rewrite returnUrl to 127.0.0.1:8000/cocreation
+        ticket1 = _extract_query_param(pa_body["playUrl"], "cocreationPlay")
+        boot1 = await client.post(
+            f"/api/play-attempts/{pa_body['attemptId']}/bootstrap",
+            json={"ticket": ticket1},
+        )
+        assert boot1.status_code == 200
+        assert boot1.json()["returnUrl"].startswith("http://127.0.0.1:8000/cocreation")
+
+        # Create second play attempt to verify /cocreation/api alias on localhost:8000
+        pa2_body = (
+            await client.post(
+                f"/api/sessions/{sid}/versions/{v1}/play-attempts",
+                json={"idempotencyKey": "pa-loop-2"},
+            )
+        ).json()
+        ticket2 = _extract_query_param(pa2_body["playUrl"], "cocreationPlay")
+
+        # Create third play attempt to verify non-loopback preserves production origin
+        pa3_body = (
+            await client.post(
+                f"/api/sessions/{sid}/versions/{v1}/play-attempts",
+                json={"idempotencyKey": "pa-loop-3"},
+            )
+        ).json()
+        ticket3 = _extract_query_param(pa3_body["playUrl"], "cocreationPlay")
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+        boot2 = await client.post(
+            f"/cocreation/api/play-attempts/{pa2_body['attemptId']}/bootstrap",
+            json={"ticket": ticket2},
+        )
+        assert boot2.status_code == 200
+        assert boot2.json()["returnUrl"].startswith("http://localhost:8000/cocreation")
+
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://sokobanaidemo.top"
+    ) as client:
+        boot3 = await client.post(
+            f"/api/play-attempts/{pa3_body['attemptId']}/bootstrap",
+            json={"ticket": ticket3},
+        )
+        assert boot3.status_code == 200
+        assert boot3.json()["returnUrl"].startswith("https://sokobanaidemo.top/cocreation")
+
+    # Explicit non-default public_base_url must NOT be rewritten even on loopback
+    custom_settings = SokobanSettings(
+        data_dir=tmp_path / "custom_data",
+        db_path=tmp_path / "custom_data" / "custom.sqlite3",
+        study_logs_dir=tmp_path / "custom_logs",
+        token_secret="unit-test-strong-secret-key-custom-987",
+        public_base_url="https://custom.example/cocreation",
+        reaper_enabled=False,
+    )
+    custom_container = build_container(settings=custom_settings, clock=FakeClock())
+    custom_container.db.initialize()
+    custom_app = create_app(settings=custom_settings, container=custom_container)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=custom_app), base_url="http://127.0.0.1:8000"
+    ) as client:
+        c_demo = (
+            await client.post(
+                "/api/demo-sessions", json={"language": "en", "idempotencyKey": "custom-demo"}
+            )
+        ).json()
+        c_sid = c_demo["sessionId"]
+        await client.post(
+            f"/api/sessions/{c_sid}/browser-access",
+            json={"bootstrapToken": _extract_hash_param(c_demo["launchUrl"], "bootstrap")},
+        )
+        c_v1 = (
+            await client.patch(f"/api/sessions/{c_sid}/language", json={"language": "en"})
+        ).json()["currentVersionId"]
+        c_pa = (
+            await client.post(
+                f"/api/sessions/{c_sid}/versions/{c_v1}/play-attempts",
+                json={"idempotencyKey": "custom-pa"},
+            )
+        ).json()
+        c_boot = await client.post(
+            f"/api/play-attempts/{c_pa['attemptId']}/bootstrap",
+            json={"ticket": _extract_query_param(c_pa["playUrl"], "cocreationPlay")},
+        )
+        assert c_boot.status_code == 200
+        assert c_boot.json()["returnUrl"].startswith("https://custom.example/cocreation")
+    await custom_container.close()

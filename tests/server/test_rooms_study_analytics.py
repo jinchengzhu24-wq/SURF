@@ -1089,10 +1089,9 @@ async def test_assess_version_human_edit_review_idempotency_sweep_and_cas(
     }.issubset(ev_types)
 
     room_evs = rooms_repo.list_room_events(room["matchId"])
-    assert any(
-        ev.event_type == "node" and ev.payload.get("nodeType") == "manual_edit_review"
-        for ev in room_evs
-    )
+    assert not any(ev.event_type == "node" for ev in room_evs)
+    assert any(ev.event_type == "stage" for ev in room_evs)
+    assert any(ev.event_type == "opening" for ev in room_evs)
 
     # Advance past deadline: completed replays of save_version & assess_version still succeed!
     clock.advance(700.0)
@@ -1212,7 +1211,8 @@ async def test_stage_save_restore_finalize_guards_cleanup_sync_and_cancellation(
     v1 = p1["currentVersionId"]
 
     # 2. Missing online_rooms row during co-creation sync logs warning without rolling back
-    rooms_repo.delete_match(room["matchId"])
+    with db.write_tx() as conn:
+        conn.execute("DELETE FROM online_rooms WHERE id = ?", (room["matchId"],))
     caplog.set_level("WARNING")
     with db.write_tx() as conn:
         ev_res, ev_created = room_sync.record_cocreation_event_tx(
@@ -1459,3 +1459,194 @@ async def test_stage_save_restore_finalize_guards_cleanup_sync_and_cancellation(
         idempotency_key="fin-ok",
     )
     assert dialogue_repo.get_proposal(sid2, "prop-old-stale").status == "superseded"  # type: ignore[union-attr]
+
+
+async def test_submit_challenge_default_solver_deadline_is_5s_and_injectable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#18: OnlineRoomService.submit_challenge defaults deadline to 5.0s and stays injectable."""
+    import server.application.rooms.service as rooms_service_mod
+    from server.container import build_container
+    from server.settings import SokobanSettings
+
+    orig_solve = rooms_service_mod.solve_min_steps
+    recorded_deadlines: list[float | None] = []
+
+    def spy_solve(*args: Any, **kwargs: Any) -> Any:
+        recorded_deadlines.append(kwargs.get("deadline_seconds"))
+        return orig_solve(*args, **kwargs)
+
+    monkeypatch.setattr(rooms_service_mod, "solve_min_steps", spy_solve)
+
+    # 1. Default OnlineRoomService uses 5.0s (matching co-creation solve_stage_sync)
+    clock = FakeClock()
+    db = SQLiteDatabase(tmp_path / "deadline_default.sqlite3")
+    repo = RoomsRepository(db)
+    svc_default = OnlineRoomService(repo, clock=clock)
+    r1 = await svc_default.create_room()
+    r2 = await svc_default.join_room(room_code=r1["roomCode"])
+    await svc_default.set_ready(r1["matchId"], r1["playerToken"], ready=True)
+    await svc_default.set_ready(r1["matchId"], r2["playerToken"], ready=True)
+    await svc_default.submit_challenge(r1["matchId"], r1["playerToken"], rows=VALID_ROWS)
+    assert recorded_deadlines[-1] == 5.0
+
+    # 2. Container-wired OnlineRoomService also uses 5.0s
+    settings = SokobanSettings(
+        data_dir=tmp_path / "container_data",
+        db_path=tmp_path / "container_data" / "rooms.sqlite3",
+        study_logs_dir=tmp_path / "container_logs",
+        token_secret="unit-test-strong-secret-key-rooms",
+        reaper_enabled=False,
+    )
+    container = build_container(settings=settings, clock=FakeClock())
+    container.db.initialize()
+    try:
+        cr1 = await container.online_room_service.create_room()
+        cr2 = await container.online_room_service.join_room(room_code=cr1["roomCode"])
+        await container.online_room_service.set_ready(
+            cr1["matchId"], cr1["playerToken"], ready=True
+        )
+        await container.online_room_service.set_ready(
+            cr1["matchId"], cr2["playerToken"], ready=True
+        )
+        await container.online_room_service.submit_challenge(
+            cr1["matchId"], cr1["playerToken"], rows=VALID_ROWS
+        )
+        assert recorded_deadlines[-1] == 5.0
+    finally:
+        await container.close()
+
+    # 3. Injectable solver_deadline_seconds remains honored for tests/callers
+    svc_custom = OnlineRoomService(repo, clock=clock, solver_deadline_seconds=1.25)
+    await svc_custom.submit_challenge(r1["matchId"], r2["playerToken"], rows=VALID_ROWS)
+    assert recorded_deadlines[-1] == 1.25
+
+
+async def test_missing_room_sync_emits_structured_warning_audit_and_reason(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#19: ROOM_NOT_FOUND logs structured fields, appends metadata-only audit, returns reason."""
+    from types import SimpleNamespace
+
+    from server.application.sessions import (
+        CoCreationAppSettings,
+        SessionLifecycleService,
+        SessionReadModelService,
+    )
+    from server.persistence import DialogueRepository, OperationalRepository, SessionsRepository
+
+    clock = FakeClock()
+    db = SQLiteDatabase(tmp_path / "missing_room_sync.sqlite3")
+    settings = CoCreationAppSettings(token_secret="unit-test-secret")
+    rooms_repo = RoomsRepository(db)
+    sessions_repo = SessionsRepository(db)
+    dialogue_repo = DialogueRepository(db)
+    op_repo = OperationalRepository(db)
+    room_sync = OnlineRoomService(rooms_repo, clock=clock)
+    read_model = SessionReadModelService(
+        sessions_repo, dialogue_repo, op_repo, clock=clock, settings=settings
+    )
+    lifecycle = SessionLifecycleService(
+        db,
+        sessions_repo,
+        op_repo,
+        read_model,
+        room_sync=room_sync,
+        clock=clock,
+        settings=settings,
+        demo_level_generator=lambda: SimpleNamespace(rows=tuple(VALID_ROWS), seed=1),
+    )
+
+    room = await room_sync.create_room(study_session_id="st-miss-1", menu_started_flow=True)
+    await room_sync.join_room(
+        room_code=room["roomCode"], study_session_id="st-miss-2", menu_started_flow=True
+    )
+    created = await lifecycle.create_formal_session(
+        rows=VALID_ROWS,
+        initial_draft_method="partial_completion",
+        language="en",
+        idempotency_key="f-miss-1",
+        match_id=room["matchId"],
+        player_number=1,
+    )
+    sid = created["sessionId"]
+
+    # Delete online_rooms row mid-session to simulate room deletion/reap.
+    with db.write_tx() as conn:
+        conn.execute("DELETE FROM online_rooms WHERE id = ?", (room["matchId"],))
+
+    caplog.clear()
+    caplog.set_level("WARNING")
+    secret_intention = "SUPER_PRIVATE_INTENTION_BODY_DO_NOT_AUDIT"
+    with db.write_tx() as conn:
+        # 1. Event sync with explicit sessionId
+        ev_res1, created1 = room_sync.record_cocreation_event_tx(
+            conn,
+            match_id=room["matchId"],
+            player_slot=1,
+            event_payload={"eventId": "ev-miss-1", "eventType": "stage", "sessionId": sid},
+        )
+        # 2. Event sync WITHOUT sessionId (resolved via design_sessions lookup on conn)
+        ev_res2, created2 = room_sync.record_cocreation_event_tx(
+            conn,
+            match_id=room["matchId"],
+            player_slot=1,
+            event_payload={"eventId": "ev-miss-2", "eventType": "final"},
+        )
+        # 3. Designer intention sync (explicit session_id)
+        int_res = room_sync.record_designer_intention_tx(
+            conn,
+            match_id=room["matchId"],
+            player_slot=1,
+            designer_intention=secret_intention,
+            event_id="msg-miss-1",
+            session_id=sid,
+        )
+        # 4. Completely unknown match with no design_sessions row -> warns cleanly, 0 audits
+        orphan_res, orphan_created = room_sync.record_cocreation_event_tx(
+            conn,
+            match_id="z" * 32,
+            player_slot=2,
+            event_payload={"eventId": "ev-orphan", "eventType": "node"},
+        )
+
+    assert created1 is False and created2 is False and orphan_created is False
+    for res in (ev_res1, ev_res2, int_res, orphan_res):
+        assert res["applied"] is False
+        assert res["ignored"] is True
+        assert res["reason"] == "ROOM_NOT_FOUND"
+
+    # Structured warning logs include match_id, player_slot, event_type/sync_kind, and session_id
+    warning_msgs = [rec.message for rec in caplog.records if rec.levelname == "WARNING"]
+    assert len(warning_msgs) >= 4
+    assert any(
+        "online_rooms row was not found" in msg
+        and room["matchId"] in msg
+        and "player_slot=1" in msg
+        and "stage" in msg
+        and sid in msg
+        for msg in warning_msgs
+    )
+    assert any(
+        "online_rooms row was not found" in msg
+        and room["matchId"] in msg
+        and "designer_intention" in msg
+        and sid in msg
+        for msg in warning_msgs
+    )
+
+    # Durable metadata-only audit_events rows written atomically in the same transaction
+    missing_audits = [
+        ev
+        for ev in dialogue_repo.list_events(sid)
+        if ev.event_type == "room_sync_missing_room"
+    ]
+    assert len(missing_audits) == 3
+    sync_types = [ev.payload["syncEventType"] for ev in missing_audits]
+    assert sync_types == ["stage", "final", "designer_intention"]
+    for ev in missing_audits:
+        assert ev.payload["matchId"] == room["matchId"]
+        assert ev.payload["playerSlot"] == 1
+        assert ev.payload["reason"] == "ROOM_NOT_FOUND"
+        assert secret_intention not in json.dumps(ev.payload)
+

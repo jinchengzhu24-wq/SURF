@@ -47,6 +47,49 @@ class StudyRepository:
             assert row is not None
             return row_to_study_record(row)
 
+    def insert_record_idempotent(
+        self,
+        record_type: str,
+        payload: dict[str, Any],
+        *,
+        match_id: str | None = None,
+        participant_id: str | None = None,
+        round_id: str | None = None,
+        created_at: str,
+        dedup_response_id: str | None = None,
+    ) -> tuple[StudyRecord, bool]:
+        """Atomically insert or deduplicate a survey record by responseId in one write_tx."""
+        clean_response_id = str(dedup_response_id or "").strip()
+        with self._db.write_tx() as conn:
+            if record_type == "survey" and clean_response_id:
+                existing = conn.execute(
+                    "SELECT * FROM study_records "
+                    "WHERE record_type = 'survey' "
+                    "AND json_extract(payload_json, '$.responseId') = ? "
+                    "ORDER BY id ASC LIMIT 1",
+                    (clean_response_id,),
+                ).fetchone()
+                if existing is not None:
+                    return row_to_study_record(existing), True
+            cursor = conn.execute(
+                "INSERT INTO study_records("
+                "record_type, match_id, participant_id, round_id, payload_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    record_type,
+                    match_id,
+                    participant_id,
+                    round_id,
+                    dump_json(payload),
+                    created_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM study_records WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+            assert row is not None
+            return row_to_study_record(row), False
+
     def query_records(
         self,
         *,

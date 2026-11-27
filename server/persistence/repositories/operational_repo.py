@@ -95,6 +95,37 @@ class OperationalRepository:
                 outcome="in_progress", record=row_to_idempotency(existing)
             )
 
+    @staticmethod
+    def complete_key_tx(
+        conn: sqlite3.Connection,
+        session_id: str,
+        scope: str,
+        idempotency_key: str,
+        *,
+        response: dict[str, Any] | None = None,
+        status: str = "completed",
+    ) -> IdempotencyRecord | None:
+        """Update an idempotency key inside an existing write_tx connection."""
+        cur = conn.execute(
+            "UPDATE idempotency_keys SET status = ?, response_json = ? "
+            "WHERE session_id = ? AND scope = ? AND idempotency_key = ?",
+            (
+                status,
+                dump_json(response) if response is not None else None,
+                session_id,
+                scope,
+                idempotency_key,
+            ),
+        )
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM idempotency_keys "
+            "WHERE session_id = ? AND scope = ? AND idempotency_key = ?",
+            (session_id, scope, idempotency_key),
+        ).fetchone()
+        return row_to_idempotency(row) if row is not None else None
+
     def complete_key(
         self,
         session_id: str,
@@ -105,25 +136,14 @@ class OperationalRepository:
         status: str = "completed",
     ) -> IdempotencyRecord | None:
         with self._db.write_tx() as conn:
-            cur = conn.execute(
-                "UPDATE idempotency_keys SET status = ?, response_json = ? "
-                "WHERE session_id = ? AND scope = ? AND idempotency_key = ?",
-                (
-                    status,
-                    dump_json(response) if response is not None else None,
-                    session_id,
-                    scope,
-                    idempotency_key,
-                ),
+            return self.complete_key_tx(
+                conn,
+                session_id,
+                scope,
+                idempotency_key,
+                response=response,
+                status=status,
             )
-            if cur.rowcount == 0:
-                return None
-            row = conn.execute(
-                "SELECT * FROM idempotency_keys "
-                "WHERE session_id = ? AND scope = ? AND idempotency_key = ?",
-                (session_id, scope, idempotency_key),
-            ).fetchone()
-            return row_to_idempotency(row) if row is not None else None
 
     def get_key(
         self, session_id: str, scope: str, idempotency_key: str
@@ -181,7 +201,7 @@ class OperationalRepository:
         with self._db.read_conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM binary_discovery_topics WHERE session_id = ? "
-                "ORDER BY updated_at ASC",
+                "ORDER BY updated_at ASC, rowid ASC",
                 (session_id,),
             ).fetchall()
             return [row_to_topic(row) for row in rows]

@@ -371,6 +371,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         if (firstScore < 0 && secondScore < 0) return DifficultyLabels.Length - 1;
         if (firstScore < 0) return secondScore;
         if (secondScore < 0) return firstScore;
+        if (firstScore == secondScore) return firstScore;
         int low = Mathf.Min(firstScore, secondScore);
         int high = Mathf.Max(firstScore, secondScore);
         if (high - low == 1) return low == 0 ? low : high;

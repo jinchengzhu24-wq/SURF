@@ -137,10 +137,26 @@ class SessionReadModelService:
             raise NotFoundError("SESSION_NOT_FOUND", "error.session_not_found")
         read_model = self._expire_read_time_operations(read_model, include_attempts=True)
         events = self._dialogue_repo.list_events(session_id)
-        topic_rec = self._operational_repo.get_latest_topic(session_id)
+        topics = self._operational_repo.list_topics(session_id)
         recovery_tasks = self._operational_repo.list_tasks(session_id)
-        topic_state = topic_rec.state if topic_rec is not None else None
-        return self._project(read_model, events, topic_state, recovery_tasks)
+        topics_by_id = {rec.topic_id: rec.state for rec in topics}
+        current_vid = read_model.session.current_version_id
+        current_version_topics = [
+            rec for rec in topics if rec.state.get("versionId") == current_vid
+        ]
+        latest_topic_rec = (
+            current_version_topics[-1]
+            if current_version_topics
+            else (topics[-1] if topics else None)
+        )
+        topic_state = latest_topic_rec.state if latest_topic_rec is not None else None
+        return self._project(
+            read_model,
+            events,
+            topic_state,
+            recovery_tasks,
+            topics_by_id=topics_by_id,
+        )
 
     async def get_integration_status(
         self,
@@ -204,6 +220,8 @@ class SessionReadModelService:
         events: list[AuditEventRecord],
         topic_state: Mapping[str, Any] | None,
         recovery_tasks: list[Any],
+        *,
+        topics_by_id: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         now = self._clock.utc_datetime()
         session = read_model.session
@@ -252,7 +270,12 @@ class SessionReadModelService:
             read_model.turns, versions_by_id, public_guidance_by_turn, translated_intent_statements
         )
         annotate_proposal_questions(
-            read_model.turns, public_guidance_by_turn, translations_by_turn, topic_state
+            read_model.turns,
+            public_guidance_by_turn,
+            translations_by_turn,
+            topic_state,
+            topics_by_id=topics_by_id,
+            current_version_id=session.current_version_id,
         )
 
         return {

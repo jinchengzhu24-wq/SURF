@@ -84,6 +84,11 @@ class StudyRecordsService:
         now_iso = self._clock.utc_now()
         payload["serverReceivedAt"] = now_iso
 
+        if record_type == "survey":
+            response_id = _first_non_empty(payload, "responseId")
+            if response_id is not None:
+                payload["responseId"] = response_id
+
         if record_type == "journey":
             idea_id = str(payload.get("ideaId") or "").strip()
             phase = str(payload.get("phase") or "").strip()
@@ -142,6 +147,26 @@ class StudyRecordsService:
             payload, "participantId", "playerId", "studySessionId", "sessionId", "userId"
         )
         round_id = _first_non_empty(payload, "gameRoundId", "roundId", "ideaId")
+
+        if record_type == "survey":
+            response_id = _first_non_empty(payload, "responseId")
+            stored, deduplicated = await asyncio.to_thread(
+                self._repo.insert_record_idempotent,
+                record_type,
+                payload,
+                match_id=match_id,
+                participant_id=participant_id,
+                round_id=round_id,
+                created_at=created_at,
+                dedup_response_id=response_id,
+            )
+            return {
+                "status": "ok",
+                "id": stored.id,
+                "recordType": stored.record_type,
+                "eventType": str(stored.payload.get("eventType") or payload["eventType"]),
+                "deduplicated": deduplicated,
+            }
 
         stored = await asyncio.to_thread(
             self._repo.insert_record,

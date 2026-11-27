@@ -13,6 +13,7 @@ from server.application.sessions import (
     SessionReadModelService,
     append_audit_event_tx,
     assess_version_impl,
+    build_disagreement_audit_summary,
 )
 from server.core.clock import SYSTEM_CLOCK, Clock, parse_iso, utc_now_iso
 from server.core.llm_client import LLMValidationError, call_structured
@@ -411,7 +412,8 @@ class RecoveryService:
                 {
                     "versionId": task_base_vid,
                     "turnId": delivered_turn_id or None,
-                    "disagreement": ack_payload,
+                    "subject": "human_edit",
+                    "disagreement": build_disagreement_audit_summary(ack_payload),
                 },
                 now_iso,
             )

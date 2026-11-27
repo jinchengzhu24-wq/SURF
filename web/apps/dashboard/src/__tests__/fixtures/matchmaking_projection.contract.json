@@ -1,0 +1,1662 @@
+{
+  "summary": {
+    "matchCount": 1,
+    "completedCount": 1,
+    "inProgressCount": 0,
+    "cancelledCount": 0,
+    "expiredCount": 0,
+    "averageRunDurationSeconds": 99.25,
+    "malformedCount": 0
+  },
+  "matches": [
+    {
+      "matchId": "00000001202640008000000000000001",
+      "roomCode": "CONT2A",
+      "status": "completed",
+      "createdAt": "2026-11-27T08:00:00Z",
+      "updatedAt": "2026-11-27T08:33:07Z",
+      "completedAt": "2026-11-27T08:33:07Z",
+      "endedAt": "2026-11-27T08:33:07Z",
+      "playerCount": 2,
+      "players": [
+        {
+          "playerNumber": 1,
+          "joinedAt": "2026-11-27T08:00:00Z",
+          "ready": true,
+          "readyAt": "2026-11-27T08:00:05Z",
+          "leftAt": null,
+          "challenge": {
+            "submittedAt": "2026-11-27T08:32:27Z",
+            "aiAssistantMode": "description_generation",
+            "rows": [
+              "############",
+              "#..........#",
+              "#..p..s..t.#",
+              "#....#.....#",
+              "#....@.....#",
+              "#........#.#",
+              "#..........#",
+              "#..........#",
+              "#..........#",
+              "############"
+            ],
+            "createdByPlayerNumber": 1,
+            "playedByPlayerNumber": 2,
+            "runResult": {
+              "submittedAt": "2026-11-27T08:33:07Z",
+              "durationSeconds": 180.0,
+              "moveCount": 24,
+              "minimumMoves": 6,
+              "outcome": "timed_out",
+              "restartCount": 3
+            }
+          },
+          "result": {
+            "submittedAt": "2026-11-27T08:32:47Z",
+            "durationSeconds": 18.5,
+            "moveCount": 8,
+            "minimumMoves": 6,
+            "outcome": "completed",
+            "restartCount": 2
+          },
+          "designerIntention": "Restored the open center with a lower flank anchor for clean pacing.",
+          "studySessionId": "study-p1-full-uuid",
+          "coCreationFlow": [
+            {
+              "eventId": "draft:00000001202640008000000000000001:1",
+              "eventType": "draft",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "serverReceivedAt": "2026-11-27T08:00:27Z",
+              "finalDifficulty": "Medium",
+              "finalLayout": "Balanced",
+              "q1Answer": "observe_then_decide",
+              "q2Answer": "easy_to_adjust",
+              "q3Answer": "focused_area",
+              "q4Answer": "short_routes",
+              "aiReflection": "Balanced medium pacing with focused center.",
+              "aiDifficultyRationale": "Steady planning maps to Medium.",
+              "aiLayoutRationale": "Focused spacing maps to Balanced.",
+              "aiRecommendedDifficulty": "Medium",
+              "aiRecommendedLayout": "Balanced",
+              "aiRecommendationSource": "llm",
+              "draftMetadataComplete": true,
+              "sessionId": "00000006202640008000000000000006",
+              "draftRegenerations": [
+                {
+                  "requestId": "regen-p1-1",
+                  "status": "failed",
+                  "generation": 2,
+                  "failureCode": "GENERATOR_TIMEOUT",
+                  "rows": null,
+                  "solver": null,
+                  "requestedAt": "2026-11-27T08:00:18Z",
+                  "updatedAt": "2026-11-27T08:00:18Z"
+                },
+                {
+                  "requestId": "regen-p1-2",
+                  "status": "completed",
+                  "generation": 3,
+                  "failureCode": null,
+                  "rows": [
+                    "############",
+                    "#..........#",
+                    "#..p..s..t.#",
+                    "#....#.....#",
+                    "#....@.....#",
+                    "#..........#",
+                    "#..........#",
+                    "#..........#",
+                    "#..........#",
+                    "############"
+                  ],
+                  "solver": {
+                    "solvable": true,
+                    "minSteps": 5,
+                    "minPushes": 3
+                  },
+                  "requestedAt": "2026-11-27T08:00:22Z",
+                  "updatedAt": "2026-11-27T08:00:22Z"
+                }
+              ]
+            },
+            {
+              "eventId": "first_stage:00000007202640008000000000000007",
+              "eventType": "first_stage",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:00:27Z",
+              "versionId": "00000007202640008000000000000007",
+              "stageNumber": 1,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@.....#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [],
+              "initialDraftMethod": "description_generation"
+            },
+            {
+              "eventId": "opening:00000008202640008000000000000008",
+              "eventType": "opening",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:00:32Z",
+              "versionId": "00000007202640008000000000000007",
+              "stageNumber": 1,
+              "assistantTurnId": "00000008202640008000000000000008",
+              "assistantText": "Stage 1 is solvable in 6 moves with a clear central corridor.\n\nShare a reaction or try playing; you can also make local edits in the right panel. I help think through small, reviewable changes; you steer any broad rebuild, with me as a sounding board.",
+              "language": "en",
+              "cards": [
+                {
+                  "type": "discussion",
+                  "text": "Would you like to test or tweak this layout?"
+                },
+                {
+                  "type": "clarification",
+                  "text": "Playtest to verify box pacing."
+                }
+              ],
+              "consumed": true
+            },
+            {
+              "eventId": "node:discussion:00000009202640008000000000000009",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:00:42Z",
+              "nodeUpdatedAt": "2026-11-27T08:00:42Z",
+              "nodeId": "discussion:00000009202640008000000000000009",
+              "nodeType": "discussion",
+              "nodeStatus": "resolved",
+              "nodeEntries": [
+                {
+                  "entryId": "opening:00000008202640008000000000000008",
+                  "kind": "llm_message",
+                  "text": "Stage 1 is solvable in 6 moves with a clear central corridor.\n\nShare a reaction or try playing; you can also make local edits in the right panel. I help think through small, reviewable changes; you steer any broad rebuild, with me as a sounding board.",
+                  "label": "AI opening evaluation",
+                  "occurredAt": "2026-11-27T08:00:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "opening-card:00000008202640008000000000000008:0",
+                  "kind": "card",
+                  "text": "Would you like to test or tweak this layout?",
+                  "label": "Opening card (discussion)",
+                  "occurredAt": "2026-11-27T08:00:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "opening-card:00000008202640008000000000000008:1",
+                  "kind": "card",
+                  "text": "Playtest to verify box pacing.",
+                  "label": "Opening card (clarification)",
+                  "occurredAt": "2026-11-27T08:00:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "player:00000009202640008000000000000009",
+                  "kind": "player_message",
+                  "text": "How does the center corridor feel right now?",
+                  "label": "Player",
+                  "occurredAt": "2026-11-27T08:00:42Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:0000000a20264000800000000000000a",
+                  "kind": "llm_message",
+                  "text": "Keeping the central corridor open lets players read the first push quickly.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:00:42Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "00000007202640008000000000000007",
+              "stageNumber": 1,
+              "openingAssistantTurnId": "00000008202640008000000000000008"
+            },
+            {
+              "eventId": "node:intent:dc_hypothesis_839f64a746d74c774a1b",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:00:52Z",
+              "nodeUpdatedAt": "2026-11-27T08:01:02Z",
+              "nodeId": "intent:dc_hypothesis_839f64a746d74c774a1b",
+              "nodeType": "intent",
+              "nodeStatus": "revised",
+              "nodeEntries": [
+                {
+                  "entryId": "player:0000000b20264000800000000000000b",
+                  "kind": "player_message",
+                  "text": "I want the center open so players can read the pushes.",
+                  "label": "Player",
+                  "occurredAt": "2026-11-27T08:00:52Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:0000000c20264000800000000000000c",
+                  "kind": "llm_message",
+                  "text": "Got it — you want to keep the center airy for clean look-ahead.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:00:52Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:0000000c20264000800000000000000c:intent",
+                  "kind": "card",
+                  "text": "Keep the center open for readable pushing.",
+                  "label": "Intent hypothesis",
+                  "occurredAt": "2026-11-27T08:00:52Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "intent-feedback:dc_hypothesis_839f64a746d74c774a1b:9",
+                  "kind": "player_action",
+                  "text": "Revised intent: Keep the center open with clear visual lanes.",
+                  "label": "Player action",
+                  "occurredAt": "2026-11-27T08:01:02Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "00000007202640008000000000000007",
+              "stageNumber": 1
+            },
+            {
+              "eventId": "stage:0000000e20264000800000000000000e",
+              "eventType": "stage",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:01:17Z",
+              "versionId": "0000000e20264000800000000000000e",
+              "stageNumber": 2,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@..#..#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [
+                {
+                  "x": 8,
+                  "y": 4,
+                  "before": ".",
+                  "after": "#"
+                }
+              ],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [],
+              "source": "manual"
+            },
+            {
+              "eventId": "node:manual-review:0000000e20264000800000000000000e",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:01:17Z",
+              "nodeUpdatedAt": "2026-11-27T08:01:22Z",
+              "nodeId": "manual-review:0000000e20264000800000000000000e",
+              "nodeType": "manual_edit_review",
+              "nodeStatus": "reviewed",
+              "nodeEntries": [
+                {
+                  "entryId": "manual-save:0000000e20264000800000000000000e",
+                  "kind": "player_action",
+                  "text": "Added right flank wall",
+                  "label": "Player action",
+                  "occurredAt": "2026-11-27T08:01:17Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "verified-diff:0000000e20264000800000000000000e",
+                  "kind": "map_diff",
+                  "text": "[{\"x\":8,\"y\":4,\"before\":\".\",\"after\":\"#\"}]",
+                  "label": "Verified map change",
+                  "occurredAt": "2026-11-27T08:01:17Z"
+                },
+                {
+                  "entryId": "llm:00000010202640008000000000000010",
+                  "kind": "llm_message",
+                  "text": "You added a wall on the right side of the center lane.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:01:22Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000011202640008000000000000011",
+                  "kind": "llm_message",
+                  "text": "This narrows the right side after you asked to keep the center open.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:01:22Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "0000000e20264000800000000000000e",
+              "stageNumber": 2
+            },
+            {
+              "eventId": "node:llm-challenge:dis_0000001220264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:01:22Z",
+              "nodeUpdatedAt": "2026-11-27T08:01:32Z",
+              "nodeId": "llm-challenge:dis_0000001220264000",
+              "nodeType": "llm_challenge",
+              "nodeStatus": "acknowledged",
+              "nodeEntries": [
+                {
+                  "entryId": "llm-challenge-card:dis_0000001220264000",
+                  "kind": "card",
+                  "text": "You placed an extra wall on the right flank.\nEarlier you preferred keeping the central corridor open.\nDoes this extra wall help pacing or block the open center?\nDo you want to keep this narrower choke point?",
+                  "label": "LET'S DISCUSS",
+                  "occurredAt": "2026-11-27T08:01:22Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "player:00000013202640008000000000000013",
+                  "kind": "player_message",
+                  "text": "I want that right-side wall to create a narrower turn.",
+                  "label": "Player",
+                  "occurredAt": "2026-11-27T08:01:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000014202640008000000000000014",
+                  "kind": "llm_message",
+                  "text": "Thanks for clarifying — keeping that right-flank choke makes sense now.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:01:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm-challenge-status:dis_0000001220264000:ack",
+                  "kind": "status",
+                  "text": "Responded · proposal block released",
+                  "label": "Discussion status",
+                  "occurredAt": "2026-11-27T08:01:32Z"
+                }
+              ],
+              "versionId": "0000000e20264000800000000000000e",
+              "stageNumber": 2,
+              "nodeParentId": "manual-review:0000000e20264000800000000000000e"
+            },
+            {
+              "eventId": "stage:00000015202640008000000000000015",
+              "eventType": "stage",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:01:47Z",
+              "versionId": "00000015202640008000000000000015",
+              "stageNumber": 3,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@..##.#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [
+                {
+                  "x": 9,
+                  "y": 4,
+                  "before": ".",
+                  "after": "#"
+                }
+              ],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [],
+              "source": "manual"
+            },
+            {
+              "eventId": "node:manual-review:00000015202640008000000000000015",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:01:47Z",
+              "nodeUpdatedAt": "2026-11-27T08:01:52Z",
+              "nodeId": "manual-review:00000015202640008000000000000015",
+              "nodeType": "manual_edit_review",
+              "nodeStatus": "reviewed",
+              "nodeEntries": [
+                {
+                  "entryId": "manual-save:00000015202640008000000000000015",
+                  "kind": "player_action",
+                  "text": "Extended right flank wall",
+                  "label": "Player action",
+                  "occurredAt": "2026-11-27T08:01:47Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "verified-diff:00000015202640008000000000000015",
+                  "kind": "map_diff",
+                  "text": "[{\"x\":9,\"y\":4,\"before\":\".\",\"after\":\"#\"}]",
+                  "label": "Verified map change",
+                  "occurredAt": "2026-11-27T08:01:47Z"
+                },
+                {
+                  "entryId": "llm:00000017202640008000000000000017",
+                  "kind": "llm_message",
+                  "text": "You added a wall on the right side of the center lane.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:01:52Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000018202640008000000000000018",
+                  "kind": "llm_message",
+                  "text": "This narrows the right side after you asked to keep the center open.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:01:52Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "00000015202640008000000000000015",
+              "stageNumber": 3
+            },
+            {
+              "eventId": "node:llm-challenge:dis_0000001920264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:01:52Z",
+              "nodeUpdatedAt": "2026-11-27T08:02:07Z",
+              "nodeId": "llm-challenge:dis_0000001920264000",
+              "nodeType": "llm_challenge",
+              "nodeStatus": "manual_reedit",
+              "nodeEntries": [
+                {
+                  "entryId": "llm-challenge-card:dis_0000001920264000",
+                  "kind": "card",
+                  "text": "You placed an extra wall on the right flank.\nEarlier you preferred keeping the central corridor open.\nDoes this extra wall help pacing or block the open center?\nDo you want to keep this narrower choke point?",
+                  "label": "LET'S DISCUSS",
+                  "occurredAt": "2026-11-27T08:01:52Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm-challenge-status:dis_0000001920264000:reedit",
+                  "kind": "status",
+                  "text": "Ended through a new manual edit (Stage 4)",
+                  "label": "Discussion status",
+                  "occurredAt": "2026-11-27T08:02:07Z"
+                }
+              ],
+              "versionId": "00000015202640008000000000000015",
+              "stageNumber": 3,
+              "nodeParentId": "manual-review:00000015202640008000000000000015"
+            },
+            {
+              "eventId": "stage:0000001a20264000800000000000001a",
+              "eventType": "stage",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:02:07Z",
+              "versionId": "0000001a20264000800000000000001a",
+              "stageNumber": 4,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@.....#",
+                "#........#.#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [
+                {
+                  "x": 8,
+                  "y": 4,
+                  "before": "#",
+                  "after": "."
+                },
+                {
+                  "x": 9,
+                  "y": 4,
+                  "before": "#",
+                  "after": "."
+                },
+                {
+                  "x": 9,
+                  "y": 5,
+                  "before": ".",
+                  "after": "#"
+                }
+              ],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [],
+              "source": "manual"
+            },
+            {
+              "eventId": "node:manual-review:0000001a20264000800000000000001a",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:02:07Z",
+              "nodeUpdatedAt": "2026-11-27T08:02:12Z",
+              "nodeId": "manual-review:0000001a20264000800000000000001a",
+              "nodeType": "manual_edit_review",
+              "nodeStatus": "reviewed",
+              "nodeEntries": [
+                {
+                  "entryId": "manual-save:0000001a20264000800000000000001a",
+                  "kind": "player_action",
+                  "text": "Moved flank wall lower",
+                  "label": "Player action",
+                  "occurredAt": "2026-11-27T08:02:07Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "verified-diff:0000001a20264000800000000000001a",
+                  "kind": "map_diff",
+                  "text": "[{\"x\":8,\"y\":4,\"before\":\"#\",\"after\":\".\"},{\"x\":9,\"y\":4,\"before\":\"#\",\"after\":\".\"},{\"x\":9,\"y\":5,\"before\":\".\",\"after\":\"#\"}]",
+                  "label": "Verified map change",
+                  "occurredAt": "2026-11-27T08:02:07Z"
+                },
+                {
+                  "entryId": "llm:0000001c20264000800000000000001c",
+                  "kind": "llm_message",
+                  "text": "You moved the flank wall lower toward the bottom-right.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:02:12Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:0000001d20264000800000000000001d",
+                  "kind": "llm_message",
+                  "text": "This restores openness in the center lane.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:02:12Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "0000001a20264000800000000000001a",
+              "stageNumber": 4
+            },
+            {
+              "eventId": "node:proposal:top_0000001e20264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:02:22Z",
+              "nodeUpdatedAt": "2026-11-27T08:02:42Z",
+              "nodeId": "proposal:top_0000001e20264000",
+              "nodeType": "proposal",
+              "nodeStatus": "replaced",
+              "nodeEntries": [
+                {
+                  "entryId": "player:00000020202640008000000000000020",
+                  "kind": "player_message",
+                  "text": "Make center simpler",
+                  "label": "Player",
+                  "occurredAt": "2026-11-27T08:02:22Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000021202640008000000000000021",
+                  "kind": "llm_message",
+                  "text": "Which simplification works better?",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:02:22Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:00000021202640008000000000000021:pq",
+                  "kind": "card",
+                  "text": "Which simplification works better?\nPick one obstacle change.\nA: Remove internal wall | B: Remove water tile",
+                  "label": "Binary discovery question",
+                  "occurredAt": "2026-11-27T08:02:22Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "choice:top_0000001e20264000:q_000000222026",
+                  "kind": "player_action",
+                  "text": "Remove internal wall",
+                  "label": "Selected direction",
+                  "occurredAt": "2026-11-27T08:02:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000026202640008000000000000026",
+                  "kind": "llm_message",
+                  "text": "Should we also clear the lower flank wall or the central water tile?",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:02:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:00000026202640008000000000000026:pq",
+                  "kind": "card",
+                  "text": "Should we also clear the lower flank wall or the central water tile?\nNarrowing down the second obstacle change.\nA: Also clear lower flank wall | B: Also clear central water tile",
+                  "label": "Binary discovery question",
+                  "occurredAt": "2026-11-27T08:02:32Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "choice:top_0000001e20264000:q_000000272026",
+                  "kind": "player_action",
+                  "text": "Also clear lower flank wall",
+                  "label": "Selected direction",
+                  "occurredAt": "2026-11-27T08:02:42Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:0000002b20264000800000000000002b",
+                  "kind": "llm_message",
+                  "text": "Verified in this candidate: Remove an obstacle in the center.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:02:42Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:0000002b20264000800000000000002b:offer",
+                  "kind": "card",
+                  "text": "Make center simpler",
+                  "label": "Proposal direction",
+                  "occurredAt": "2026-11-27T08:02:42Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "0000001a20264000800000000000001a",
+              "stageNumber": 4
+            },
+            {
+              "eventId": "node:player-challenge:chg_0000002c20264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:02:52Z",
+              "nodeUpdatedAt": "2026-11-27T08:03:12Z",
+              "nodeId": "player-challenge:chg_0000002c20264000",
+              "nodeType": "player_challenge",
+              "nodeStatus": "replacement_selected",
+              "nodeEntries": [
+                {
+                  "entryId": "challenge-start:chg_0000002c20264000",
+                  "kind": "player_action",
+                  "text": "Challenge this plan: Make center simpler",
+                  "label": "Player action",
+                  "occurredAt": "2026-11-27T08:02:52Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:0000002e20264000800000000000002e",
+                  "kind": "llm_message",
+                  "text": "Tell me why you want to challenge this proposal so I can compare both directions.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:02:52Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "player:0000002f20264000800000000000002f",
+                  "kind": "player_message",
+                  "text": "I prefer to remove the water tile instead of the wall.",
+                  "label": "Challenge reason",
+                  "occurredAt": "2026-11-27T08:03:02Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000030202640008000000000000030",
+                  "kind": "llm_message",
+                  "text": "Removing the water tile opens vertical movement while removing the wall opens the upper center lane.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:03:02Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:00000030202640008000000000000030:review",
+                  "kind": "card",
+                  "text": "[different / reasonable] Removing the water tile opens vertical movement while removing the wall opens the upper center lane.",
+                  "label": "Challenge comparison",
+                  "occurredAt": "2026-11-27T08:03:02Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "player:00000031202640008000000000000031",
+                  "kind": "player_action",
+                  "text": "Requested new plan from player's reason",
+                  "label": "Player choice",
+                  "occurredAt": "2026-11-27T08:03:12Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000032202640008000000000000032",
+                  "kind": "llm_message",
+                  "text": "Verified in this candidate: Remove the central water tile instead.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:03:12Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "0000001a20264000800000000000001a",
+              "stageNumber": 4,
+              "nodeParentId": "proposal:top_0000001e20264000"
+            },
+            {
+              "eventId": "node:proposal:challenge:chg_0000002c20264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:03:12Z",
+              "nodeUpdatedAt": "2026-11-27T08:03:32Z",
+              "nodeId": "proposal:challenge:chg_0000002c20264000",
+              "nodeType": "proposal",
+              "nodeStatus": "accepted",
+              "nodeEntries": [
+                {
+                  "entryId": "card:00000032202640008000000000000032:repl-offer",
+                  "kind": "card",
+                  "text": "I prefer to remove the water tile instead of the wall.",
+                  "label": "Replacement proposal direction",
+                  "occurredAt": "2026-11-27T08:03:12Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "player:00000033202640008000000000000033",
+                  "kind": "player_action",
+                  "text": "Draft this suggestion",
+                  "label": "Player action",
+                  "occurredAt": "2026-11-27T08:03:22Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000034202640008000000000000034",
+                  "kind": "llm_message",
+                  "text": "Verified solvable candidate: minimum moves 5 -> 5, pushes 3 -> 3.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:03:22Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "proposal-verified:00000035202640008000000000000035",
+                  "kind": "map_diff",
+                  "text": "{\"diff\":[{\"x\":5,\"y\":4,\"before\":\"@\",\"after\":\".\"}],\"validation\":{\"valid\":true,\"solvable\":true,\"searchedStates\":75,\"solutionSteps\":5,\"solutionPushes\":3,\"solution\":\"RRRRR\"}}",
+                  "label": "Verified proposal result",
+                  "occurredAt": "2026-11-27T08:03:22Z"
+                },
+                {
+                  "entryId": "proposal-action:00000035202640008000000000000035",
+                  "kind": "player_action",
+                  "text": "Accepted candidate map · saved as Stage 5",
+                  "label": "Player decision",
+                  "occurredAt": "2026-11-27T08:03:32Z"
+                }
+              ],
+              "versionId": "0000001a20264000800000000000001a",
+              "stageNumber": 4,
+              "nodeParentId": "player-challenge:chg_0000002c20264000"
+            },
+            {
+              "eventId": "stage:00000036202640008000000000000036",
+              "eventType": "stage",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:03:32Z",
+              "versionId": "00000036202640008000000000000036",
+              "stageNumber": 5,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#..........#",
+                "#........#.#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [
+                {
+                  "x": 5,
+                  "y": 4,
+                  "before": "@",
+                  "after": "."
+                }
+              ],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [
+                {
+                  "attemptId": "00000038202640008000000000000038",
+                  "versionId": "00000036202640008000000000000036",
+                  "stageNumber": 5,
+                  "mode": "description_generation",
+                  "language": "en",
+                  "status": "abandoned",
+                  "issuedAt": "2026-11-27T08:03:37Z",
+                  "loadedAt": "2026-11-27T08:03:37Z",
+                  "firstMoveAt": "2026-11-27T08:03:41Z",
+                  "finishedAt": "2026-11-27T08:03:41Z",
+                  "durationSeconds": 4.0,
+                  "moveCount": 3,
+                  "pushCount": 0,
+                  "restartCount": 1,
+                  "minimumMoves": 5,
+                  "minimumPushes": 3
+                }
+              ],
+              "source": "ai"
+            },
+            {
+              "eventId": "stage:0000003a20264000800000000000003a",
+              "eventType": "stage",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:03:51Z",
+              "versionId": "0000003a20264000800000000000003a",
+              "stageNumber": 6,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@.....#",
+                "#........#.#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [
+                {
+                  "x": 5,
+                  "y": 4,
+                  "before": ".",
+                  "after": "@"
+                }
+              ],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [
+                {
+                  "attemptId": "0000003b20264000800000000000003b",
+                  "versionId": "0000003a20264000800000000000003a",
+                  "stageNumber": 6,
+                  "mode": "description_generation",
+                  "language": "en",
+                  "status": "completed",
+                  "issuedAt": "2026-11-27T08:03:56Z",
+                  "loadedAt": "2026-11-27T08:03:56Z",
+                  "firstMoveAt": "2026-11-27T08:04:04Z",
+                  "finishedAt": "2026-11-27T08:04:04Z",
+                  "durationSeconds": 8.0,
+                  "moveCount": 7,
+                  "pushCount": 2,
+                  "restartCount": 0,
+                  "minimumMoves": 5,
+                  "minimumPushes": 3
+                }
+              ],
+              "source": "restored",
+              "restoredFromVersionId": "0000001a20264000800000000000001a",
+              "restoredFromStageNumber": 4,
+              "replacedVersionId": "00000036202640008000000000000036",
+              "replacedStageNumber": 5
+            },
+            {
+              "eventId": "final:0000003a20264000800000000000003a",
+              "eventType": "final",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:24:57Z",
+              "versionId": "0000003a20264000800000000000003a",
+              "stageNumber": 6,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@.....#",
+                "#........#.#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [
+                {
+                  "x": 5,
+                  "y": 4,
+                  "before": ".",
+                  "after": "@"
+                }
+              ],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [
+                {
+                  "attemptId": "0000003b20264000800000000000003b",
+                  "versionId": "0000003a20264000800000000000003a",
+                  "stageNumber": 6,
+                  "mode": "description_generation",
+                  "language": "en",
+                  "status": "completed",
+                  "issuedAt": "2026-11-27T08:03:56Z",
+                  "loadedAt": "2026-11-27T08:03:56Z",
+                  "firstMoveAt": "2026-11-27T08:04:04Z",
+                  "finishedAt": "2026-11-27T08:04:04Z",
+                  "durationSeconds": 8.0,
+                  "moveCount": 7,
+                  "pushCount": 2,
+                  "restartCount": 0,
+                  "minimumMoves": 5,
+                  "minimumPushes": 3
+                }
+              ],
+              "coCreationDurationSeconds": 1470,
+              "opponentRestartCount": 3
+            },
+            {
+              "eventId": "message:00000006202640008000000000000006",
+              "eventType": "message",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 1,
+              "studySessionId": "study-p1-full-uuid",
+              "sessionId": "00000006202640008000000000000006",
+              "serverReceivedAt": "2026-11-27T08:25:02Z",
+              "message": "Restored the open center with a lower flank anchor for clean pacing."
+            }
+          ],
+          "playAttempts": [
+            {
+              "attemptId": "00000038202640008000000000000038",
+              "versionId": "00000036202640008000000000000036",
+              "stageNumber": 5,
+              "mode": "description_generation",
+              "language": "en",
+              "status": "abandoned",
+              "issuedAt": "2026-11-27T08:03:37Z",
+              "loadedAt": "2026-11-27T08:03:37Z",
+              "firstMoveAt": "2026-11-27T08:03:41Z",
+              "finishedAt": "2026-11-27T08:03:41Z",
+              "durationSeconds": 4.0,
+              "moveCount": 3,
+              "pushCount": 0,
+              "restartCount": 1,
+              "minimumMoves": 5,
+              "minimumPushes": 3
+            },
+            {
+              "attemptId": "0000003b20264000800000000000003b",
+              "versionId": "0000003a20264000800000000000003a",
+              "stageNumber": 6,
+              "mode": "description_generation",
+              "language": "en",
+              "status": "completed",
+              "issuedAt": "2026-11-27T08:03:56Z",
+              "loadedAt": "2026-11-27T08:03:56Z",
+              "firstMoveAt": "2026-11-27T08:04:04Z",
+              "finishedAt": "2026-11-27T08:04:04Z",
+              "durationSeconds": 8.0,
+              "moveCount": 7,
+              "pushCount": 2,
+              "restartCount": 0,
+              "minimumMoves": 5,
+              "minimumPushes": 3
+            }
+          ],
+          "draftRegenerations": [
+            {
+              "requestId": "regen-p1-1",
+              "status": "failed",
+              "generation": 2,
+              "failureCode": "GENERATOR_TIMEOUT",
+              "rows": null,
+              "solver": null,
+              "requestedAt": "2026-11-27T08:00:18Z",
+              "updatedAt": "2026-11-27T08:00:18Z"
+            },
+            {
+              "requestId": "regen-p1-2",
+              "status": "completed",
+              "generation": 3,
+              "failureCode": null,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@.....#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "requestedAt": "2026-11-27T08:00:22Z",
+              "updatedAt": "2026-11-27T08:00:22Z"
+            }
+          ]
+        },
+        {
+          "playerNumber": 2,
+          "joinedAt": "2026-11-27T08:00:05Z",
+          "ready": true,
+          "readyAt": "2026-11-27T08:00:05Z",
+          "leftAt": null,
+          "challenge": {
+            "submittedAt": "2026-11-27T08:32:27Z",
+            "aiAssistantMode": "description_generation",
+            "rows": [
+              "############",
+              "#..........#",
+              "#..p..s..t.#",
+              "#....#.....#",
+              "#....@.....#",
+              "#..........#",
+              "#..........#",
+              "#..........#",
+              "#..........#",
+              "############"
+            ],
+            "createdByPlayerNumber": 2,
+            "playedByPlayerNumber": 1,
+            "runResult": {
+              "submittedAt": "2026-11-27T08:32:47Z",
+              "durationSeconds": 18.5,
+              "moveCount": 8,
+              "minimumMoves": 6,
+              "outcome": "completed",
+              "restartCount": 2
+            }
+          },
+          "result": {
+            "submittedAt": "2026-11-27T08:33:07Z",
+            "durationSeconds": 180.0,
+            "moveCount": 24,
+            "minimumMoves": 6,
+            "outcome": "timed_out",
+            "restartCount": 3
+          },
+          "designerIntention": "Clean short puzzle focusing on direct push order.",
+          "studySessionId": "study-p2-full-uuid",
+          "coCreationFlow": [
+            {
+              "eventId": "draft:00000001202640008000000000000001:2",
+              "eventType": "draft",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "serverReceivedAt": "2026-11-27T08:25:12Z",
+              "finalDifficulty": "Easy",
+              "finalLayout": "Compact",
+              "q1Answer": "quick_start",
+              "q2Answer": "easy_to_adjust",
+              "q3Answer": "focused_area",
+              "q4Answer": "short_routes",
+              "aiReflection": "Quick start with compact routing.",
+              "aiDifficultyRationale": "Quick start maps to Easy.",
+              "aiLayoutRationale": "Focused area maps to Compact.",
+              "aiRecommendedDifficulty": "Easy",
+              "aiRecommendedLayout": "Compact",
+              "aiRecommendationSource": "llm",
+              "draftMetadataComplete": true,
+              "sessionId": "0000003e20264000800000000000003e"
+            },
+            {
+              "eventId": "first_stage:0000003f20264000800000000000003f",
+              "eventType": "first_stage",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "sessionId": "0000003e20264000800000000000003e",
+              "serverReceivedAt": "2026-11-27T08:25:12Z",
+              "versionId": "0000003f20264000800000000000003f",
+              "stageNumber": 1,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@.....#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [],
+              "initialDraftMethod": "partial_completion"
+            },
+            {
+              "eventId": "opening:00000040202640008000000000000040",
+              "eventType": "opening",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "sessionId": "0000003e20264000800000000000003e",
+              "serverReceivedAt": "2026-11-27T08:25:17Z",
+              "versionId": "0000003f20264000800000000000003f",
+              "stageNumber": 1,
+              "assistantTurnId": "00000040202640008000000000000040",
+              "assistantText": "Player 2 Stage 1 starts with an open baseline route.\n\nShare a reaction or try playing; you can also make local edits in the right panel. I help think through small, reviewable changes; you steer any broad rebuild, with me as a sounding board.",
+              "language": "en",
+              "cards": [
+                {
+                  "type": "discussion",
+                  "text": "Would you like to test or tweak this layout?"
+                },
+                {
+                  "type": "clarification",
+                  "text": "Playtest to verify box pacing."
+                }
+              ],
+              "consumed": false
+            },
+            {
+              "eventId": "node:proposal:top_0000004120264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "sessionId": "0000003e20264000800000000000003e",
+              "serverReceivedAt": "2026-11-27T08:25:27Z",
+              "nodeUpdatedAt": "2026-11-27T08:25:37Z",
+              "nodeId": "proposal:top_0000004120264000",
+              "nodeType": "proposal",
+              "nodeStatus": "replaced",
+              "nodeEntries": [
+                {
+                  "entryId": "player:00000043202640008000000000000043",
+                  "kind": "player_message",
+                  "text": "Make center simpler",
+                  "label": "Player",
+                  "occurredAt": "2026-11-27T08:25:27Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000044202640008000000000000044",
+                  "kind": "llm_message",
+                  "text": "Which simplification works better?",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:25:27Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:00000044202640008000000000000044:pq",
+                  "kind": "card",
+                  "text": "Which simplification works better?\nPick one obstacle change.\nA: Remove internal wall | B: Remove water tile",
+                  "label": "Binary discovery question",
+                  "occurredAt": "2026-11-27T08:25:27Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "choice:top_0000004120264000:q_000000452026",
+                  "kind": "player_action",
+                  "text": "Remove internal wall",
+                  "label": "Selected direction",
+                  "occurredAt": "2026-11-27T08:25:37Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000049202640008000000000000049",
+                  "kind": "llm_message",
+                  "text": "Verified in this candidate: Remove an obstacle in the center.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:25:37Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:00000049202640008000000000000049:offer",
+                  "kind": "card",
+                  "text": "Make center simpler",
+                  "label": "Proposal direction",
+                  "occurredAt": "2026-11-27T08:25:37Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "0000003f20264000800000000000003f",
+              "stageNumber": 1
+            },
+            {
+              "eventId": "node:player-challenge:chg_0000004a20264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "sessionId": "0000003e20264000800000000000003e",
+              "serverReceivedAt": "2026-11-27T08:25:47Z",
+              "nodeUpdatedAt": "2026-11-27T08:26:07Z",
+              "nodeId": "player-challenge:chg_0000004a20264000",
+              "nodeType": "player_challenge",
+              "nodeStatus": "original_selected",
+              "nodeEntries": [
+                {
+                  "entryId": "challenge-start:chg_0000004a20264000",
+                  "kind": "player_action",
+                  "text": "Challenge this plan: Make center simpler",
+                  "label": "Player action",
+                  "occurredAt": "2026-11-27T08:25:47Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:0000004c20264000800000000000004c",
+                  "kind": "llm_message",
+                  "text": "Tell me why you want to challenge this proposal so I can compare both directions.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:25:47Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "player:0000004d20264000800000000000004d",
+                  "kind": "player_message",
+                  "text": "Maybe keep the water tile instead.",
+                  "label": "Challenge reason",
+                  "occurredAt": "2026-11-27T08:25:57Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:0000004e20264000800000000000004e",
+                  "kind": "llm_message",
+                  "text": "Removing the water tile opens vertical movement while removing the wall opens the upper center lane.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:25:57Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "card:0000004e20264000800000000000004e:review",
+                  "kind": "card",
+                  "text": "[different / reasonable] Removing the water tile opens vertical movement while removing the wall opens the upper center lane.",
+                  "label": "Challenge comparison",
+                  "occurredAt": "2026-11-27T08:25:57Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "player:0000004f20264000800000000000004f",
+                  "kind": "player_action",
+                  "text": "Kept original proposal",
+                  "label": "Player choice",
+                  "occurredAt": "2026-11-27T08:26:07Z",
+                  "language": "en"
+                },
+                {
+                  "entryId": "llm:00000050202640008000000000000050",
+                  "kind": "llm_message",
+                  "text": "Verified solvable candidate: minimum moves 5 -> 5, pushes 3 -> 3.",
+                  "label": "LLM",
+                  "occurredAt": "2026-11-27T08:26:07Z",
+                  "language": "en"
+                }
+              ],
+              "versionId": "0000003f20264000800000000000003f",
+              "stageNumber": 1,
+              "nodeParentId": "proposal:top_0000004120264000"
+            },
+            {
+              "eventId": "node:proposal:challenge:chg_0000004a20264000",
+              "eventType": "node",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "sessionId": "0000003e20264000800000000000003e",
+              "serverReceivedAt": "2026-11-27T08:26:07Z",
+              "nodeUpdatedAt": "2026-11-27T08:26:17Z",
+              "nodeId": "proposal:challenge:chg_0000004a20264000",
+              "nodeType": "proposal",
+              "nodeStatus": "rejected",
+              "nodeEntries": [
+                {
+                  "entryId": "proposal-verified:00000051202640008000000000000051",
+                  "kind": "map_diff",
+                  "text": "{\"diff\":[{\"x\":5,\"y\":3,\"before\":\"#\",\"after\":\".\"}],\"validation\":{\"valid\":true,\"solvable\":true,\"searchedStates\":77,\"solutionSteps\":5,\"solutionPushes\":3,\"solution\":\"RRRRR\"}}",
+                  "label": "Verified proposal result",
+                  "occurredAt": "2026-11-27T08:26:07Z"
+                },
+                {
+                  "entryId": "proposal-action:00000051202640008000000000000051",
+                  "kind": "player_action",
+                  "text": "Rejected proposal (Keeping my Stage 1 layout as-is.)",
+                  "label": "Player decision",
+                  "occurredAt": "2026-11-27T08:26:17Z"
+                }
+              ],
+              "versionId": "0000003f20264000800000000000003f",
+              "stageNumber": 1,
+              "nodeParentId": "player-challenge:chg_0000004a20264000"
+            },
+            {
+              "eventId": "final:0000003f20264000800000000000003f",
+              "eventType": "final",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "sessionId": "0000003e20264000800000000000003e",
+              "serverReceivedAt": "2026-11-27T08:32:17Z",
+              "versionId": "0000003f20264000800000000000003f",
+              "stageNumber": 1,
+              "rows": [
+                "############",
+                "#..........#",
+                "#..p..s..t.#",
+                "#....#.....#",
+                "#....@.....#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "#..........#",
+                "############"
+              ],
+              "diff": [],
+              "solver": {
+                "solvable": true,
+                "minSteps": 5,
+                "minPushes": 3
+              },
+              "playAttempts": [],
+              "coCreationDurationSeconds": 425,
+              "opponentRestartCount": 2
+            },
+            {
+              "eventId": "message:0000003e20264000800000000000003e",
+              "eventType": "message",
+              "matchId": "00000001202640008000000000000001",
+              "roomCode": "CONT2A",
+              "playerNumber": 2,
+              "studySessionId": "study-p2-full-uuid",
+              "sessionId": "0000003e20264000800000000000003e",
+              "serverReceivedAt": "2026-11-27T08:32:22Z",
+              "message": "Clean short puzzle focusing on direct push order."
+            }
+          ],
+          "playAttempts": [],
+          "draftRegenerations": []
+        }
+      ],
+      "events": [
+        {
+          "eventId": "00000002202640008000000000000002",
+          "eventType": "room_created",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 1,
+          "statusAfter": "waiting_for_opponent",
+          "serverReceivedAt": "2026-11-27T08:00:00Z",
+          "studySessionId": "study-p1-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000003202640008000000000000003",
+          "eventType": "player_joined",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 2,
+          "statusAfter": "briefing",
+          "serverReceivedAt": "2026-11-27T08:00:05Z",
+          "studySessionId": "study-p2-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000004202640008000000000000004",
+          "eventType": "ready_changed",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 1,
+          "statusAfter": "briefing",
+          "serverReceivedAt": "2026-11-27T08:00:05Z",
+          "ready": true,
+          "studySessionId": "study-p1-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000005202640008000000000000005",
+          "eventType": "ready_changed",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 2,
+          "statusAfter": "waiting_for_challenges",
+          "serverReceivedAt": "2026-11-27T08:00:05Z",
+          "ready": true,
+          "studySessionId": "study-p2-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "0000003d20264000800000000000003d",
+          "eventType": "designer_intention_synchronized",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 1,
+          "statusAfter": "waiting_for_challenges",
+          "serverReceivedAt": "2026-11-27T08:25:02Z",
+          "designerIntention": "Restored the open center with a lower flank anchor for clean pacing.",
+          "studySessionId": "study-p1-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000052202640008000000000000052",
+          "eventType": "designer_intention_synchronized",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 2,
+          "statusAfter": "waiting_for_challenges",
+          "serverReceivedAt": "2026-11-27T08:32:22Z",
+          "designerIntention": "Clean short puzzle focusing on direct push order.",
+          "studySessionId": "study-p2-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000053202640008000000000000053",
+          "eventType": "challenge_submitted",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 1,
+          "statusAfter": "waiting_for_challenges",
+          "serverReceivedAt": "2026-11-27T08:32:27Z",
+          "aiAssistantMode": "description_generation",
+          "rows": [
+            "############",
+            "#..........#",
+            "#..p..s..t.#",
+            "#....#.....#",
+            "#....@.....#",
+            "#........#.#",
+            "#..........#",
+            "#..........#",
+            "#..........#",
+            "############"
+          ],
+          "studySessionId": "study-p1-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000054202640008000000000000054",
+          "eventType": "challenge_submitted",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 2,
+          "statusAfter": "challenges_ready",
+          "serverReceivedAt": "2026-11-27T08:32:27Z",
+          "aiAssistantMode": "description_generation",
+          "rows": [
+            "############",
+            "#..........#",
+            "#..p..s..t.#",
+            "#....#.....#",
+            "#....@.....#",
+            "#..........#",
+            "#..........#",
+            "#..........#",
+            "#..........#",
+            "############"
+          ],
+          "studySessionId": "study-p2-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000055202640008000000000000055",
+          "eventType": "result_submitted",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 1,
+          "statusAfter": "waiting_for_results",
+          "serverReceivedAt": "2026-11-27T08:32:47Z",
+          "durationSeconds": 18.5,
+          "moveCount": 8,
+          "minimumMoves": 6,
+          "restartCount": 2,
+          "outcome": "completed",
+          "studySessionId": "study-p1-full-uuid",
+          "menuStartedFlow": true
+        },
+        {
+          "eventId": "00000056202640008000000000000056",
+          "eventType": "result_submitted",
+          "matchId": "00000001202640008000000000000001",
+          "roomCode": "CONT2A",
+          "playerNumber": 2,
+          "statusAfter": "results_ready",
+          "serverReceivedAt": "2026-11-27T08:33:07Z",
+          "durationSeconds": 180.0,
+          "moveCount": 24,
+          "minimumMoves": 6,
+          "restartCount": 3,
+          "outcome": "timed_out",
+          "studySessionId": "study-p2-full-uuid",
+          "menuStartedFlow": true
+        }
+      ],
+      "surveys": [
+        {
+          "recordId": 1,
+          "surveyId": null,
+          "surveyVersion": null,
+          "entrySource": null,
+          "playerSlot": 1,
+          "matchedBy": "studySessionId",
+          "createdAt": "2026-11-27T08:00:00Z",
+          "payload": {
+            "participantId": "study-p1-full-uuid",
+            "q1": 5,
+            "eventType": "survey-response",
+            "serverReceivedAt": "2026-11-27T08:00:00Z"
+          }
+        }
+      ]
+    }
+  ],
+  "malformedCount": 0,
+  "logFile": "sqlite:online_room_events",
+  "generatedAt": "2026-11-27T08:33:07Z"
+}

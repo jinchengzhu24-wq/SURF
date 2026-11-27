@@ -194,11 +194,8 @@ class MessageOrchestrator:
                 idempotency_key=idempotency_key,
                 request_id=request_id or idempotency_key,
                 exc=exc,
+                mark_key_failed=not committed_in_tx,
             )
-            if not committed_in_tx:
-                self._operational_repo.complete_key(
-                    session_id, "message", idempotency_key, status="failed"
-                )
             raise
         return await self._read_model.get_session_payload(session_id)
 
@@ -249,6 +246,7 @@ class MessageOrchestrator:
                 request_id=request_id,
                 deadline=deadline,
                 proposal_pipeline=self._revision_handler.proposal_pipeline,
+                complete_idempotency_scope="message",
             )
 
         if action == "execute_revision":
@@ -263,6 +261,8 @@ class MessageOrchestrator:
                 assistant_turn_id=assistant_turn_id,
                 user_text=clean_text or "Apply proposed revision",
                 idempotency_key=idempotency_key,
+                request_id=request_id,
+                complete_idempotency_scope="message",
             )
         if action == "alternative_revision":
             if topic_clarifying:
@@ -271,21 +271,27 @@ class MessageOrchestrator:
                 raise ConflictError("DISAGREEMENT_ACTIVE", "error.version_conflict")
             return await self._revision_handler.alternative_revision(
                 read_model=read_model,
+                assistant_turn_id=assistant_turn_id,
                 user_text=clean_text,
                 idempotency_key=idempotency_key,
                 request_id=request_id,
                 deadline=deadline,
+                complete_idempotency_scope="message",
             )
         if action == "challenge_revision":
             if topic_clarifying:
                 raise ConflictError("PROPOSAL_CHOICE_REQUIRED", "error.version_conflict")
-            if not proposal_id:
-                raise ValidationError("MISSING_PROPOSAL_ID", "error.validation_failed")
+            if has_active_dis or active_challenge is not None:
+                raise ConflictError("DISAGREEMENT_ACTIVE", "error.version_conflict")
+            if not assistant_turn_id and not proposal_id:
+                raise ValidationError("MISSING_CHALLENGE_SOURCE", "error.validation_failed")
             return await self._challenge_handler.start_challenge(
                 read_model=read_model,
+                assistant_turn_id=assistant_turn_id,
                 proposal_id=proposal_id,
                 user_text=clean_text or "Challenge this proposal",
                 idempotency_key=idempotency_key,
+                complete_idempotency_scope="message",
             )
         if request_proposal:
             if has_active_dis or active_challenge is not None:
@@ -298,6 +304,7 @@ class MessageOrchestrator:
                 idempotency_key=idempotency_key,
                 request_id=request_id,
                 deadline=deadline,
+                complete_idempotency_scope="message",
             )
         if action == "continue_challenge" or active_challenge is not None:
             if active_challenge is None:
@@ -311,6 +318,7 @@ class MessageOrchestrator:
                 request_id=request_id,
                 deadline=deadline,
                 proposal_pipeline=self._revision_handler.proposal_pipeline,
+                complete_idempotency_scope="message",
             )
 
         if topic_clarifying:
@@ -363,6 +371,7 @@ class MessageOrchestrator:
                         idempotency_key=idempotency_key,
                         request_id=request_id,
                         deadline=deadline,
+                        complete_idempotency_scope="message",
                     )
 
         recovery_task: dict[str, Any] | None = None
@@ -407,6 +416,7 @@ class MessageOrchestrator:
         idempotency_key: str,
         request_id: str,
         exc: Exception,
+        mark_key_failed: bool = False,
     ) -> None:
         code, retryable, details = classify_failure(exc)
         with self._db.write_tx() as conn:
@@ -422,6 +432,10 @@ class MessageOrchestrator:
                 now_iso=self._clock.utc_now(),
                 emit_reply_failure=isinstance(exc, (LLMError, TimeoutError)),
             )
+            if mark_key_failed:
+                self._operational_repo.complete_key_tx(
+                    conn, session_id, "message", idempotency_key, status="failed"
+                )
 
 
 def _find_active_challenge(

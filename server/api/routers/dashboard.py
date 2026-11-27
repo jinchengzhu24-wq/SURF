@@ -6,7 +6,7 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from server.api.deps import ContainerDep, DeletePasswordHeader
 from server.api.schemas import DeleteOnlineMatchRequest
@@ -67,4 +67,46 @@ async def export_study_logs(
         container.study_records_service.export_jsonl(record_type=record_type),
         media_type="application/x-ndjson",
         headers={"Content-Disposition": 'attachment; filename="study-logs.jsonl"'},
+    )
+
+
+@router.get("/export/matchmaking-research.jsonl")
+async def export_matchmaking_research(container: ContainerDep) -> StreamingResponse:
+    return StreamingResponse(
+        container.dashboard_service.export_matchmaking_research_jsonl(),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="matchmaking-research.jsonl"'},
+    )
+
+
+@router.get("/survey-analytics-data")
+async def get_survey_analytics_data(
+    container: ContainerDep,
+    scope: str = "active_matches",
+    survey_id: str | None = None,
+    survey_version: str | None = None,
+) -> dict[str, Any]:
+    return await container.dashboard_service.get_survey_analytics(
+        scope=scope,
+        survey_id=survey_id,
+        survey_version=survey_version,
+    )
+
+
+@router.get("/export/surveys.csv")
+async def export_surveys_csv(
+    container: ContainerDep,
+    scope: str = "active_matches",
+    survey_id: str | None = None,
+    survey_version: str | None = None,
+) -> Response:
+    csv_text, filename = await container.dashboard_service.export_surveys_csv(
+        scope=scope,
+        survey_id=survey_id,
+        survey_version=survey_version,
+    )
+    return Response(
+        content=csv_text.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

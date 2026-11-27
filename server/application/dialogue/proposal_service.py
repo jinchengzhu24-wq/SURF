@@ -19,6 +19,7 @@ from server.application.sessions import (
     request_digest,
     solve_stage_async,
 )
+from server.application.sessions.stage.stage_ops import supersede_active_stage_artifacts_tx
 from server.core.clock import SYSTEM_CLOCK, Clock
 from server.core.grid import map_fingerprint
 from server.core.llm_client import LLMError
@@ -39,7 +40,6 @@ from ._shared import (
     ACTIVE_CHALLENGE_STATUSES,
     check_completed_idempotency,
     classify_failure,
-    emit_dashboard_node_tx,
     record_message_failure_audit_tx,
     require_active_session,
     require_browser_session,
@@ -126,6 +126,7 @@ class ProposalService:
         if claim.outcome == "in_progress":
             raise ConflictError("PROPOSAL_DECISION_IN_PROGRESS", "error.version_conflict")
 
+        committed_in_tx = False
         try:
             if session.current_version_id != base_version_id:
                 raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
@@ -255,9 +256,11 @@ class ProposalService:
                         raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
                     conn.execute(
                         "UPDATE change_proposals "
-                        "SET status = 'accepted', decided_at = ?, decision_json = ? "
+                        "SET status = 'accepted', candidate_version_id = ?, decided_at = ?, "
+                        "decision_json = ? "
                         "WHERE proposal_id = ? AND status = 'pending'",
                         (
+                            new_vid,
                             now_iso,
                             dump_json(
                                 {
@@ -269,6 +272,7 @@ class ProposalService:
                             proposal_id,
                         ),
                     )
+                    supersede_active_stage_artifacts_tx(conn, session_id, now_iso)
                     append_audit_event_tx(
                         conn,
                         session_id,
@@ -304,7 +308,7 @@ class ProposalService:
                             "kind": "proposal_accept",
                             "proposalId": proposal_id,
                             "versionId": new_vid,
-                            "observation": summary,
+                            "observation": summary[:500],
                         },
                         now_iso,
                     )
@@ -327,32 +331,6 @@ class ProposalService:
                         is_demo=cur_session.is_demo,
                         session_id=session_id,
                         event=stage_ev,
-                        now_iso=now_iso,
-                    )
-                    emit_dashboard_node_tx(
-                        conn,
-                        self._room_sync,
-                        session=cur_session,
-                        version=base_ver,
-                        node_id=f"proposal:{proposal_id}",
-                        node_type="proposal",
-                        node_status="accepted",
-                        entries=[
-                            {
-                                "entryId": f"proposal-verified:{proposal_id}",
-                                "kind": "map_diff",
-                                "text": dump_json({"diff": diff, "validation": solved.as_dict()}),
-                                "label": "Verified proposal result",
-                                "occurredAt": now_iso,
-                            },
-                            {
-                                "entryId": f"proposal-action:{proposal_id}",
-                                "kind": "player_action",
-                                "text": f"Accepted candidate map · saved as Stage {new_num}",
-                                "label": "Player decision",
-                                "occurredAt": now_iso,
-                            },
-                        ],
                         now_iso=now_iso,
                     )
                 else:
@@ -392,41 +370,26 @@ class ProposalService:
                         {"proposalId": proposal_id, "baseVersionId": base_ver.version_id},
                         now_iso,
                     )
-                    emit_dashboard_node_tx(
-                        conn,
-                        self._room_sync,
-                        session=cur_session,
-                        version=base_ver,
-                        node_id=f"proposal:{proposal_id}",
-                        node_type="proposal",
-                        node_status="rejected",
-                        entries=[
-                            {
-                                "entryId": f"proposal-action:{proposal_id}",
-                                "kind": "player_action",
-                                "text": f"Rejected proposal ({reject_reason})",
-                                "label": "Player decision",
-                                "occurredAt": now_iso,
-                            }
-                        ],
-                        now_iso=now_iso,
-                    )
 
-            self._operational_repo.complete_key(
-                session_id,
-                "decide_proposal",
-                idempotency_key,
-                response={"proposalId": proposal_id, "versionId": new_vid},
-            )
+                self._operational_repo.complete_key_tx(
+                    conn,
+                    session_id,
+                    "decide_proposal",
+                    idempotency_key,
+                    response={"proposalId": proposal_id, "versionId": new_vid},
+                )
+            committed_in_tx = True
         except asyncio.CancelledError:
-            self._operational_repo.complete_key(
-                session_id, "decide_proposal", idempotency_key, status="failed"
-            )
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "decide_proposal", idempotency_key, status="failed"
+                )
             raise
         except Exception:
-            self._operational_repo.complete_key(
-                session_id, "decide_proposal", idempotency_key, status="failed"
-            )
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "decide_proposal", idempotency_key, status="failed"
+                )
             raise
         return await self._read_model.get_session_payload(session_id)
 
@@ -486,6 +449,7 @@ class ProposalService:
         if claim.outcome == "in_progress":
             raise ConflictError("BINARY_CHOICE_IN_PROGRESS", "error.version_conflict")
 
+        committed_in_tx = False
         try:
             read_model = self._sessions_repo.load_session_read_model(session_id)
             if read_model is None:
@@ -500,14 +464,18 @@ class ProposalService:
                 base_version_id=base_version_id,
                 display_language=display_language,
                 deadline=deadline,
+                complete_idempotency_scope="binary_choice",
             )
-            self._operational_repo.complete_key(
-                session_id, "binary_choice", idempotency_key, response=outcome
-            )
+            committed_in_tx = bool(outcome.pop("_idempotencyCompleted", False))
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "binary_choice", idempotency_key, response=outcome
+                )
         except asyncio.CancelledError:
-            self._operational_repo.complete_key(
-                session_id, "binary_choice", idempotency_key, status="failed"
-            )
+            if not committed_in_tx:
+                self._operational_repo.complete_key(
+                    session_id, "binary_choice", idempotency_key, status="failed"
+                )
             raise
         except Exception as exc:
             code, retryable, details = classify_failure(exc)
@@ -524,9 +492,10 @@ class ProposalService:
                     now_iso=self._clock.utc_now(),
                     emit_reply_failure=isinstance(exc, (LLMError, TimeoutError)),
                 )
-            self._operational_repo.complete_key(
-                session_id, "binary_choice", idempotency_key, status="failed"
-            )
+                if not committed_in_tx:
+                    self._operational_repo.complete_key_tx(
+                        conn, session_id, "binary_choice", idempotency_key, status="failed"
+                    )
             raise
         return await self._read_model.get_session_payload(session_id)
 

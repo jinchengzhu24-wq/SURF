@@ -6,6 +6,7 @@ import { DeleteMatchDialog } from "./components/DeleteMatchDialog";
 import { MatchDetail } from "./components/MatchDetail";
 import { MatchList } from "./components/MatchList";
 import { SummaryCards } from "./components/SummaryCards";
+import { SurveyAnalyticsView } from "./components/surveys/SurveyAnalyticsView";
 import { TopBar } from "./components/TopBar";
 import { createDashboardStore, type DashboardStore } from "./store";
 
@@ -37,6 +38,8 @@ export function App({
   }, [store, autoLoad, injectedStore]);
 
   const activeNotice = store.notice.value;
+  const activeTab = store.activeTab.value;
+  const surveyBadgeCount = store.surveyAnalytics.value?.totalResponses ?? null;
 
   return (
     <div class="app">
@@ -57,12 +60,59 @@ export function App({
           {store.statusLine.value}
         </div>
 
-        <SummaryCards store={store} />
+        <nav class="dashboard-tabs" aria-label="Dashboard views">
+          <div class="dashboard-tablist" role="tablist" aria-label="Dashboard sections">
+            <button
+              type="button"
+              role="tab"
+              id="dashboard-tab-matches"
+              aria-selected={activeTab === "matches" ? "true" : "false"}
+              aria-controls="dashboard-panel-matches"
+              class={`dashboard-tab${activeTab === "matches" ? " selected" : ""}`}
+              onClick={() => store.setActiveTab("matches")}
+            >
+              Matches &amp; Sessions
+            </button>
 
-        <section class="workspace" aria-label="Match explorer">
-          <MatchList store={store} />
-          <MatchDetail store={store} />
-        </section>
+            <button
+              type="button"
+              role="tab"
+              id="dashboard-tab-surveys"
+              aria-selected={activeTab === "surveys" ? "true" : "false"}
+              aria-controls="dashboard-panel-surveys"
+              class={`dashboard-tab${activeTab === "surveys" ? " selected" : ""}`}
+              onClick={() => store.setActiveTab("surveys")}
+            >
+              <span>Survey Analytics</span>
+              {surveyBadgeCount !== null ? (
+                <span class="tab-badge">{surveyBadgeCount}</span>
+              ) : null}
+            </button>
+          </div>
+        </nav>
+
+        {activeTab === "matches" ? (
+          <div
+            role="tabpanel"
+            id="dashboard-panel-matches"
+            aria-labelledby="dashboard-tab-matches"
+          >
+            <SummaryCards store={store} />
+
+            <section class="workspace" aria-label="Match explorer">
+              <MatchList store={store} />
+              <MatchDetail store={store} />
+            </section>
+          </div>
+        ) : (
+          <div
+            role="tabpanel"
+            id="dashboard-panel-surveys"
+            aria-labelledby="dashboard-tab-surveys"
+          >
+            <SurveyAnalyticsView store={store} />
+          </div>
+        )}
       </main>
 
       <DeleteMatchDialog store={store} />

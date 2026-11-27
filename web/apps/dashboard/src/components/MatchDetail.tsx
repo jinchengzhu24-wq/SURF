@@ -11,6 +11,7 @@ import { ChallengeMapPanel } from "./ChallengeMapPanel";
 import { CopyIdControl } from "./CopyIdControl";
 import { PlayerFlowTimeline } from "./PlayerFlowTimeline";
 import { StageInspector } from "./StageInspector";
+import { MatchSurveysPanel } from "./surveys/MatchSurveysPanel";
 
 export interface MatchDetailProps {
   store: DashboardStore;
@@ -28,8 +29,11 @@ export function MatchDetail({ store }: MatchDetailProps): JSX.Element {
           </div>
           <h2>Select a match</h2>
           <p>
-            Choose a room on the left to inspect players, submitted challenges,
-            results, and questionnaires.
+            Choose a room on the left to inspect players, co-creation flows,
+            submitted challenges, and play results. Online1/Online2
+            questionnaires are hosted at /survey/, linked to each player via
+            Study Session ID (and Match ID post-match), and included in
+            /export/matchmaking-research.jsonl.
           </p>
         </div>
       </section>
@@ -88,6 +92,8 @@ export function MatchDetail({ store }: MatchDetailProps): JSX.Element {
         </section>
 
         <ChallengeCompare store={store} />
+
+        <MatchSurveysPanel match={match} />
       </div>
     </section>
   );

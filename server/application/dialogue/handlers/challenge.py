@@ -9,6 +9,7 @@ from typing import Any
 from server.application.sessions import (
     RoomSyncWriter,
     append_audit_event_tx,
+    build_disagreement_audit_summary,
     solve_stage_async,
 )
 from server.core.clock import Clock
@@ -22,19 +23,24 @@ from server.i18n.messages import format_solver_delta_notice, get_message
 from server.llm.pipelines.proposal import ProposalPipeline
 from server.llm.pipelines.understanding import UnderstandingPipeline
 from server.persistence.database import SQLiteDatabase, dump_json, load_json
-from server.persistence.models import RevisionChallengeRecord, SessionReadModel
+from server.persistence.models import (
+    ChangeProposalRecord,
+    ConversationTurnRecord,
+    LevelVersionRecord,
+    RevisionChallengeRecord,
+    SessionReadModel,
+)
+from server.persistence.repositories.operational_repo import OperationalRepository
 
 from .._shared import (
     apply_transitions_to_rows,
     build_proposal_offer_and_binding,
-    build_turn_cards,
     classify_failure,
-    emit_dashboard_node_tx,
-    emit_turn_room_event_tx,
     generate_safe_failure_analysis,
     insert_turn_tx,
     require_current_version_tx,
 )
+from .revision_card import _collect_excluded_fingerprints, _proposal_review_guidance
 
 CHALLENGE_CARD_SCHEMA_VERSION = 2
 
@@ -91,6 +97,13 @@ def _challenge_state(
     }
 
 
+def _challenge_disagreement_audit_summary(
+    disagreement: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return structured metadata for challenge audits without duplicating long prose."""
+    return build_disagreement_audit_summary(disagreement)
+
+
 class ChallengeHandler:
     """Handles proposal challenges and schema-v2 reason/choice flows."""
 
@@ -109,29 +122,131 @@ class ChallengeHandler:
         self._room_sync = room_sync
         self._clock = clock
 
+    def _resolve_start_target(
+        self,
+        read_model: SessionReadModel,
+        current_ver: LevelVersionRecord,
+        *,
+        assistant_turn_id: str | None,
+        proposal_id: str | None,
+    ) -> tuple[str, str, ChangeProposalRecord | None]:
+        """Resolve the challenged purple offer turn (or explicit pending proposal)."""
+        proposal: ChangeProposalRecord | None = None
+        if proposal_id:
+            proposal = next(
+                (p for p in read_model.proposals if p.proposal_id == proposal_id), None
+            )
+            if proposal is None or proposal.status != "pending":
+                raise NotFoundError("PROPOSAL_NOT_FOUND", "error.version_conflict")
+            if proposal.base_version_id != current_ver.version_id:
+                raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
+            source_turn = next(
+                (t for t in read_model.turns if t.turn_id == proposal.assistant_turn_id), None
+            )
+            summary = str(
+                proposal.proposal.get("summary")
+                or (
+                    ((source_turn.guidance or {}).get("proposalOffer") or {}).get("summary")
+                    if source_turn is not None
+                    else ""
+                )
+                or ""
+            )
+            return proposal.assistant_turn_id, summary, proposal
+
+        if not assistant_turn_id:
+            raise ValidationError("MISSING_CHALLENGE_SOURCE", "error.validation_failed")
+        source_turn = next(
+            (t for t in read_model.turns if t.turn_id == assistant_turn_id), None
+        )
+        if source_turn is None:
+            raise NotFoundError("TURN_NOT_FOUND", "error.version_conflict")
+        target_offer = (source_turn.guidance or {}).get("proposalOffer")
+        binding = source_turn.proposal_binding
+        if (
+            source_turn.role != "assistant"
+            or not isinstance(target_offer, Mapping)
+            or not str(target_offer.get("summary") or "").strip()
+            or not isinstance(binding, Mapping)
+            or not isinstance(binding.get("executionBrief"), Mapping)
+        ):
+            raise ConflictError("INVALID_CARD_SOURCE", "error.version_conflict")
+        available_actions = target_offer.get("availableActions")
+        if isinstance(available_actions, list) and "challenge_revision" not in available_actions:
+            raise ConflictError("INVALID_CARD_SOURCE", "error.version_conflict")
+        brief = binding["executionBrief"]
+        if not list(brief.get("requiredTransitions") or ()):
+            raise ConflictError("INVALID_CARD_SOURCE", "error.version_conflict")
+
+        latest_offer_turn_id = next(
+            (
+                t.turn_id
+                for t in reversed(read_model.turns)
+                if t.role == "assistant"
+                and t.version_id == current_ver.version_id
+                and isinstance((t.guidance or {}).get("proposalOffer"), Mapping)
+                and str((t.guidance or {}).get("proposalOffer", {}).get("summary") or "").strip()
+            ),
+            None,
+        )
+        if (
+            source_turn.version_id != current_ver.version_id
+            or source_turn.turn_id != latest_offer_turn_id
+        ):
+            raise ConflictError("PROPOSAL_STALE", "error.version_conflict")
+        if binding.get("baseVersionId") != current_ver.version_id:
+            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
+        expected_fp = binding.get("mapFingerprint")
+        if expected_fp and map_fingerprint(current_ver.rows) != expected_fp:
+            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
+        expected_bfp = binding.get("entityBindingFingerprint")
+        actual_bfp = (current_ver.entity_bindings or {}).get("bindingFingerprint")
+        if not expected_bfp or not actual_bfp or expected_bfp != actual_bfp:
+            raise ConflictError("STALE_REVISION_BINDING", "error.version_conflict")
+        if str(binding.get("status") or "active") not in {"active", "ready"}:
+            raise ConflictError("PROPOSAL_STALE", "error.version_conflict")
+
+        matching_prop = next(
+            (
+                p
+                for p in reversed(read_model.proposals)
+                if p.assistant_turn_id == source_turn.turn_id
+                and p.base_version_id == current_ver.version_id
+                and p.status == "pending"
+            ),
+            None,
+        )
+        summary = str(target_offer.get("summary") or brief.get("summary") or "")
+        return source_turn.turn_id, summary, matching_prop
+
     async def start_challenge(
         self,
         *,
         read_model: SessionReadModel,
-        proposal_id: str,
         user_text: str,
         idempotency_key: str,
+        assistant_turn_id: str | None = None,
+        proposal_id: str | None = None,
+        complete_idempotency_scope: str | None = None,
     ) -> dict[str, Any]:
-        """Start a challenge against an active pending proposal."""
+        """Start a challenge against an active purple proposal offer (or pending proposal)."""
         session = read_model.session
-        proposal = next(
-            (p for p in read_model.proposals if p.proposal_id == proposal_id), None
+        current_ver = next(
+            (v for v in read_model.versions if v.version_id == session.current_version_id), None
         )
-        if proposal is None or proposal.status != "pending":
-            raise NotFoundError("PROPOSAL_NOT_FOUND", "error.version_conflict")
-        if proposal.base_version_id != session.current_version_id:
+        if current_ver is None:
             raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
+        source_turn_id, proposal_summary, proposal = self._resolve_start_target(
+            read_model,
+            current_ver,
+            assistant_turn_id=assistant_turn_id,
+            proposal_id=proposal_id,
+        )
 
         challenge_id = f"chg_{uuid.uuid4().hex[:16]}"
         now_iso = self._clock.utc_now()
         user_turn_id = uuid.uuid4().hex
-        assistant_turn_id = uuid.uuid4().hex
-        proposal_summary = str(proposal.proposal.get("summary") or "")
+        new_assistant_turn_id = uuid.uuid4().hex
         user_pos = user_text.strip()[:400] or (
             "Challenge this proposal" if session.language != "zh-CN" else "质疑当前修改方案"
         )
@@ -160,16 +275,14 @@ class ChallengeHandler:
             "displayCard": True,
             "resolution": None,
         }
-        challenge_state = _challenge_state(
-            challenge_id, "awaiting_reason", proposal.assistant_turn_id, []
-        )
-        challenge_card = {
+        challenge_state = _challenge_state(challenge_id, "awaiting_reason", source_turn_id, [])
+        challenge_card: dict[str, Any] = {
             "challengeId": challenge_id,
-            "proposalId": proposal_id,
-            "sourceTurnId": proposal.assistant_turn_id,
+            "sourceTurnId": source_turn_id,
             "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
             "status": "awaiting_reason",
             "choices": [],
+            **({"proposalId": proposal.proposal_id} if proposal is not None else {}),
         }
         guidance = {
             "move": "offer_perspective",
@@ -178,15 +291,19 @@ class ChallengeHandler:
             "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
             "challengeCard": challenge_card,
         }
+        result_payload: dict[str, Any] = {
+            "challengeId": challenge_id,
+            "assistantTurnId": new_assistant_turn_id,
+        }
 
         with self._db.write_tx() as conn:
             cur_session, cur_ver = require_current_version_tx(
-                conn, session.session_id, proposal.base_version_id, clock=self._clock
+                conn, session.session_id, current_ver.version_id, clock=self._clock
             )
             _update_turn_binding_status_tx(
                 conn,
                 session_id=cur_session.session_id,
-                turn_id=proposal.assistant_turn_id,
+                turn_id=source_turn_id,
                 status="challenged",
             )
             insert_turn_tx(
@@ -202,7 +319,7 @@ class ChallengeHandler:
             )
             insert_turn_tx(
                 conn,
-                turn_id=assistant_turn_id,
+                turn_id=new_assistant_turn_id,
                 session_id=cur_session.session_id,
                 request_id=idempotency_key,
                 role="assistant",
@@ -222,8 +339,8 @@ class ChallengeHandler:
                     challenge_id,
                     cur_session.session_id,
                     cur_ver.version_id,
-                    proposal.assistant_turn_id,
-                    assistant_turn_id,
+                    source_turn_id,
+                    new_assistant_turn_id,
                     now_iso,
                     now_iso,
                 ),
@@ -233,7 +350,7 @@ class ChallengeHandler:
                 ensure_design_context(cur_ver.design_context),
                 ctx_dis,
                 cur_ver.version_id,
-                assistant_turn_id,
+                new_assistant_turn_id,
             )
             conn.execute(
                 "UPDATE level_versions SET design_context_json = ? "
@@ -246,53 +363,25 @@ class ChallengeHandler:
                 "disagreement_started",
                 {
                     "challengeId": challenge_id,
-                    "proposalId": proposal_id,
+                    "sourceTurnId": source_turn_id,
+                    **({"proposalId": proposal.proposal_id} if proposal is not None else {}),
                     "versionId": cur_ver.version_id,
-                    "disagreement": disagreement,
+                    "subject": "ai_revision_challenge",
+                    "disagreement": _challenge_disagreement_audit_summary(disagreement),
                 },
                 now_iso,
             )
-            emit_turn_room_event_tx(
-                conn,
-                self._room_sync,
-                session=cur_session,
-                version=cur_ver,
-                user_turn_id=user_turn_id,
-                assistant_turn_id=assistant_turn_id,
-                user_text=user_text,
-                assistant_text=next_q,
-                cards=build_turn_cards(guidance),
-                now_iso=now_iso,
-            )
-            emit_dashboard_node_tx(
-                conn,
-                self._room_sync,
-                session=cur_session,
-                version=cur_ver,
-                node_id=f"player-challenge:{challenge_id}",
-                node_type="player_challenge",
-                node_status="awaiting_reason",
-                entries=[
-                    {
-                        "entryId": f"challenge-action:{challenge_id}",
-                        "kind": "player_action",
-                        "text": "Challenge this plan",
-                        "label": "Player action",
-                        "occurredAt": now_iso,
-                        "language": cur_session.language,
-                    },
-                    {
-                        "entryId": f"llm:{assistant_turn_id}",
-                        "kind": "llm_message",
-                        "text": next_q,
-                        "label": "LLM",
-                        "occurredAt": now_iso,
-                        "language": cur_session.language,
-                    },
-                ],
-                now_iso=now_iso,
-            )
-        return {"challengeId": challenge_id, "assistantTurnId": assistant_turn_id}
+            if complete_idempotency_scope:
+                OperationalRepository.complete_key_tx(
+                    conn,
+                    cur_session.session_id,
+                    complete_idempotency_scope,
+                    idempotency_key,
+                    response=result_payload,
+                )
+        if complete_idempotency_scope:
+            return {**result_payload, "_idempotencyCompleted": True}
+        return result_payload
 
     async def continue_challenge(
         self,
@@ -306,18 +395,30 @@ class ChallengeHandler:
         deadline: float | None = None,
         exit_challenge: bool = False,
         proposal_pipeline: ProposalPipeline | None = None,
+        complete_idempotency_scope: str | None = None,
     ) -> dict[str, Any]:
-        """Review challenge reason, resolve keep/cancel, or build alternative on revise."""
+        """Review challenge reason, resolve keep/cancel, or build replacement offer on revise."""
         session = read_model.session
+        current_ver = next(
+            (v for v in read_model.versions if v.version_id == challenge.base_version_id), None
+        )
+        if current_ver is None:
+            raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
+
+        source_turn: ConversationTurnRecord | None = next(
+            (t for t in read_model.turns if t.turn_id == challenge.source_proposal_turn_id),
+            None,
+        )
         proposal = next(
             (
                 p
-                for p in read_model.proposals
+                for p in reversed(read_model.proposals)
                 if p.assistant_turn_id == challenge.source_proposal_turn_id
+                and p.base_version_id == challenge.base_version_id
             ),
             None,
         )
-        if proposal is None:
+        if source_turn is None and proposal is None:
             proposal = next(
                 (
                     p
@@ -326,74 +427,136 @@ class ChallengeHandler:
                 ),
                 None,
             )
-        if proposal is None:
+        if source_turn is None and proposal is None:
             raise NotFoundError("PROPOSAL_NOT_FOUND", "error.version_conflict")
 
-        current_ver = next(
-            (v for v in read_model.versions if v.version_id == challenge.base_version_id), None
-        )
-        if current_ver is None:
-            raise ConflictError("VERSION_CONFLICT", "error.version_conflict")
-
+        source_offer = (source_turn.guidance or {}).get("proposalOffer") if source_turn else None
+        source_binding = (source_turn.proposal_binding if source_turn else None) or {}
         now_iso = self._clock.utc_now()
         user_turn_id = uuid.uuid4().hex
         assistant_turn_id = uuid.uuid4().hex
         model, attempts_used, latency_ms = "", 0, 0
+        search_exhausted = False
         reviews = list(challenge.reviews or ())
-        proposal_summary = str(proposal.proposal.get("summary") or "")
+        proposal_summary = str(
+            (source_offer.get("summary") if isinstance(source_offer, Mapping) else None)
+            or ((source_binding.get("executionBrief") or {}).get("summary"))
+            or (proposal.proposal.get("summary") if proposal is not None else "")
+            or ""
+        )
         active_dis_ctx: Mapping[str, Any] = (
             (current_ver.design_context or {}).get("activeDisagreement") or {}
         )
         effective_choice = "cancel_challenge" if exit_challenge else choice
-        new_proposal_payload: dict[str, Any] | None = None
+        executed_proposal_payload: dict[str, Any] | None = None
+        replacement_offer_generated = False
         new_binding: dict[str, Any] | None = None
         disagreement_event_type = "disagreement_updated"
+        prop_id_extra = {"proposalId": proposal.proposal_id} if proposal is not None else {}
 
         if effective_choice:
             if effective_choice not in {"keep_proposal", "revise_proposal", "cancel_challenge"}:
                 raise ValidationError("INVALID_CHALLENGE_CHOICE", "error.validation_failed")
+            next_status = "resolved"
+            disagreement_event_type = "disagreement_resolved"
+
             if effective_choice == "keep_proposal":
                 if challenge.status not in {"awaiting_choice", "choice_pending"}:
                     raise ConflictError("CHALLENGE_NOT_READY", "error.version_conflict")
-                source_turn = next(
-                    (
-                        t
-                        for t in read_model.turns
-                        if t.turn_id == challenge.source_proposal_turn_id
-                    ),
-                    None,
-                )
-                source_binding = (source_turn.proposal_binding if source_turn else None) or {}
                 transitions = list(
                     ((source_binding.get("executionBrief") or {}).get("requiredTransitions"))
                     or ()
                 )
-                proposed_rows = list(proposal.proposal.get("proposedRows") or ())
+                proposed_rows = (
+                    list(proposal.proposal.get("proposedRows") or ()) if proposal else []
+                )
                 if transitions:
                     replay_rows = apply_transitions_to_rows(current_ver.rows, transitions)
                 elif proposed_rows:
                     replay_rows = proposed_rows
                 else:
                     raise ConflictError("INVALID_CARD_SOURCE", "error.version_conflict")
-                await solve_stage_async(replay_rows, clock=self._clock)
-
-            next_status = "resolved"
-            disagreement_event_type = "disagreement_resolved"
-            if effective_choice == "revise_proposal":
+                solved = await solve_stage_async(replay_rows, clock=self._clock)
+                diff = describe_diff(current_ver.rows, solved.rows)
+                notice = format_solver_delta_notice(current_ver.solver, solved, session.language)
+                model = "deterministic"
+                executed_proposal_payload = {
+                    "proposedRows": list(solved.rows),
+                    "summary": proposal_summary or "Revision proposal",
+                    "diff": diff,
+                    "validation": solved.as_dict(),
+                    "requirementRecord": (
+                        source_binding.get("requirementRecord")
+                        if source_binding.get("requirementRecord") is not None
+                        else (
+                            proposal.proposal.get("requirementRecord")
+                            if proposal is not None
+                            else None
+                        )
+                    ),
+                    "revisionPlan": (
+                        source_binding.get("revisionPlan")
+                        if source_binding.get("revisionPlan") is not None
+                        else (
+                            proposal.proposal.get("revisionPlan")
+                            if proposal is not None
+                            else None
+                        )
+                    ),
+                    "tradeoffNotice": notice,
+                    "source": "challenge_keep_proposal",
+                }
+                if source_binding:
+                    new_binding = {
+                        **dict(source_binding),
+                        "sourceOfferTurnId": challenge.source_proposal_turn_id,
+                        "status": "active",
+                    }
+                assistant_text = notice or (
+                    "Understood. I drafted the original suggestion for your review."
+                    if session.language != "zh-CN"
+                    else "明白，我已按原方案生成待确认修改供你审查。"
+                )
+                review_guidance = _proposal_review_guidance(session.language)
+                guidance: dict[str, Any] = {
+                    **review_guidance,
+                    "disagreement": {
+                        **dict(active_dis_ctx),
+                        "status": "resolved",
+                        "subject": "ai_revision_challenge",
+                        "challengeId": challenge.challenge_id,
+                        "resolution": "ai",
+                        "displayCard": False,
+                        "nextQuestion": None,
+                    },
+                    "challengeState": _challenge_state(
+                        challenge.challenge_id,
+                        "resolved",
+                        challenge.source_proposal_turn_id,
+                        [],
+                    ),
+                    "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
+                    "challengeCard": {
+                        "challengeId": challenge.challenge_id,
+                        **prop_id_extra,
+                        "sourceTurnId": challenge.source_proposal_turn_id,
+                        "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
+                        "status": "resolved",
+                        "selectedChoice": effective_choice,
+                        "choices": [],
+                    },
+                }
+            elif effective_choice == "revise_proposal":
+                if challenge.status not in {"awaiting_choice", "choice_pending"}:
+                    raise ConflictError("CHALLENGE_NOT_READY", "error.version_conflict")
                 active_prop_pipe = proposal_pipeline or self._proposal_pipeline
                 if active_prop_pipe is None:
                     raise ConflictError("LLM_UNAVAILABLE", "error.configuration")
-                excluded_fps = [
-                    map_fingerprint(p.proposal.get("proposedRows") or ())
-                    for p in read_model.proposals
-                    if p.base_version_id == current_ver.version_id
-                    and p.proposal.get("proposedRows")
-                ]
-                if proposal.proposal.get("proposedRows"):
+                excluded_fps = _collect_excluded_fingerprints(read_model, current_ver)
+                if proposal is not None and proposal.proposal.get("proposedRows"):
                     challenged_fp = map_fingerprint(proposal.proposal["proposedRows"])
                     if challenged_fp not in excluded_fps:
                         excluded_fps.append(challenged_fp)
-                excluded_fps.append(map_fingerprint(current_ver.rows))
                 reason_bits = [
                     str(r.get("reason") or "").strip()
                     for r in reviews
@@ -425,6 +588,9 @@ class ChallengeHandler:
                         request_id=request_id or idempotency_key,
                     )
                 except ProposalSearchExhausted as exc:
+                    search_exhausted = True
+                    model = active_prop_pipe.model
+                    attempts_used = int((exc.diagnostics or {}).get("attemptsUsed") or 0)
                     assistant_text = await generate_safe_failure_analysis(
                         active_prop_pipe,
                         rows=current_ver.rows,
@@ -437,7 +603,7 @@ class ChallengeHandler:
                         deadline=deadline,
                         request_id=request_id or idempotency_key,
                     )
-                    guidance: dict[str, Any] = {
+                    guidance = {
                         "move": "offer_perspective",
                         "disagreement": {
                             **dict(active_dis_ctx),
@@ -457,7 +623,7 @@ class ChallengeHandler:
                         "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
                         "challengeCard": {
                             "challengeId": challenge.challenge_id,
-                            "proposalId": proposal.proposal_id,
+                            **prop_id_extra,
                             "sourceTurnId": challenge.source_proposal_turn_id,
                             "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
                             "status": "resolved",
@@ -467,7 +633,6 @@ class ChallengeHandler:
                     }
                 else:
                     candidate_rows = list(prop_res.candidate_grid.rows)
-                    diff = describe_diff(current_ver.rows, candidate_rows)
                     notice = prop_res.tradeoff_notice or format_solver_delta_notice(
                         current_ver.solver, prop_res.solve_result, session.language
                     )
@@ -485,16 +650,9 @@ class ChallengeHandler:
                         solve_result=prop_res.solve_result.as_dict(),
                         request_text=brief,
                     )
-                    new_proposal_payload = {
-                        "proposedRows": candidate_rows,
-                        "summary": summary,
-                        "diff": diff,
-                        "validation": prop_res.solve_result.as_dict(),
-                        "requirementRecord": prop_res.requirement_record,
-                        "revisionPlan": prop_res.revision_plan,
-                        "tradeoffNotice": notice,
-                        "source": prop_res.source,
-                    }
+                    new_binding["requirementRecord"] = prop_res.requirement_record
+                    new_binding["revisionPlan"] = prop_res.revision_plan
+                    replacement_offer_generated = True
                     model = active_prop_pipe.model
                     attempts_used = prop_res.attempts_used
                     latency_ms = prop_res.latency_ms
@@ -519,7 +677,7 @@ class ChallengeHandler:
                         "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
                         "challengeCard": {
                             "challengeId": challenge.challenge_id,
-                            "proposalId": proposal.proposal_id,
+                            **prop_id_extra,
                             "sourceTurnId": challenge.source_proposal_turn_id,
                             "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
                             "status": "resolved",
@@ -528,9 +686,7 @@ class ChallengeHandler:
                         },
                     }
             else:
-                resolution_label = (
-                    "ai" if effective_choice == "keep_proposal" else "retain_current"
-                )
+                model = "deterministic"
                 assistant_text = (
                     "Understood. Let's continue with your selected direction."
                     if session.language != "zh-CN"
@@ -543,7 +699,7 @@ class ChallengeHandler:
                         "status": "resolved",
                         "subject": "ai_revision_challenge",
                         "challengeId": challenge.challenge_id,
-                        "resolution": resolution_label,
+                        "resolution": "retain_current",
                         "displayCard": False,
                         "nextQuestion": None,
                     },
@@ -556,7 +712,7 @@ class ChallengeHandler:
                     "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
                     "challengeCard": {
                         "challengeId": challenge.challenge_id,
-                        "proposalId": proposal.proposal_id,
+                        **prop_id_extra,
                         "sourceTurnId": challenge.source_proposal_turn_id,
                         "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
                         "status": "resolved",
@@ -640,7 +796,7 @@ class ChallengeHandler:
             )
             challenge_card = {
                 "challengeId": challenge.challenge_id,
-                "proposalId": proposal.proposal_id,
+                **prop_id_extra,
                 "sourceTurnId": challenge.source_proposal_turn_id,
                 "challengeCardSchemaVersion": CHALLENGE_CARD_SCHEMA_VERSION,
                 "status": "choice_pending",
@@ -683,14 +839,7 @@ class ChallengeHandler:
                 "WHERE session_id = ? AND version_id = ?",
                 (dump_json(next_ctx.to_wire_dict()), cur_session.session_id, cur_ver.version_id),
             )
-            if effective_choice == "keep_proposal":
-                _update_turn_binding_status_tx(
-                    conn,
-                    session_id=cur_session.session_id,
-                    turn_id=challenge.source_proposal_turn_id,
-                    status="active",
-                )
-            elif effective_choice in {"cancel_challenge", "revise_proposal"}:
+            if effective_choice in {"keep_proposal", "cancel_challenge", "revise_proposal"}:
                 conn.execute(
                     "UPDATE change_proposals SET status = 'superseded', decided_at = ? "
                     "WHERE session_id = ? AND status = 'pending'",
@@ -731,7 +880,7 @@ class ChallengeHandler:
                 latency_ms=latency_ms,
             )
             new_proposal_id: str | None = None
-            if new_proposal_payload is not None:
+            if executed_proposal_payload is not None:
                 new_proposal_id = uuid.uuid4().hex
                 conn.execute(
                     "INSERT INTO change_proposals("
@@ -743,7 +892,7 @@ class ChallengeHandler:
                         cur_session.session_id,
                         cur_ver.version_id,
                         assistant_turn_id,
-                        dump_json(new_proposal_payload),
+                        dump_json(executed_proposal_payload),
                         now_iso,
                     ),
                 )
@@ -770,11 +919,19 @@ class ChallengeHandler:
                     "versionId": cur_ver.version_id,
                     "status": next_status,
                     "choice": effective_choice,
-                    "disagreement": guidance.get("disagreement"),
+                    "subject": "ai_revision_challenge",
+                    "disagreement": _challenge_disagreement_audit_summary(
+                        guidance.get("disagreement")
+                    ),
                     **({"proposalId": new_proposal_id} if new_proposal_id else {}),
                 },
                 now_iso,
             )
+            verified_proposal = (
+                new_proposal_id is not None or replacement_offer_generated
+            )
+            proposal_requested = effective_choice in {"keep_proposal", "revise_proposal"}
+            deterministic_receipt = effective_choice in {"keep_proposal", "cancel_challenge"}
             append_audit_event_tx(
                 conn,
                 cur_session.session_id,
@@ -785,86 +942,35 @@ class ChallengeHandler:
                     "task": "challenge",
                     "baseVersionId": cur_ver.version_id,
                     "challengeId": challenge.challenge_id,
-                    "modelGenerationSucceeded": True,
+                    "modelGenerationSucceeded": not search_exhausted and not deterministic_receipt,
+                    "deterministicReceipt": deterministic_receipt,
                     "reliableBodyDelivered": True,
-                    "fullQualityPassed": True,
-                    "verifiedProposal": new_proposal_id is not None,
+                    "fullQualityPassed": not search_exhausted,
+                    "verifiedProposal": verified_proposal,
+                    "proposalRequested": proposal_requested,
+                    "attemptsUsed": attempts_used,
                     "latencyMs": latency_ms,
+                    **(
+                        {"failureCode": "PROPOSAL_SEARCH_EXHAUSTED"}
+                        if search_exhausted
+                        else {}
+                    ),
                 },
                 now_iso,
             )
-            cards = build_turn_cards(guidance)
-            emit_turn_room_event_tx(
-                conn,
-                self._room_sync,
-                session=cur_session,
-                version=cur_ver,
-                user_turn_id=user_turn_id,
-                assistant_turn_id=assistant_turn_id,
-                user_text=visible_user,
-                assistant_text=assistant_text,
-                cards=cards,
-                now_iso=now_iso,
-            )
-            challenge_entries = [
-                {
-                    "entryId": f"player:{user_turn_id}",
-                    "kind": "player_message",
-                    "text": visible_user,
-                    "label": "Player",
-                    "occurredAt": now_iso,
-                    "language": cur_session.language,
-                },
-                {
-                    "entryId": f"llm:{assistant_turn_id}",
-                    "kind": "llm_message",
-                    "text": assistant_text,
-                    "label": "LLM",
-                    "occurredAt": now_iso,
-                    "language": cur_session.language,
-                },
-            ]
-            emit_dashboard_node_tx(
-                conn,
-                self._room_sync,
-                session=cur_session,
-                version=cur_ver,
-                node_id=f"player-challenge:{challenge.challenge_id}",
-                node_type="player_challenge",
-                node_status=(
-                    "choice_pending" if next_status == "awaiting_choice" else next_status
-                ),
-                entries=challenge_entries,
-                now_iso=now_iso,
-            )
-            if new_proposal_id is not None and new_proposal_payload is not None:
-                emit_dashboard_node_tx(
+            result_payload = {
+                "challengeId": challenge.challenge_id,
+                "status": next_status,
+                **({"proposalId": new_proposal_id} if new_proposal_id else {}),
+            }
+            if complete_idempotency_scope:
+                OperationalRepository.complete_key_tx(
                     conn,
-                    self._room_sync,
-                    session=cur_session,
-                    version=cur_ver,
-                    node_id=f"proposal:challenge:{challenge.challenge_id}",
-                    node_type="proposal",
-                    node_status="proposal_ready",
-                    node_parent_id=f"player-challenge:{challenge.challenge_id}",
-                    entries=[
-                        {
-                            "entryId": f"proposal-verified:{new_proposal_id}",
-                            "kind": "map_diff",
-                            "text": dump_json(
-                                {
-                                    "diff": new_proposal_payload["diff"],
-                                    "validation": new_proposal_payload["validation"],
-                                }
-                            ),
-                            "label": "Verified proposal result",
-                            "occurredAt": now_iso,
-                        }
-                    ],
-                    now_iso=now_iso,
+                    cur_session.session_id,
+                    complete_idempotency_scope,
+                    idempotency_key,
+                    response=result_payload,
                 )
-        return {
-            "challengeId": challenge.challenge_id,
-            "status": next_status,
-            **({"proposalId": new_proposal_id} if new_proposal_id else {}),
-        }
+        if complete_idempotency_scope:
+            return {**result_payload, "_idempotencyCompleted": True}
+        return result_payload

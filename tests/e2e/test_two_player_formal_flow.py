@@ -161,7 +161,7 @@ async def test_full_two_player_formal_study_journey_and_in_process_acid_sync(
         v2 = saved["currentVersionId"]
         assert v2 != v1
 
-        # 6. Policy-2 binary discovery -> choice -> accept proposal -> Stage 3
+        # 6. Policy-2 binary discovery -> choice (offer) -> execute_revision -> accept -> Stage 3
         bundle.cocreation_transport.queue(
             make_binary_ask_json,
             make_binary_plan_json(),
@@ -196,7 +196,24 @@ async def test_full_two_player_formal_study_journey_and_in_process_acid_sync(
                 },
             )
         ).json()
-        prop_id = planned["proposals"][0]["proposalId"]
+        assert planned["proposals"] == []
+        offer_turn = planned["turns"][-1]
+        assert isinstance(offer_turn["guidance"].get("proposalOffer"), dict)
+
+        executed = (
+            await client.post(
+                f"/api/sessions/{sid}/messages",
+                json={
+                    "content": "Draft this suggestion",
+                    "baseVersionId": v2,
+                    "idempotencyKey": "e2e-exec-rev",
+                    "action": "execute_revision",
+                    "sourceTurnId": offer_turn["turnId"],
+                },
+            )
+        ).json()
+        assert not executed["turns"][-1]["guidance"].get("proposalOffer")
+        prop_id = executed["proposals"][0]["proposalId"]
         accepted = (
             await client.post(
                 f"/api/sessions/{sid}/proposals/{prop_id}/decision",
@@ -280,7 +297,13 @@ async def test_full_two_player_formal_study_journey_and_in_process_acid_sync(
         assert any(
             ev.get("eventType") == "final" and ev.get("rows") == final_rows for ev in p1_flow
         )
-        assert any(ev.get("eventType") == "turn" for ev in p1_flow)
+        assert not any(ev.get("eventType") == "turn" for ev in p1_flow)
+        assert any(
+            ev.get("eventType") == "node"
+            and ev.get("nodeType") == "proposal"
+            and ev.get("nodeStatus") == "accepted"
+            for ev in p1_flow
+        )
 
         # 10. Study telemetry + JSONL export + Cross-player Challenge & Result
         assert (

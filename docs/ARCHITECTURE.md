@@ -9,10 +9,11 @@ flowchart TD
     Browser["Browser / Unity WebGL Client (/game/ + sokoban-bridge.js v5)"]
     DashboardUI["Matchmaking Dashboard (/frontend/)"]
     CoCreationUI["Co-Creation Workbench (/cocreation/ iframe or demo)"]
+    SurveyUI["Bilingual Survey App (/survey/)"]
     Nginx["Nginx Reverse Proxy (deploy/nginx-sokoban.conf)"]
 
     subgraph UnifiedServer["Unified FastAPI Server (server/main.py create_app --factory :8000)"]
-        Static["Static Mounts (/game/, /frontend/, /cocreation/)"]
+        Static["Static Mounts (/game/, /frontend/, /cocreation/, /survey/)"]
         OnlineAPI["Online Matchmaking, DG, Study & Dashboard API"]
         CoCreationAPI["Co-Creation API (/api/* & /cocreation/api/*)"]
         Application["Application Layer (server/application/) - In-Process ACID Sync"]
@@ -30,6 +31,7 @@ flowchart TD
     Browser --> Nginx
     DashboardUI --> Nginx
     CoCreationUI --> Nginx
+    SurveyUI --> Nginx
     Nginx -->|"Single upstream 127.0.0.1:8000"| Static
     Nginx --> OnlineAPI
     Nginx --> CoCreationAPI
@@ -74,12 +76,12 @@ A single ASGI application factory (`server/main.py`, served via `uvicorn server.
   - `pipelines/`: Async pipeline classes (`ChatPipeline`, `UnderstandingPipeline`, `ProposalPipeline`, `BinaryDiscoveryPipeline` [Policy 2 only], `TranslationPipeline` [independent generation & verification attempt budgets], `DGGuidePipeline`, `LevelPlanPipeline`). Zero `asyncio.run()`, zero daemon threads, zero ambient ContextVars.
   - **Strict Model Isolation**: DG guide and blueprint planning exclusively use DeepSeek configuration; co-creation chat, Policy 2 discovery, revision planning, and translation exclusively use Kimi/Moonshot configuration. Neither pipeline falls back to the other's credentials or consumes the other's internal context.
 - **Application Layer (`server/application/`)**: Native-async services with zero FastAPI imports organized into five subpackages:
-  - `rooms/` (`OnlineRoomService` + in-process ACID sync helpers), `study/` (`DGGuideService`, `LevelPlanService`, `StudyRecordsService`), `analytics/` (`DashboardService`), `sessions/` (`config.py` plus `lifecycle/`, `stage/`, and `read_model/` subpackages exporting `CoCreationAppSettings`, `SessionLifecycleService`, `StageService`, `SessionReadModelService`), and `dialogue/` (`MessageOrchestrator`, `ProposalService`, `IntentService`, `RecoveryService`, `TranslationService`, plus `handlers/{binary_discovery,challenge,ordinary,revision_card}.py`).
+  - `rooms/` (`OnlineRoomService` + in-process ACID sync helpers), `study/` (`DGGuideService`, `LevelPlanService`, `StudyRecordsService`), `analytics/` (`DashboardService` + pure data-driven `_survey_analytics.py` with zero FastAPI/SQL imports), `sessions/` (`config.py` plus `lifecycle/`, `stage/`, and `read_model/` subpackages exporting `CoCreationAppSettings`, `SessionLifecycleService`, `StageService`, `SessionReadModelService`), and `dialogue/` (`MessageOrchestrator`, `ProposalService`, `IntentService`, `RecoveryService`, `TranslationService`, plus `handlers/{binary_discovery,challenge,ordinary,revision_card}.py`).
 - **HTTP API Routers (`server/api/`)**: Thin async routers (`deps.py`, `schemas.py`, `routers/{health,online,study,dashboard,sessions,stage,dialogue,proposals,integrations,play_attempts}.py`):
   - **Active Matchmaking, DG & Study Routes**:
     - Online rooms (`online.py`): `POST /online/rooms`, `POST /online/rooms/join`, `GET /online/rooms/{match_id}`, `POST /online/rooms/{match_id}/{ready,leave,draft,challenge,result}`
-    - Initial design & study records (`study.py`): `POST /dg/guide/summary`, `POST /generate-level-plan`, `POST /record-survey-response`, `POST /record-level-start`, `POST /record-level-end`, `POST /record-journey-event`
-    - Matchmaking Dashboard & export (`dashboard.py`): `/frontend/`, `GET /matchmaking-records-data`, `GET /matchmaking-records`, `POST /verify-dashboard-password`, `POST /delete-online-match`, `POST /clear-matchmaking-records`, `GET /export/study-logs.jsonl`
+    - Initial design & study records (`study.py`): `POST /dg/guide/summary`, `POST /generate-level-plan`, `POST /record-survey-response` (single-transaction `BEGIN IMMEDIATE` `responseId` idempotency in `study_records`), `POST /record-level-start`, `POST /record-level-end`, `POST /record-journey-event`
+    - Matchmaking Dashboard, self-hosted surveys & export (`dashboard.py`, static mounts): `/frontend/`, `/survey/`, `GET /matchmaking-records-data` (incrementally attaches each match's `surveys` array using 100% shared formal association logic with `/export/matchmaking-research.jsonl`), `GET /matchmaking-records`, `GET /survey-analytics-data` (pure data-driven `_survey_analytics.py`, 4 scopes `active_matches` | `formal` | `standalone` | `all` defaulting to `active_matches`, sample SD `null` for `n < 2`, section `likertSummary` annotated `"Raw scores (unreversed)"` without hardcoded reverse scoring), `POST /verify-dashboard-password`, `POST /delete-online-match`, `POST /clear-matchmaking-records`, `GET /export/study-logs.jsonl`, `GET /export/matchmaking-research.jsonl` (preserves top-level `surveys` per NDJSON line without duplicating inside `line_obj.match`, strictly excluding `entrySource="standalone"`), `GET /export/surveys.csv` (UTF-8 BOM + CRLF wide-table CSV, pre-match fallback metadata fill for `match_id` / `room_code` / `player_slot`, pure numeric columns without quote prefixing, string-only formula-injection escaping)
     - Health checks (`health.py`): `GET /health`, `GET /ready`, `GET /cocreation/health`, `GET /cocreation/ready`
   - **Active Co-Creation Routes** (mounted at `/api/*` and aliased at `/cocreation/api/*`, with workbench static files at `/cocreation/`):
     - Sessions & auth (`sessions.py`): `POST /api/sessions`, `POST /api/demo-sessions`, `POST /api/sessions/{id}/browser-access`, `GET /api/sessions/{id}`, `PATCH /api/sessions/{id}/language`, `POST /api/sessions/{id}/translations/{lang}`, `POST /api/sessions/{id}/finalize`, `POST /api/sessions/{id}/intention`
@@ -101,23 +103,24 @@ A single ASGI application factory (`server/main.py`, served via `uvicorn server.
   - Telemetry: strictly append-only `audit_events` indexed on `(session_id, event_type, id)`
 - **Migrations & Export**:
   - Standalone CLI (`python -m server.persistence.migrations`) imports legacy JSONL study logs (`--import-study-logs`) and/or migrates legacy co-creation SQLite databases (`--migrate-cocreation-db`).
-  - `GET /export/study-logs.jsonl` streams study records in JSONL format for downstream research analysis.
+  - `GET /export/study-logs.jsonl` streams raw `study_records` in JSONL format; `GET /export/matchmaking-research.jsonl` streams per-match sanitized NDJSON combining match projections, room events, formal `design_sessions`, and associated non-standalone `surveys` (via explicit `StudyRepository` DI into `DashboardService` and shared `_survey_analytics.py` matching); `GET /export/surveys.csv` streams a filtered wide-table CSV (UTF-8 BOM + CRLF, active-match pre-match fallback metadata fill for `match_id` / `room_code` / `player_slot`, unquoted numeric columns, and string-only formula-injection escaping).
 
 ### 4. Frontend Workspace (`web/`) & Unity WebGL Bridge
 
 An npm workspace (`web/package.json`) using **Vite + TypeScript + Preact + `@preact/signals` + Zod**:
 
 - `web/packages/ui-core` (`@sokoban/ui-core`): Canonical pixel-adventure design tokens (`tokens.css`), accessible 12×10 `SokobanMap` (readonly + event-delegated editor), native `<dialog>` `ConfirmDialog`, `NoticeBanner`, typed `fetchJson` / `ApiError` / `validateSafeNavigationUrl`, and canonical `PROTOCOL_VERSION = 5` bridge schemas (`src/bridge/protocol.ts`).
-- `web/apps/dashboard`: Matchmaking Dashboard built to `web/dist/dashboard` and served at `/frontend/` (preserving static `/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`). Uses `AbortController` request cancellation, signals-based live filtering, and JSONL export links.
+- `web/apps/dashboard`: Matchmaking Dashboard built to `web/dist/dashboard` and served at `/frontend/` (preserving static `/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`). Provides a dual-tab workspace (`Matches & Sessions` with per-match side-by-side P1/P2 `MatchSurveysPanel` + `Survey Analytics` WJX-style statistics view via `SurveyAnalyticsView`, `SurveyQuestionChart`, and `SurveyResponsesTable`, plus a Developer tools `Export Surveys (CSV)` shortcut), independent `AbortController` request cancellation (`activeSurveyController`), signals-based live filtering, cross-tab refresh/delete sync, and JSONL/CSV export links.
 - `web/apps/cocreation`: Bilingual (`en`, `zh-CN`) Co-Creation Workbench built to `web/dist/cocreation` and served at `/cocreation/`. Features modular Signal workflows under `src/store/workflows/`, server-anchored monotonic deadline countdowns, Policy 2 binary choice cards, structured revision/intent/disagreement cards, and protocol v5 iframe messaging.
+- `web/apps/survey` (`@sokoban/survey`): Self-hosted bilingual (`zh-CN` / `en`) Pre-Match (`?type=pre`) and Post-Game (`?type=post`) questionnaire app driven by declarative `src/surveyDefinitions.ts` with lightweight Likert slider tick styling (`src/styles/survey.css`), built to `web/dist/survey` and served at `/survey/` with `no-cache` entry headers and query-preserving `/survey` redirects. Supports dual `entrySource` (`unity_matchmaking` vs `standalone`), hidden Unity tracking params, `localStorage` formal anti-duplicate protection, and idempotent `responseId` submission to `POST /record-survey-response`.
 - `web/apps/webgl-bridge`: Builds a self-contained IIFE bundle directly to `Assets/WebGLTemplates/SokobanPixel/TemplateData/sokoban-bridge.js`. Hosts the single `window` message router (strict origin allowlist rejecting `"null"`), deterministic iframe handshake, `ResizeObserver` lobby room-code overlay, native `<dialog>` dashboard password gate, and all `window.Sokoban*` / Unity `SendMessage` exports.
 
 ## Security & Authentication Model (Decision 5B)
 
 | Surface | Policy |
 | --- | --- |
-| Dashboard & research reads | Local/research convenience reads (`/frontend/`, `/matchmaking-records-data`, `/export/study-logs.jsonl`) remain open without client-side `?access=1` theater; WebGL template `DATA DASHBOARD` button retains the password gate (`POST /verify-dashboard-password`) for participant separation. |
-| Destructive Dashboard deletes | `POST /delete-online-match` and `POST /clear-matchmaking-records` require `X-Delete-Password`, verified in constant time via `safe_compare_digest`. |
+| Dashboard & research reads | Local/research convenience reads (`/frontend/`, `/matchmaking-records-data`, `/survey-analytics-data`, `/export/study-logs.jsonl`, `/export/matchmaking-research.jsonl`, `/export/surveys.csv`) remain open without client-side `?access=1` theater; CSV export applies string-only formula-injection escaping while preserving pure numeric columns; WebGL template `DATA DASHBOARD` button retains the password gate (`POST /verify-dashboard-password`) for participant separation. |
+| Destructive Dashboard deletes | `POST /delete-online-match` and `POST /clear-matchmaking-records` require `X-Delete-Password`, verified in constant time via `safe_compare_digest`; deletes cascade formal `design_sessions` while preserving `study_records` (Option A). |
 | Co-creation sessions | Hashed random per-session secrets (`secret_hash`, `access_token_hash`, `integration_token_hash`, `bootstrap_token_hash`); browsers use `HttpOnly` session cookies scoped cleanly; Unity uses scoped integration tokens; server logs a prominent startup warning whenever the default `TOKEN_SECRET` is active. |
 | Demo session hygiene | `algorithm_demo` sessions expire by TTL (`delete_expired_demo_sessions`) rather than wiping active concurrent demos or touching formal study rows. |
 | Reverse proxy & logs | `deploy/nginx-sokoban.conf` hardens `X-Forwarded-Proto` via trusted proxy CIDRs (falling back safely to `$scheme`). All error/log pipelines pass through `server.core.settings.redact_secrets`. |

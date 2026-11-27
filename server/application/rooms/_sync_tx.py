@@ -22,6 +22,93 @@ from ._helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _resolve_missing_room_session_id(
+    conn: sqlite3.Connection,
+    *,
+    match_id: str,
+    player_slot: int,
+    explicit_session_id: str | None = None,
+    event_payload: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Resolve co-creation session_id from explicit args, payload, or design_sessions."""
+    candidates: list[Any] = [explicit_session_id]
+    if isinstance(event_payload, Mapping):
+        candidates.extend(
+            (event_payload.get("sessionId"), event_payload.get("coCreationSessionId"))
+        )
+    for cand in candidates:
+        clean = str(cand or "").strip()
+        if clean:
+            return clean
+    try:
+        row = conn.execute(
+            "SELECT session_id FROM design_sessions "
+            "WHERE match_id = ? AND player_slot = ? AND is_demo = 0 "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (match_id, player_slot),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is not None:
+        resolved = str(row["session_id"] or "").strip()
+        if resolved:
+            return resolved
+    return None
+
+
+def _log_and_audit_missing_room(
+    conn: sqlite3.Connection,
+    *,
+    match_id: str,
+    player_slot: int,
+    sync_kind: str,
+    sync_event_type: str,
+    now_iso: str,
+    explicit_session_id: str | None = None,
+    event_payload: Mapping[str, Any] | None = None,
+    event_id: str | None = None,
+) -> None:
+    """Emit structured warning and metadata-only audit_events row on ROOM_NOT_FOUND."""
+    resolved_session_id = _resolve_missing_room_session_id(
+        conn,
+        match_id=match_id,
+        player_slot=player_slot,
+        explicit_session_id=explicit_session_id,
+        event_payload=event_payload,
+    )
+    logger.warning(
+        "Skipping room %s sync because online_rooms row was not found "
+        "(match_id=%s, player_slot=%s, event_type=%s, sync_kind=%s, session_id=%s)",
+        sync_kind,
+        match_id,
+        player_slot,
+        sync_event_type,
+        sync_kind,
+        resolved_session_id or "",
+    )
+    if resolved_session_id:
+        audit_payload: dict[str, Any] = {
+            "matchId": match_id,
+            "playerSlot": player_slot,
+            "syncEventType": sync_event_type,
+            "syncKind": sync_kind,
+            "reason": "ROOM_NOT_FOUND",
+        }
+        clean_ev_id = str(event_id or "").strip()
+        if clean_ev_id:
+            audit_payload["eventId"] = clean_ev_id
+        conn.execute(
+            "INSERT INTO audit_events(session_id, event_type, payload_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                resolved_session_id,
+                "room_sync_missing_room",
+                dump_json(audit_payload),
+                now_iso,
+            ),
+        )
+
+
 def record_cocreation_event_on_conn(
     conn: sqlite3.Connection,
     *,
@@ -43,16 +130,32 @@ def record_cocreation_event_on_conn(
         row = _RoomEventsMixin._load_room_for_write(conn, match_id)
     except PersistenceError as exc:
         if exc.code == "ROOM_NOT_FOUND":
-            logger.warning(
-                "Skipping room co-creation event sync because online_rooms row was not found "
-                "(match_id=%s, player_slot=%s)",
-                match_id,
-                player_slot,
+            sync_event_type = (
+                str(event_payload.get("eventType") or "").strip()
+                if isinstance(event_payload, Mapping)
+                else ""
+            ) or "unknown"
+            event_id = (
+                str(event_payload.get("eventId") or "").strip()
+                if isinstance(event_payload, Mapping)
+                else ""
+            ) or None
+            _log_and_audit_missing_room(
+                conn,
+                match_id=match_id,
+                player_slot=player_slot,
+                sync_kind="co-creation event",
+                sync_event_type=sync_event_type,
+                now_iso=now_iso,
+                event_payload=event_payload,
+                event_id=event_id,
             )
             return {
                 "status": "ok",
+                "applied": False,
                 "recorded": False,
                 "ignored": True,
+                "reason": "ROOM_NOT_FOUND",
                 "event": None,
             }, False
         map_persistence_error(exc)
@@ -194,13 +297,23 @@ def record_designer_intention_on_conn(
         row = _RoomEventsMixin._load_room_for_write(conn, match_id)
     except PersistenceError as exc:
         if exc.code == "ROOM_NOT_FOUND":
-            logger.warning(
-                "Skipping room designer intention sync because online_rooms row was not found "
-                "(match_id=%s, player_slot=%s)",
-                match_id,
-                player_slot,
+            _log_and_audit_missing_room(
+                conn,
+                match_id=match_id,
+                player_slot=player_slot,
+                sync_kind="designer_intention",
+                sync_event_type="designer_intention",
+                now_iso=now_iso,
+                explicit_session_id=clean_session_id or None,
+                event_id=clean_event_id or None,
             )
-            return {"status": "ok", "recorded": False, "ignored": True}
+            return {
+                "status": "ok",
+                "applied": False,
+                "recorded": False,
+                "ignored": True,
+                "reason": "ROOM_NOT_FOUND",
+            }
         map_persistence_error(exc)
     try:
         players: list[dict[str, Any]] = load_json(row["players_json"], [])

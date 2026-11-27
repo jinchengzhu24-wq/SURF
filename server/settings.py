@@ -318,6 +318,10 @@ class SokobanSettings(BaseSokobanSettings):
         return self.static_dir / "cocreation"
 
     @property
+    def survey_dist_dir(self) -> Path:
+        return self.static_dir / "survey"
+
+    @property
     def is_default_token_secret(self) -> bool:
         value = self.token_secret.get_secret_value().strip()
         return not value or value in _INSECURE_TOKEN_SECRETS

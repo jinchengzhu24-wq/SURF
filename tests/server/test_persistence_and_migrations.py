@@ -515,7 +515,7 @@ def test_migrations_cli_idempotent_import_and_legacy_db(tmp_path: Path) -> None:
     assert first["cocreation_migration"]["sessions"] == 1
     assert first["cocreation_migration"]["binary_topics"] == 1
     assert first["cocreation_migration"]["recovery_tasks"] == 1
-    assert first["cocreation_migration"]["idempotency_keys"] == 1
+    assert first["cocreation_migration"]["idempotency_keys"] == 2
 
     second = json.loads(subprocess.run(cmd, check=True, capture_output=True, text=True).stdout)
     assert second["study_import"]["study_inserted"] == 0
@@ -529,7 +529,8 @@ def test_migrations_cli_idempotent_import_and_legacy_db(tmp_path: Path) -> None:
     assert rm.session.final_intention["content"] == "goal"
     assert rm.versions[0].assessment is not None
     assert rm.turns[0].translations is not None and "zh-CN" in rm.turns[0].translations
-    assert OperationalRepository(db).get_key("s1", "binary_discovery", "bdk1") is not None
+    assert OperationalRepository(db).get_key("s1", "binary_choice", "bdk1") is not None
+    assert OperationalRepository(db).get_key("s1", "decide_proposal", "dk1") is not None
     with db.read_conn() as conn:
         study_row = conn.execute(
             "SELECT match_id, participant_id FROM study_records WHERE record_type = 'level_start'"
@@ -679,3 +680,651 @@ def test_reap_expired_rooms_protects_active_cocreation_sessions(tmp_path: Path) 
     sessions.update_session("sess-active", status="completed")
     assert rooms.reap_expired_rooms("2026-11-26T00:20:00Z") == 1
     assert rooms.get_room("m-active") is None
+
+
+async def test_migration_runtime_compatibility(
+    tmp_path: Path,
+) -> None:
+    """#9: Migrated 8010 DB rows match runtime schemas, digests, proposals, and read models."""
+    from server.api.deps import ensure_session_shape
+    from server.application.analytics._cocreation_projection import (
+        build_authoritative_player_projection,
+        load_formal_session_bundles,
+        serialize_session_research_bundle,
+    )
+    from server.application.sessions import (
+        CoCreationAppSettings,
+        SessionReadModelService,
+        request_digest,
+    )
+    from server.application.sessions.lifecycle.finalize import finalize_session_impl
+    from server.application.sessions.stage.stage_ops import restore_version_impl
+    from server.core.clock import FakeClock
+    from server.domain.errors import IdempotencyConflictError
+    from server.persistence._cocreation_migrate import migrate_cocreation_db
+
+    valid_rows = [
+        "############",
+        "#..........#",
+        "#..p..s..t.#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "############",
+    ]
+    match_id = "b" * 32
+    legacy_path = tmp_path / "legacy_full_compat.sqlite3"
+    conn = sqlite3.connect(legacy_path)
+    try:
+        conn.executescript(
+            _legacy_schema_sql()
+            + """
+            CREATE TABLE challenge_review_requests (
+                session_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(session_id, idempotency_key)
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO design_sessions(id, creation_key, access_hash, integration_hash, "
+            "bootstrap_hash, match_id, player_number, initial_draft_method, language, "
+            "language_locked_at, status, current_version_id, final_version_id, "
+            "created_at, updated_at) "
+            "VALUES ('s-mig','ck-mig','ah','ih','bh',?,1,'partial_completion','en',"
+            "'2026-11-26T00:00:00Z','active','v2',NULL,'2026-11-26T00:00:00Z','2026-11-26T00:05:00Z')",
+            (match_id,),
+        )
+        conn.execute(
+            "INSERT INTO level_versions(id, session_id, stage_number, parent_version_id, source, "
+            "rows_json, summary, diff_json, validation_json, idempotency_key, created_at) "
+            "VALUES ('v1','s-mig',1,NULL,'initial',?,'Stage 1','[]',"
+            "'{\"solvable\":true,\"minSteps\":3,\"minPushes\":1}','vk1','2026-11-26T00:00:00Z'),"
+            "('v2','s-mig',2,'v1','restored',?,'Continued from Stage 1','[]',"
+            "'{\"solvable\":true,\"minSteps\":3,\"minPushes\":1}','restore:restore-key-1','2026-11-26T00:02:00Z')",
+            (json.dumps(valid_rows), json.dumps(valid_rows)),
+        )
+        conn.execute(
+            "INSERT INTO llm_assessments(id, session_id, version_id, assistant_turn_id, "
+            "payload_json, prompt_version, created_at) "
+            "VALUES ('a-mig','s-mig','v1','t-open',?,'prompt-v3','2026-11-26T00:00:05Z')",
+            (
+                json.dumps(
+                    {
+                        "solutionSummary": "Direct push to goal in 3 steps.",
+                        "difficultyOpinion": "Very approachable opening.",
+                        "features": ["Direct corridor"],
+                        "suggestions": ["Add a side obstacle"],
+                        "satisfactionQuestion": None,
+                    }
+                ),
+            ),
+        )
+        cmp_guidance = json.dumps(
+            {
+                "move": "offer_perspective",
+                "challengeCard": {
+                    "challengeId": "chg-1",
+                    "status": "choice_pending",
+                    "relation": "different",
+                    "merit": "reasonable",
+                    "comparison": "Both priorities trade off.",
+                },
+            }
+        )
+        conn.execute(
+            "INSERT INTO conversation_turns(id, session_id, sequence_number, role, content, "
+            "language, version_id, request_id, guidance_json, created_at) VALUES "
+            "('t-open','s-mig',1,'assistant','Stage 1 is solvable.','en','v1','open-1',"
+            "'{\"move\":\"observe_stage\"}','2026-11-26T00:00:05Z'),"
+            "('t-offer','s-mig',2,'assistant','Try adding a choke wall.','en','v1','req-offer',"
+            "'{\"move\":\"offer_revision\",\"proposalOffer\":{\"summary\":\"Add a choke wall\"}}',"
+            "'2026-11-26T00:00:20Z'),"
+            "('t-chg','s-mig',3,'assistant','Why challenge this plan?','en','v1','req-chg',"
+            "'{\"move\":\"offer_perspective\","
+            "\"challengeCard\":{\"challengeId\":\"chg-1\",\"status\":\"reason_pending\"}}',"
+            "'2026-11-26T00:00:30Z'),"
+            "('t-reason','s-mig',4,'user','Keep the right corridor open','en','v1','req-reason',"
+            "NULL,'2026-11-26T00:00:40Z'),"
+            "('t-cmp','s-mig',5,'assistant','Both priorities trade off.','en','v1','req-reason',"
+            "?,'2026-11-26T00:00:45Z')",
+            (cmp_guidance,),
+        )
+        conn.execute(
+            "INSERT INTO change_proposals(id, session_id, base_version_id, proposed_rows_json, "
+            "summary, diff_json, validation_json, status, assistant_turn_id, idempotency_key, "
+            "created_at, decided_at) VALUES "
+            "('cp1','s-mig','v1',?,'Add a choke wall','[]','{\"solvable\":true}','accepted',"
+            "'t-offer','pk-cp1','2026-11-26T00:00:20Z','2026-11-26T00:01:00Z')",
+            (json.dumps(valid_rows),),
+        )
+        conn.executemany(
+            "INSERT INTO designer_decisions(id, session_id, version_id, proposal_id, "
+            "decision_type, reason, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "dd-prop", "s-mig", "v2", "cp1", "accept", "Good route",
+                    "dp-key-1", "2026-11-26T00:01:00Z",
+                ),
+                (
+                    "dd-rest", "s-mig", "v2", None, "restore", "Revert edit",
+                    "restore-key-1", "2026-11-26T00:02:00Z",
+                ),
+                (
+                    "dd-fin", "s-mig", "v2", None, "finalize", "",
+                    "fin-key-1", "2026-11-26T00:04:00Z",
+                ),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO revision_challenges(challenge_id, session_id, base_version_id, "
+            "source_proposal_turn_id, challenge_turn_id, status, current_reason_turn_id, "
+            "created_at, updated_at) VALUES "
+            "('chg-1','s-mig','v1','t-offer','t-chg','choice_pending','t-reason',"
+            "'2026-11-26T00:00:30Z','2026-11-26T00:00:45Z')"
+        )
+        review_result = {
+            "relation": "different",
+            "merit": "reasonable",
+            "comparison": "Both priorities trade off.",
+        }
+        conn.execute(
+            "INSERT INTO challenge_reason_reviews(review_id, session_id, challenge_id, "
+            "source_user_turn_id, message_key, status, attempts_used, failure_code, "
+            "result_json, created_at, updated_at) VALUES "
+            "('rev-1','s-mig','chg-1','t-reason','req-reason','resolved',1,NULL,?,"
+            "'2026-11-26T00:00:40Z','2026-11-26T00:00:45Z')",
+            (json.dumps(review_result),),
+        )
+        conn.execute(
+            "INSERT INTO challenge_review_requests(session_id, idempotency_key, review_id, "
+            "status, result_json, created_at, updated_at) VALUES "
+            "('s-mig','crr-key-1','rev-1','completed',?,"
+            "'2026-11-26T00:00:40Z','2026-11-26T00:00:45Z')",
+            (json.dumps(review_result),),
+        )
+        # Audit events: pending->done binary receipt, restore, finalize, feedback, failed msg
+        audits = [
+            (
+                "s-mig",
+                "stage_restored",
+                json.dumps(
+                    {
+                        "versionId": "v2",
+                        "restoredFromVersionId": "v1",
+                        "restoredFromStageNumber": 1,
+                        "replacedVersionId": "v1-prev",
+                        "replacedStageNumber": 2,
+                        "baseVersionId": "v1-prev",
+                    }
+                ),
+                "2026-11-26T00:02:00Z",
+            ),
+            (
+                "s-mig",
+                "finalization_request_committed",
+                json.dumps(
+                    {
+                        "idempotencyKey": "fin-key-1",
+                        "request": {"baseVersionId": "v2", "rowsHash": None},
+                        "finalVersionId": "v2",
+                        "deadlineStageVersionId": None,
+                    }
+                ),
+                "2026-11-26T00:04:00Z",
+            ),
+            (
+                "s-mig",
+                "binary_discovery_receipt",
+                json.dumps(
+                    {
+                        "key": "bc-key-1",
+                        "request": {
+                            "kind": "choice",
+                            "topicId": "top-1",
+                            "questionId": "q1",
+                            "choiceId": "cA",
+                            "baseVersionId": "v1",
+                            "idempotencyKey": "bc-key-1",
+                            "displayLanguage": "en",
+                        },
+                        "status": "pending",
+                    }
+                ),
+                "2026-11-26T00:01:10Z",
+            ),
+            (
+                "s-mig",
+                "binary_discovery_receipt",
+                json.dumps(
+                    {
+                        "key": "bc-key-1",
+                        "request": {
+                            "kind": "choice",
+                            "topicId": "top-1",
+                            "questionId": "q1",
+                            "choiceId": "cA",
+                            "baseVersionId": "v1",
+                            "idempotencyKey": "bc-key-1",
+                            "displayLanguage": "en",
+                        },
+                        "status": "done",
+                    }
+                ),
+                "2026-11-26T00:01:15Z",
+            ),
+            (
+                "s-mig",
+                "intent_hypothesis_feedback_applied",
+                json.dumps(
+                    {
+                        "idempotencyKey": "if-key-1",
+                        "hypothesisId": "h1",
+                        "versionId": "v1",
+                        "outcome": "applied",
+                        "request": {
+                            "hypothesisId": "h1",
+                            "action": "confirm",
+                            "candidateText": None,
+                            "selectedHypothesisId": None,
+                            "sourceTurnId": "t-open",
+                            "baseVersionId": "v1",
+                        },
+                    }
+                ),
+                "2026-11-26T00:01:20Z",
+            ),
+            (
+                "s-mig",
+                "question_feedback_applied",
+                json.dumps(
+                    {
+                        "idempotencyKey": "qf-key-1",
+                        "questionId": "oq1",
+                        "versionId": "v1",
+                        "action": "ignore",
+                        "outcome": "applied",
+                        "request": {
+                            "questionId": "oq1",
+                            "action": "ignore",
+                            "baseVersionId": "v1",
+                        },
+                    }
+                ),
+                "2026-11-26T00:01:25Z",
+            ),
+            (
+                "s-mig",
+                "message_generation_failed",
+                json.dumps(
+                    {
+                        "messageKey": "mf-key-1",
+                        "baseVersionId": "v1",
+                        "code": "UPSTREAM_TIMEOUT",
+                        "requestSignature": {
+                            "action": "none",
+                            "baseVersionId": "v1",
+                            "content": "Help me tighten the corridor",
+                            "requestProposal": False,
+                        },
+                    }
+                ),
+                "2026-11-26T00:01:30Z",
+            ),
+        ]
+        conn.executemany(
+            "INSERT INTO audit_events(session_id, event_type, payload_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            audits,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    target_db = SQLiteDatabase(tmp_path / "unified_compat.sqlite3")
+    stats1 = migrate_cocreation_db(target_db, legacy_path)
+    assert stats1["sessions"] == 1
+    assert stats1["challenges"] == 1
+    assert stats1["challenge_review_requests"] == 1
+
+    # Idempotency check: second migration run inserts zero new rows.
+    stats2 = migrate_cocreation_db(target_db, legacy_path)
+    assert stats2["sessions"] == 0
+    assert stats2["audit_events"] == 0
+    assert stats2["challenge_review_requests"] == 0
+    assert stats2["idempotency_keys"] == 0
+
+    sessions_repo = SessionsRepository(target_db)
+    dialogue_repo = DialogueRepository(target_db)
+    op_repo = OperationalRepository(target_db)
+
+    rm = sessions_repo.load_session_read_model("s-mig")
+    assert rm is not None
+
+    # 1. Flat level_versions.assessment_json with optional metadata preserved
+    v1_rec = next(v for v in rm.versions if v.version_id == "v1")
+    assert v1_rec.assessment is not None
+    assert "payload" not in v1_rec.assessment
+    assert v1_rec.assessment["solutionSummary"] == "Direct push to goal in 3 steps."
+    assert v1_rec.assessment["difficultyOpinion"] == "Very approachable opening."
+    assert v1_rec.assessment["features"] == ["Direct corridor"]
+    assert v1_rec.assessment["assistantTurnId"] == "t-open"
+    assert v1_rec.assessment["promptVersion"] == "prompt-v3"
+
+    # 2. Runtime-compatible revision_challenges.reviews_json + migrated challenge_review_requests
+    assert len(rm.challenges) == 1
+    chg = rm.challenges[0]
+    assert chg.status == "awaiting_choice"
+    assert len(chg.reviews) == 1
+    rev = chg.reviews[0]
+    assert rev["reasonTurnId"] == "t-reason"
+    assert rev["reason"] == "Keep the right corridor open"
+    assert rev["relation"] == "different"
+    assert rev["merit"] == "reasonable"
+    assert rev["comparison"] == "Both priorities trade off."
+    assert rev["createdAt"] == "2026-11-26T00:00:40Z"
+    assert rev["reviewId"] == "rev-1"
+    assert rev["reviewRequests"][0]["idempotencyKey"] == "crr-key-1"
+
+    migrated_crr_audits = [
+        ev
+        for ev in dialogue_repo.list_events("s-mig")
+        if ev.event_type == "challenge_review_request_migrated"
+    ]
+    assert len(migrated_crr_audits) == 1
+    assert migrated_crr_audits[0].payload["idempotencyKey"] == "crr-key-1"
+    assert migrated_crr_audits[0].payload["reviewId"] == "rev-1"
+    assert migrated_crr_audits[0].payload["challengeId"] == "chg-1"
+
+    # 3. change_proposals.decision uses canonical "decision" key (and dialogue_repo.supersede too)
+    assert len(rm.proposals) == 1
+    assert rm.proposals[0].decision is not None
+    assert rm.proposals[0].decision["decision"] == "accept"
+    assert "decisionType" not in rm.proposals[0].decision
+
+    dialogue_repo.insert_proposal(
+        proposal_id="cp-pend",
+        session_id="s-mig",
+        assistant_turn_id="t-offer",
+        base_version_id="v1",
+        status="pending",
+        proposal={"summary": "Pending edit"},
+        created_at="2026-11-26T00:05:00Z",
+    )
+    superseded_ids = dialogue_repo.supersede_pending_proposals(
+        "s-mig", decided_at="2026-11-26T00:05:05Z", reason="stage_saved"
+    )
+    assert superseded_ids == ["cp-pend"]
+    sup_prop = dialogue_repo.get_proposal("s-mig", "cp-pend")
+    assert sup_prop is not None and sup_prop.decision is not None
+    assert sup_prop.decision["decision"] == "superseded"
+    assert "decisionType" not in sup_prop.decision
+
+    # 4. Aligned idempotency_keys scopes AND exact runtime request_digest parity
+    bc_key = op_repo.get_key("s-mig", "binary_choice", "bc-key-1")
+    assert bc_key is not None
+    assert bc_key.status == "completed"
+    assert bc_key.request_hash == request_digest(
+        {
+            "topicId": "top-1",
+            "questionId": "q1",
+            "choiceId": "cA",
+            "baseVersionId": "v1",
+            "displayLanguage": "en",
+        }
+    )
+    assert op_repo.get_key("s-mig", "binary_discovery", "bc-key-1") is None
+
+    rest_key = op_repo.get_key("s-mig", "restore_version", "restore-key-1")
+    assert rest_key is not None
+    assert rest_key.status == "completed"
+    assert rest_key.request_hash == request_digest(
+        {"versionId": "v1", "baseVersionId": "v1-prev"}
+    )
+    assert rest_key.response is not None and rest_key.response.get("reason") == "Revert edit"
+    assert op_repo.get_key("s-mig", "restore", "restore-key-1") is None
+
+    dp_key = op_repo.get_key("s-mig", "decide_proposal", "dp-key-1")
+    assert dp_key is not None
+    assert dp_key.status == "completed"
+    assert dp_key.request_hash == request_digest(
+        {
+            "proposalId": "cp1",
+            "decision": "accept",
+            "base": "v1",
+            "reason": "Good route",
+        }
+    )
+
+    fin_key = op_repo.get_key("s-mig", "finalize", "fin-key-1")
+    assert fin_key is not None
+    assert fin_key.status == "completed"
+    assert fin_key.request_hash == request_digest({"baseVersionId": "v2", "rows": None})
+
+    if_key = op_repo.get_key("s-mig", "intent_feedback", "if-key-1")
+    assert if_key is not None
+    assert if_key.status == "completed"
+    assert if_key.request_hash == request_digest(
+        {
+            "hypothesisId": "h1",
+            "action": "confirm",
+            "baseVersionId": "v1",
+            "candidateText": "",
+            "sourceTurnId": "t-open",
+        }
+    )
+
+    qf_key = op_repo.get_key("s-mig", "question_feedback", "qf-key-1")
+    assert qf_key is not None
+    assert qf_key.status == "completed"
+    assert qf_key.request_hash == request_digest(
+        {"questionId": "oq1", "action": "ignore", "baseVersionId": "v1"}
+    )
+
+    mf_key = op_repo.get_key("s-mig", "message", "mf-key-1")
+    assert mf_key is not None
+    assert mf_key.status == "failed"
+    assert mf_key.request_hash == request_digest(
+        {
+            "action": "send",
+            "baseVersionId": "v1",
+            "content": "Help me tighten the corridor",
+            "requestProposal": False,
+            "assistantTurnId": None,
+            "proposalId": None,
+            "challengeId": None,
+            "challengeChoice": None,
+            "exitChallenge": False,
+        }
+    )
+
+    # 5. End-to-end runtime readers & idempotent replay through runtime services
+    mig_settings = CoCreationAppSettings(token_secret="unit-test-secret")
+    mig_clock = FakeClock()
+    await restore_version_impl(
+        db=target_db,
+        sessions_repo=sessions_repo,
+        operational_repo=op_repo,
+        room_sync=None,
+        clock=mig_clock,
+        session=rm.session,
+        version_id="v1",
+        base_version_id="v1-prev",
+        idempotency_key="restore-key-1",
+    )
+    with pytest.raises(IdempotencyConflictError):
+        await restore_version_impl(
+            db=target_db,
+            sessions_repo=sessions_repo,
+            operational_repo=op_repo,
+            room_sync=None,
+            clock=mig_clock,
+            session=rm.session,
+            version_id="v2",
+            base_version_id="v1-prev",
+            idempotency_key="restore-key-1",
+        )
+    await finalize_session_impl(
+        db=target_db,
+        operational_repo=op_repo,
+        room_sync=None,
+        clock=mig_clock,
+        settings=mig_settings,
+        session=rm.session,
+        base_version_id="v2",
+        idempotency_key="fin-key-1",
+        rows=None,
+    )
+
+    read_model_svc = SessionReadModelService(
+        sessions_repo,
+        dialogue_repo,
+        op_repo,
+        clock=mig_clock,
+        settings=mig_settings,
+    )
+    session_payload = ensure_session_shape(await read_model_svc.get_session_payload("s-mig"))
+    assert session_payload["sessionId"] == "s-mig"
+    assert len(session_payload["versions"]) == 2
+    assert len(session_payload["turns"]) == 5
+
+    bundles = load_formal_session_bundles(target_db, match_ids={match_id})
+    assert (match_id, 1) in bundles
+    flow, _, _ = build_authoritative_player_projection(
+        bundles[(match_id, 1)],
+        match_id=match_id,
+        room_code="MIG123",
+        player_number=1,
+        study_session_id="study-mig",
+    )
+    assert any(ev.get("nodeType") == "player_challenge" for ev in flow)
+    exported = serialize_session_research_bundle(bundles[(match_id, 1)])
+    rev_reason = exported["revisionChallenges"][0]["reviews"][0]["reason"]
+    assert rev_reason == "Keep the right corridor open"
+    sol_summary = exported["levelVersions"][0]["assessment"]["solutionSummary"]
+    assert sol_summary == "Direct push to goal in 3 steps."
+    assert exported["changeProposals"][0]["decision"]["decision"] == "accept"
+
+
+async def test_delete_expired_demo_sessions_respects_ttl_for_null_expires_at(
+    tmp_path: Path,
+) -> None:
+    """#10: NULL expires_at demo sessions (e.g. migrated) survive within TTL and purge after TTL."""
+    from types import SimpleNamespace
+
+    from server.application.sessions import (
+        CoCreationAppSettings,
+        SessionLifecycleService,
+        SessionReadModelService,
+    )
+    from server.core.clock import FakeClock
+    from server.persistence._cocreation_migrate import migrate_cocreation_db
+
+    valid_rows = [
+        "############",
+        "#..........#",
+        "#..p..s..t.#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "#..........#",
+        "############",
+    ]
+    clock = FakeClock()  # 2026-01-01T00:00:00Z
+    t0_iso = clock.utc_now()
+
+    legacy_path = tmp_path / "legacy_demo.sqlite3"
+    conn = sqlite3.connect(legacy_path)
+    try:
+        conn.executescript(_legacy_schema_sql())
+        conn.execute(
+            "INSERT INTO design_sessions(id, creation_key, access_hash, integration_hash, "
+            "bootstrap_hash, demo_mode, initial_draft_method, language, status, "
+            "created_at, updated_at) VALUES "
+            "('demo-mig-recent','ck-dr','a1','i1','b1',1,'algorithm_demo','en','active',?,?),"
+            "('formal-old','ck-fo','a2','i2','b2',0,'partial_completion','en','active',"
+            "'2025-01-01T00:00:00Z','2025-01-01T00:00:00Z')",
+            (t0_iso, t0_iso),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db = SQLiteDatabase(tmp_path / "demo_ttl.sqlite3")
+    migrate_cocreation_db(db, legacy_path)
+
+    sessions_repo = SessionsRepository(db)
+    dialogue_repo = DialogueRepository(db)
+    op_repo = OperationalRepository(db)
+
+    # Confirm migrated demo session indeed has expires_at=NULL
+    migrated_demo = sessions_repo.get_session("demo-mig-recent")
+    assert migrated_demo is not None and migrated_demo.is_demo is True
+    assert migrated_demo.expires_at is None
+
+    # Seed one already-expired explicit demo and one still-active explicit demo
+    sessions_repo.create_session(
+        session_id="demo-exp-explicit",
+        mode="algorithm_demo",
+        language="en",
+        access_token_hash="a3",
+        integration_token_hash="i3",
+        bootstrap_token_hash="b3",
+        created_at=t0_iso,
+        is_demo=True,
+        expires_at="2026-01-01T00:05:00Z",
+    )
+    sessions_repo.create_session(
+        session_id="demo-active-explicit",
+        mode="algorithm_demo",
+        language="en",
+        access_token_hash="a4",
+        integration_token_hash="i4",
+        bootstrap_token_hash="b4",
+        created_at=t0_iso,
+        is_demo=True,
+        expires_at="2026-01-01T01:00:00Z",
+    )
+
+    settings = CoCreationAppSettings(token_secret="unit-test-secret", demo_ttl_seconds=1800)
+    read_model = SessionReadModelService(
+        sessions_repo, dialogue_repo, op_repo, clock=clock, settings=settings
+    )
+    lifecycle = SessionLifecycleService(
+        db,
+        sessions_repo,
+        op_repo,
+        read_model,
+        clock=clock,
+        settings=settings,
+        demo_level_generator=lambda: SimpleNamespace(rows=tuple(valid_rows), seed=1),
+    )
+
+    # Advance 10 minutes (within 30-min demo TTL): explicit expired demo is purged,
+    # migrated NULL-expiry demo & active explicit demo & old formal session ALL survive!
+    clock.advance(600.0)
+    await lifecycle.create_demo_session(language="en", idempotency_key="new-demo-1")
+
+    assert sessions_repo.get_session("demo-exp-explicit") is None
+    assert sessions_repo.get_session("demo-mig-recent") is not None
+    assert sessions_repo.get_session("demo-active-explicit") is not None
+    assert sessions_repo.get_session("formal-old") is not None
+
+    # Advance another 25 minutes (total 35 min > 30 min TTL): migrated NULL-expiry demo IS purged,
+    # while formal session (is_demo=0) is NEVER touched!
+    clock.advance(1500.0)
+    await lifecycle.create_demo_session(language="en", idempotency_key="new-demo-2")
+
+    assert sessions_repo.get_session("demo-mig-recent") is None
+    assert sessions_repo.get_session("formal-old") is not None
+
